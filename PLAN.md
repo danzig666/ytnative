@@ -15,31 +15,37 @@ crates, **ytnative is GPL-3.0**, and the source must be published next to every 
 
 ---
 
-## Status (2026-11-12, end of day): code complete for phases 0–6, awaiting TV validation
+## Status (2026-11-12, late): code complete for phases 0–7, awaiting TV validation
 
-Everything below was implemented today. It builds for the TV and passes the symbol check against
-the C3's libraries. The engine has 72 unit tests plus live tests against YouTube; the app's
-screens are **not yet run on the TV** (the TV is off-limits until the user watches).
+Everything below builds for the TV (stub-linked, no LG files needed), passes `cargo xtask symcheck`
+against the C3's libraries, and the screens were driven in the Windows simulator. **Nothing new has
+run on the TV yet** (the TV is off-limits until the user watches). yt-core: 115 unit tests plus live
+tests against YouTube.
 
 | Phase | State |
 |---|---|
 | 0 Foundations | ✅ workspace, `cargo xtask` (build/ipk/install/deploy/run/key/shot/logs/symcheck), own IPK writer, plx UI core vendored, app shell on the C3, OLED idle blank |
-| 1 Engine core | ✅ feeds + paging, search + suggestions + filters, watch info, chapters, captions (manual/auto, translate), storyboards, comments, client ring (VISIONOS → ANDROID_VR → IOS), live resolution |
-| 2 MVP UI | ✅ sidebar sections (TV guide topics), grids with infinite scroll, channel/playlist/results pages, search keyboard, sign-in with code + QR, player (engine A, DASH 720–1080p) |
-| 3 Player depth | ✅ HUD, seek + storyboard preview, chapters, captions, SponsorBlock (per-category skip/notify/ask + markers), dislikes, speed, autoplay/repeat/queue, Shorts up/down, comments, like/subscribe/Watch later, card menus (Not interested, Remove from history…), DeArrow |
-| 4 Engine B / 4K / live / SABR | 🟡 SABR client works on the PC (VISIONOS, H.264/VP9/Opus); live via filtered HLS (needs TV check); Feed engine (Starfish, VP9/AV1/4K) in progress |
-| 5 Settings & accounts | ✅ all settings pages, multi-account (switch/add/remove), content filters, blocked channels, sidebar customisation, watch-history pings, resume |
-| 6 Remote | ✅ Link with TV code (Lounge): pairing code, casts, play/pause/seek/stop, D-pad; DIAL server written (untested on webOS) |
-| 7 Hardening | ⏳ Windows simulator in progress; TV validation pass; JS/PO-token fallbacks not needed yet |
+| 1 Engine core | ✅ feeds + paging, search + suggestions + filters, watch info, chapters, captions, storyboards, comments, client profiles (data, remotely overridable) + canary, live resolution |
+| 2 MVP UI | ✅ sidebar, grids and shelf rows, channel/playlist/results pages, search keyboard + recent searches, sign-in with code + QR, player (engine A, DASH 720–1080p) |
+| 3 Player depth | ✅ HUD, seek + storyboard preview, chapters, captions, SponsorBlock, dislikes, speed, autoplay/repeat/queue, Shorts, comments, like/subscribe/Watch later, card menus, DeArrow, sleep timer, zoom |
+| 4 Engine B / 4K / live / SABR | ✅ code: Feed engine over Starfish (H.264/VP9/AV1, up to 4K, demux tested frame-exact against ffprobe), "Playback engine" setting hands 4K/VP9/AV1 videos to it; SABR client; live via filtered HLS. All need the TV |
+| 5 Settings & accounts | ✅ all settings pages, multi-account with passwords, settings PIN, channel groups (USB import NewPipe/Grayjay/PocketTube), pinned sidebar items, backup/restore, local resume, interface translations (hu, de, es, fr, ru), accent colour, proxy + DNS-over-HTTPS, colour-button remapping |
+| 6 Remote | ✅ Link with TV code (Lounge) + DIAL cast-menu discovery (DIAL untested on webOS) |
+| 7 Hardening | ✅ Windows simulator (`cargo xtask sim`), link stubs + DT_NEEDED check, crash tracer + `cargo xtask crash`, `fwcompat`, CI + release workflows, Homebrew Channel manifest |
 
-**Known gaps:** translated captions get HTTP 429 from YouTube (likely needs a PO token); the
-signed-in TV client's SABR needs a PO token (we use the anonymous clients for media instead);
-playlist create/delete only work through the embedded TV client.
+**Not done / out of reach:**
+- PO token / BotGuard: needed for translated captions (HTTP 429) and the signed-in TV client's
+  SABR. Not implemented; the anonymous clients are used for media instead.
+- Notifications: the TV client gets HTTP 400. Trending: YouTube retired the page (off by default).
+- Age-restricted and made-for-kids videos don't play anonymously.
+- Google Drive backup needs the user's own Google Cloud OAuth client (USB/app-storage backup works).
+- UI scale, card styles, context-menu ordering, voice search, live DVR seek: not started.
+- Engine B needs `libplayerAPIs.so.1` at launch (present on every known webOS release).
 
-**TV validation checklist (when the user is watching):** sign-in screen + QR; sidebar sections
-load; search keyboard + filters; player HUD, seek preview, captions, SponsorBlock skip; like /
-subscribe / Watch later; comments; settings persist; Lounge pairing from a phone; live stream via
-HLS; Feed engine 4K VP9/AV1; idle blank still works.
+**TV validation checklist (when the user is watching):** sign-in + QR; sidebar sections and shelf
+rows; search; player HUD, seek preview, captions, SponsorBlock; like / subscribe / Watch later;
+comments; settings persist; Lounge pairing + DIAL from a phone; live via HLS; engine B (see
+`docs/feed-engine.md`, 12 steps); colour buttons; crash tracer (`cargo xtask crash`); idle blank.
 
 ## 1. What we start from
 
