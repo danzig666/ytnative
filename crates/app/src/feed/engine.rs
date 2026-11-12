@@ -60,6 +60,8 @@ pub struct Plan {
     pub window_id: Option<String>,
     pub start_ms: u64,
     pub duration_ms: u64,
+    /// Fresh URLs for an expired or refused stream.
+    pub refresh: Option<source::Refresh>,
 }
 
 pub struct Shared {
@@ -247,11 +249,11 @@ fn spawn_fetchers(plan: &Plan, video: &Arc<Lane>, audio: &Arc<Lane>, ctl: &Arc<S
     };
     match &plan.transport {
         Transport::Direct => {
-            let (f, ua, l, c) = (plan.video_fmt.clone(), plan.user_agent.clone(), video.clone(), ctl.clone());
-            spawn("feed-v", Box::new(move || source::run_ranged(f, ua, l, c, Kind::Video)));
+            let (f, ua, l, c, rf) = (plan.video_fmt.clone(), plan.user_agent.clone(), video.clone(), ctl.clone(), plan.refresh.clone());
+            spawn("feed-v", Box::new(move || source::run_ranged(f, ua, l, c, Kind::Video, rf)));
             if let Some(af) = plan.audio_fmt.clone() {
-                let (ua, l, c) = (plan.user_agent.clone(), audio.clone(), ctl.clone());
-                spawn("feed-a", Box::new(move || source::run_ranged(af, ua, l, c, Kind::Audio)));
+                let (ua, l, c, rf) = (plan.user_agent.clone(), audio.clone(), ctl.clone(), plan.refresh.clone());
+                spawn("feed-a", Box::new(move || source::run_ranged(af, ua, l, c, Kind::Audio, rf)));
             }
         }
         Transport::Live => {

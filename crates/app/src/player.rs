@@ -130,6 +130,7 @@ pub struct Player {
 
 #[cfg(not(windows))]
 struct Handoff {
+    session: Arc<Mutex<Option<yt_core::session::Session>>>,
     video_id: String,
     resolved: yt_core::streams::Resolved,
     start_ms: Option<u64>,
@@ -188,7 +189,12 @@ impl Player {
         extras: ExtrasPrefs,
         start_ms: Option<u64>,
     ) {
+        let refused = matches!(&self.status.lock().unwrap().phase, Phase::Failed(e) if e.contains("HTTP 403") || e.contains("HTTP 410"));
         self.stop();
+        if refused {
+            crate::log("player: the last video's stream was refused; starting from a fresh session");
+            *session.lock().unwrap() = None;
+        }
         *self.status.lock().unwrap() = Status { phase: Phase::Resolving, rate: 1.0, ..Default::default() };
         let Some(create) = sdl_sym::<CreateFn>("SDL_webOSCreateExportedWindow") else {
             self.fail("no SDL exported-window support on this TV");
@@ -239,7 +245,22 @@ impl Player {
             let prefs = self.feed_prefs.clone().unwrap_or_else(|| crate::feed::Prefs::new(2160, crate::feed::VideoCodec::Vp9));
             self.feed.status = self.status.clone();
             let wid = self.window.as_ref().map(|w| w.to_string_lossy().into_owned());
-            if let Err(e) = self.feed.start(h.video_id, h.resolved, prefs, wid, h.start_ms) {
+            let (sess, vid) = (h.session.clone(), h.video_id.clone());
+            let refresh = crate::feed::source::refresher(move || {
+                crate::log(&format!("player: {vid}: stream URL refused; resolving again with a fresh session"));
+                let fresh = yt_core::session::Session::new().and_then(|mut s| s.resolve(&vid).map(|r| (s, r)));
+                match fresh {
+                    Ok((s, r)) => {
+                        *sess.lock().unwrap() = Some(s);
+                        Some(r)
+                    }
+                    Err(e) => {
+                        crate::log(&format!("player: re-resolve failed: {e:#}"));
+                        None
+                    }
+                }
+            });
+            if let Err(e) = self.feed.start(h.video_id, h.resolved, prefs, wid, h.start_ms, Some(refresh)) {
                 self.fail(&format!("engine B: {e:#}"));
             }
         }
@@ -382,7 +403,7 @@ fn run(
     luna: &'static Luna,
     video_id: &str,
     window_id: &str,
-    session: &Mutex<Option<yt_core::session::Session>>,
+    session: &Arc<Mutex<Option<yt_core::session::Session>>>,
     status: &Arc<Mutex<Status>>,
     media_id: &Arc<Mutex<Option<String>>>,
     prefs: yt_core::streams::Prefs,
@@ -423,7 +444,7 @@ fn run(
     if let Some((fp, prefer, slot)) = feed {
         if wants_feed(&resolved, &fp, prefer) {
             crate::log("player: handing the video to engine B (Feed)");
-            *slot.lock().unwrap() = Some(Handoff { video_id: video_id.to_string(), resolved, start_ms });
+            *slot.lock().unwrap() = Some(Handoff { session: session.clone(), video_id: video_id.to_string(), resolved, start_ms });
             plx_machine::present::wake_from_worker();
             // Let the main thread start it before the extras land in the shared status.
             for _ in 0..60 {

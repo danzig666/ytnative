@@ -103,6 +103,7 @@ impl FeedPlayer {
         prefs: Prefs,
         window_id: Option<String>,
         start_ms: Option<u64>,
+        refresh: Option<source::Refresh>,
     ) -> anyhow::Result<()> {
         self.stop();
         let choice = Self::choose(&resolved, &prefs).ok_or_else(|| anyhow::anyhow!("no format engine B can play"))?;
@@ -154,6 +155,7 @@ impl FeedPlayer {
             window_id: Some(window_id),
             start_ms: start_ms.filter(|ms| *ms > 2000).unwrap_or(0),
             duration_ms,
+            refresh,
         };
         let shared = Shared::new(self.status.clone());
         let sh = shared.clone();

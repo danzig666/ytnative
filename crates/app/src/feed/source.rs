@@ -187,8 +187,48 @@ fn frame_all(framer: &Framer, aus: Vec<AccessUnit>) -> Vec<Unit> {
         .collect()
 }
 
+/// Resolves the playing video again (fresh stream URLs) when the old ones are refused.
+pub type Refresh = Arc<dyn Fn() -> Option<yt_core::streams::Resolved> + Send + Sync>;
+
+/// Wraps `f` so the video and audio fetchers share one re-resolve: a result younger than a minute
+/// is handed out again instead of resolving twice.
+pub fn refresher(f: impl Fn() -> Option<yt_core::streams::Resolved> + Send + Sync + 'static) -> Refresh {
+    let last: Mutex<Option<(std::time::Instant, yt_core::streams::Resolved)>> = Mutex::new(None);
+    Arc::new(move || {
+        let mut g = last.lock().unwrap();
+        if let Some((t, r)) = &*g {
+            if t.elapsed() < Duration::from_secs(60) {
+                return Some(r.clone());
+            }
+        }
+        let r = f()?;
+        *g = Some((std::time::Instant::now(), r.clone()));
+        Some(r)
+    })
+}
+
+/// The URL was refused or has expired (googlevideo answers 403; 410 for a gone URL).
+fn url_refused(e: &str) -> bool {
+    e.contains("HTTP 403") || e.contains("HTTP 410")
+}
+
+/// Points `track` at a freshly resolved URL for the same itag. False when that is not possible.
+fn renew_url(track: &mut RangedTrack, refresh: &Option<Refresh>) -> bool {
+    let Some(refresh) = refresh else { return false };
+    let Some(r) = refresh() else { return false };
+    let Some(f) = r.adaptive.iter().find(|f| f["itag"].as_i64() == Some(track.itag as i64)) else {
+        crate::log(&format!("feed: itag {} is gone after re-resolving", track.itag));
+        return false;
+    };
+    let Some(url) = f["url"].as_str() else { return false };
+    track.url = url.to_string();
+    track.user_agent = r.client.user_agent().to_string();
+    crate::log(&format!("feed: itag {}: continuing with a fresh URL", track.itag));
+    true
+}
+
 /// Ranged fetcher for one direct-URL format.
-pub fn run_ranged(fmt: serde_json::Value, ua: String, lane: Arc<Lane>, ctl: Arc<SourceCtl>, kind: Kind) {
+pub fn run_ranged(fmt: serde_json::Value, ua: String, lane: Arc<Lane>, ctl: Arc<SourceCtl>, kind: Kind, refresh: Option<Refresh>) {
     let http = match reqwest::blocking::Client::builder().timeout(Duration::from_secs(20)).build() {
         Ok(h) => h,
         Err(e) => return lane.fail(format!("http: {e}")),
@@ -209,6 +249,7 @@ pub fn run_ranged(fmt: serde_json::Value, ua: String, lane: Arc<Lane>, ctl: Arc<
     let mut seg = track.segment_at(target - lead);
     let mut trim = Trim { target: Some(target) };
     let mut failures = 0;
+    let mut renewals = 0;
     while !ctl.stop.load(Relaxed) {
         let (g, t) = ctl.current();
         if g != gen {
@@ -238,8 +279,14 @@ pub fn run_ranged(fmt: serde_json::Value, ua: String, lane: Arc<Lane>, ctl: Arc<
                 seg += 1;
             }
             Err(e) => {
-                failures += 1;
                 crate::log(&format!("feed: itag {} segment {seg}: {e:#}", track.itag));
+                if url_refused(&format!("{e:#}")) && renewals < 3 {
+                    renewals += 1;
+                    if renew_url(&mut track, &refresh) {
+                        continue;
+                    }
+                }
+                failures += 1;
                 if failures >= 5 {
                     return lane.fail(format!("itag {}: {e:#}", track.itag));
                 }
