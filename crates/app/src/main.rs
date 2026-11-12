@@ -6,6 +6,7 @@
 mod host;
 mod images;
 mod input;
+mod lounge;
 mod ls2;
 mod player;
 mod remote;
@@ -115,6 +116,17 @@ fn main() {
         d.request(MachineId::Nav, NavOp::Root(YtArg::Browse));
 
         let mut remote = remote::Remote::open();
+        let mut lounge = if rig.store.settings.lounge_enabled {
+            match lounge::Lounge::start(&rig.store.settings.device_name) {
+                Ok(l) => Some(l),
+                Err(e) => {
+                    log(&format!("lounge: not started: {e:#}"));
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let mut ev = [0u8; 128];
         let mut prev = 0u32;
         let mut running = true;
@@ -182,6 +194,49 @@ fn main() {
                 log("idle: blank screen (no input, nothing playing)");
                 plx_gfx::gfx::frame_clear(0.0, 0.0, 0.0);
                 sdl::SDL_GL_SwapWindow(win);
+            }
+
+            if let Some(l) = lounge.as_mut() {
+                rig.store.lounge_code = l.code.lock().unwrap().clone();
+                let in_player = d.top_screen().map(|s| s.name()) == Some("player");
+                match l.poll(&rig.player_view) {
+                    lounge::Action::Play { video_id, start_ms, playlist } => {
+                        if let Some(ms) = start_ms {
+                            rig.pending_start = Some((video_id.clone(), ms));
+                        }
+                        let arg = YtArg::Player { video_id, playlist };
+                        d.request(MachineId::Nav, if in_player { NavOp::Replace(arg) } else { NavOp::Push(arg) });
+                        last_input = now;
+                    }
+                    lounge::Action::TogglePause(want_play) => {
+                        let paused = rig.player_view.phase == player::Phase::Paused;
+                        if paused == want_play {
+                            rig.player.toggle_pause();
+                        }
+                    }
+                    lounge::Action::Seek(ms) => rig.player.seek_to(ms),
+                    lounge::Action::Stop => {
+                        if in_player {
+                            d.request(MachineId::Nav, NavOp::Pop);
+                        }
+                    }
+                    lounge::Action::Key(k) => {
+                        use yt_core::lounge::DpadKey as K;
+                        const ARROW: u32 = 1 << 30;
+                        let (sym, wcode) = match k {
+                            K::Up => (82 | ARROW, 0),
+                            K::Down => (81 | ARROW, 0),
+                            K::Left => (80 | ARROW, 0),
+                            K::Right => (79 | ARROW, 0),
+                            K::Enter => (13, 0),
+                            K::Back => (0, 482),
+                        };
+                        inputs.push(input::key_input(sym, wcode, 1, tick));
+                        inputs.push(input::key_input(sym, wcode, 0, tick));
+                    }
+                    lounge::Action::None => {}
+                }
+                l.tick(&rig.player_view, now);
             }
 
             plx_machine::idle::frame_begin(dt);

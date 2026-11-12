@@ -113,6 +113,7 @@ impl Player {
         session: Arc<Mutex<Option<yt_core::session::Session>>>,
         prefs: yt_core::streams::Prefs,
         extras: ExtrasPrefs,
+        start_ms: Option<u64>,
     ) {
         self.stop();
         *self.status.lock().unwrap() = Status { phase: Phase::Resolving, rate: 1.0, ..Default::default() };
@@ -139,7 +140,7 @@ impl Player {
         };
         let (status, media_id) = (self.status.clone(), self.media_id.clone());
         let spawned = plx_base::task::spawn("play", move || {
-            match run(luna, &video_id, &window_id, &session, &status, &media_id, prefs) {
+            match run(luna, &video_id, &window_id, &session, &status, &media_id, prefs, start_ms) {
                 Ok(()) => load_extras(&video_id, &session, &status, &extras),
                 Err(e) => {
                     crate::log(&format!("player: {e:#}"));
@@ -233,6 +234,7 @@ fn run(
     status: &Arc<Mutex<Status>>,
     media_id: &Arc<Mutex<Option<String>>>,
     prefs: yt_core::streams::Prefs,
+    start_ms: Option<u64>,
 ) -> anyhow::Result<()> {
     let resolved = {
         let mut g = session.lock().unwrap();
@@ -279,6 +281,10 @@ fn run(
     luna.call("luna://com.webos.media/notifyForeground", &format!(r#"{{"connectionId":{}}}"#, json_str(&mid)));
     let r = luna.call("luna://com.webos.media/play", &format!(r#"{{"mediaId":{}}}"#, json_str(&mid)));
     crate::log(&format!("player: play -> {r}"));
+    if let Some(ms) = start_ms.filter(|ms| *ms > 2000) {
+        let r = luna.call("luna://com.webos.media/seek", &format!(r#"{{"mediaId":{},"position":{ms}}}"#, json_str(&mid)));
+        crate::log(&format!("player: start at {ms} ms -> {r}"));
+    }
     Ok(())
 }
 

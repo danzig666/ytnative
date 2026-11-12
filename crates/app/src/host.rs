@@ -198,6 +198,8 @@ pub struct AppRig {
     sb: yt_core::ext::sponsorblock::SkipTracker,
     /// A segment the user may skip with OK ("Ask" action): (end_ms, label).
     pub sb_offer: Option<(u64, String)>,
+    /// Start position for the next Play of this video (phone cast, resume).
+    pub pending_start: Option<(String, u64)>,
 }
 
 impl AppRig {
@@ -218,6 +220,7 @@ impl AppRig {
             player: Player::new(),
             sb: Default::default(),
             sb_offer: None,
+            pending_start: None,
         }
     }
 
@@ -425,7 +428,13 @@ impl Rig<YtHost> for AppRig {
                 };
                 self.sb = yt_core::ext::sponsorblock::SkipTracker::new(!s.sb_skip_once);
                 self.sb_offer = None;
-                self.player.start(video_id, self.session.clone(), prefs, extras);
+                let start = self
+                    .pending_start
+                    .take()
+                    .filter(|(v, _)| *v == video_id)
+                    .map(|(_, ms)| ms)
+                    .or_else(|| if s.resume_playback { self.store.resume_point(&video_id) } else { None });
+                self.player.start(video_id, self.session.clone(), prefs, extras, start);
             }
             YtFx::Stop => self.player.stop(),
             YtFx::TogglePause => self.player.toggle_pause(),

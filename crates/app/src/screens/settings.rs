@@ -173,7 +173,12 @@ fn items(page: SettingsPage) -> Vec<Item> {
         }
         SettingsPage::Remote => vec![
             Opt("Link with TV code", |s| on_off(s.lounge_enabled), |s, _| s.lounge_enabled = !s.lounge_enabled),
-            Info("Pair a phone", |_| "Settings \u{203A} Account".into()),
+            Info("TV code", |cx| match &cx.views.store.lounge_code {
+                Some(c) => c.clone(),
+                None if cx.views.store.settings.lounge_enabled => "getting a code\u{2026}".into(),
+                None => "off".into(),
+            }),
+            Info("On your phone", |_| "YouTube \u{203A} Cast \u{203A} Link with TV code".into()),
         ],
         SettingsPage::About => vec![
             Action("Sign in / switch account", |fx| fx.push(Fx::Nav(NavOp::Push(YtArg::SignIn)))),

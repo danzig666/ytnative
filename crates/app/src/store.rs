@@ -154,6 +154,7 @@ pub struct Store {
     pub signed_in: bool,
     pub toast: Option<(String, u32)>,
     pub suggestions: Vec<String>,
+    pub lounge_code: Option<String>,
     next_elem: u32,
 }
 
@@ -224,6 +225,18 @@ impl Store {
         f.gen += 1;
     }
 
+    /// Where to resume a partly watched video: its card's watched percentage of its duration
+    /// badge. Nothing for unwatched or (nearly) finished videos.
+    pub fn resume_point(&self, video_id: &str) -> Option<u64> {
+        let card = self.feeds.values().flat_map(|f| f.cards.iter()).find(|c| c.video_id() == Some(video_id))?;
+        let pct = card.item.progress? as u64;
+        if !(2..95).contains(&pct) {
+            return None;
+        }
+        let dur = parse_duration(card.item.badge.as_deref()?)?;
+        Some(dur * pct / 100)
+    }
+
     pub fn toast(&mut self, msg: impl Into<String>, now_ms: u32) {
         self.toast = Some((msg.into(), now_ms + 3500));
     }
@@ -266,5 +279,24 @@ impl<'a> Filter<'a> {
             }
         }
         true
+    }
+}
+
+/// "1:02:03" / "12:34" -> milliseconds.
+pub fn parse_duration(s: &str) -> Option<u64> {
+    let mut total = 0u64;
+    for part in s.trim().split(':') {
+        total = total * 60 + part.parse::<u64>().ok()?;
+    }
+    Some(total * 1000)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn durations() {
+        assert_eq!(super::parse_duration("12:34"), Some(754_000));
+        assert_eq!(super::parse_duration("1:02:03"), Some(3_723_000));
+        assert_eq!(super::parse_duration("LIVE"), None);
     }
 }
