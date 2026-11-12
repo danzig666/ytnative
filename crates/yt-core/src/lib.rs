@@ -2,6 +2,7 @@
 pub mod auth;
 pub mod bootstrap;
 pub mod innertube;
+pub mod lounge;
 pub mod model;
 pub mod mpd;
 pub mod parse;
