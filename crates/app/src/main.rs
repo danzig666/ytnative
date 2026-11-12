@@ -206,6 +206,7 @@ fn main() {
         let mut d = Dispatcher::<YtHost>::with_transition(Box::new(PageDip::new()));
         d.request(MachineId::Nav, NavOp::Root(YtArg::Browse));
         let mut links: Vec<String> = Vec::new();
+        let (mut mouse_down, mut last_wheel) = (false, 0u32);
 
         let mut remote = remote::Remote::open();
         {
@@ -246,6 +247,27 @@ fn main() {
             while sdl::SDL_PollEvent(ev.as_mut_ptr().cast()) != 0 {
                 match input::rd_u32(&ev, 0) {
                     sdl::SDL_QUIT => running = false,
+                    sdl::SDL_MOUSEMOTION => {
+                        let (x, y) = input::pointer_xy(&ev);
+                        inputs.push(if mouse_down { input::drag(x, y, tick) } else { input::pointer(x, y, tick) });
+                    }
+                    sdl::SDL_MOUSEBUTTONDOWN if ev[16] == 1 => {
+                        let (x, y) = input::pointer_xy(&ev);
+                        mouse_down = true;
+                        inputs.push(input::click(x, y, tick));
+                    }
+                    sdl::SDL_MOUSEBUTTONUP if ev[16] == 1 => {
+                        mouse_down = false;
+                        inputs.push(input::release(tick));
+                    }
+                    sdl::SDL_MOUSEWHEEL => {
+                        // One step per notch burst: the wheel reports several ticks per notch.
+                        let dy = input::rd_i32(&ev, 20);
+                        if dy != 0 && now.wrapping_sub(last_wheel) > 150 {
+                            last_wheel = now;
+                            inputs.extend(input::wheel(dy, tick));
+                        }
+                    }
                     sdl::SDL_KEYDOWN | sdl::SDL_KEYUP => {
                         let (state, wcode, sym) = input::decode_key(&ev);
                         if wcode == 505 {
@@ -386,6 +408,13 @@ fn main() {
             plx_machine::idle::frame_begin(dt);
             images::THUMBS.deliver();
             let results = rig.drain(now);
+            if std::env::var_os("YTNATIVE_PTR_DEBUG").is_some() {
+                for e in &inputs {
+                    if let plx_machine::machine::InputKind::Pointer { x, y, .. } | plx_machine::machine::InputKind::Click { x, y, .. } = e.kind {
+                        log(&format!("ptrdbg ({x},{y}) stops={} top={:?}", d.input.hit.front().len(), d.input.hit.top_at(x, y).map(|s| s.key.elem)));
+                    }
+                }
+            }
             let r = d.frame_with(&mut rig, tick, inputs, results, &mut NoTap, false);
             d.prune(&r.unmounted);
             plx_ui::tex::note_queued(&mut d.budget);

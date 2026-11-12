@@ -182,6 +182,9 @@ impl Screen<YtHost> for PinScreen {
     fn draw(&mut self, f: &mut DrawFrame<'_, '_, YtHost>) {
         let p = f.painter;
         let cx = f.cx;
+        for i in 0..KEYS.len() {
+            ui::stop(f, self.k(i), Self::key_rect(i), Rect::new(0.0, 0.0, 1920.0, 1080.0));
+        }
         let title = match (&self.purpose, &self.first) {
             (PinPurpose::Set, None) => "Choose a PIN",
             (PinPurpose::Set, Some(_)) => "Enter the PIN again",

@@ -136,6 +136,7 @@ impl Screen<YtHost> for AccountsScreen {
         ui::text(p, "Accounts", 360.0, 80.0, 48, ui::WHITE, ui::ALIGN_LEFT, true);
         let rows: Vec<Row> = rows_of(cx).into_iter().map(|r| r.0).collect();
         self.list.draw(p, &rows, self.list.focused(cx, rows.len()));
+        self.list.stops(f, rows.len());
         super::common::toast(p, cx);
     }
     fn render(&self) -> RenderStrategy {

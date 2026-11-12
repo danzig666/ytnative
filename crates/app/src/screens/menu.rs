@@ -515,6 +515,7 @@ impl Screen<YtHost> for MenuScreen {
             })
             .collect();
         self.list.draw(p, &rows, self.list.focused(cx, rows.len()));
+        self.list.stops(f, rows.len());
         super::common::toast(p, cx);
     }
     fn render(&self) -> RenderStrategy {

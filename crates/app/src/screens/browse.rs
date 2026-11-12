@@ -408,6 +408,7 @@ impl Screen<YtHost> for BrowseScreen {
             })
             .collect();
         self.nav.draw(p, &rows, self.nav.focused(cx, items.len()));
+        self.nav.stops(f, items.len());
 
         // Content
         let feed = cx.views.store.feed(&self.key());

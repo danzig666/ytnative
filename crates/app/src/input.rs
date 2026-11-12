@@ -30,8 +30,52 @@ pub fn decode_key(ev: &[u8]) -> (u32, u32, u32) {
     }
 }
 
+pub fn rd_i32(ev: &[u8], at: usize) -> i32 {
+    i32::from_ne_bytes(ev[at..at + 4].try_into().unwrap())
+}
+
+/// Pointer position of an SDL mouse motion / button event (x@20, y@24 on LG's SDL and upstream),
+/// in the UI's logical 1920x1080 space.
+pub fn pointer_xy(ev: &[u8]) -> (f32, f32) {
+    plx_base::surface::to_logical(rd_i32(ev, 20) as f32, rd_i32(ev, 24) as f32)
+}
+
+fn ev(kind: InputKind<u32>, now: Tick) -> InputEvent<u32> {
+    InputEvent { at: now, source: Source::Sdl, kind }
+}
+
+/// Magic Remote pointer moved: hover moves focus to what is under it (the dispatcher's hit map).
+pub fn pointer(x: f32, y: f32, now: Tick) -> InputEvent<u32> {
+    ev(InputKind::Pointer { x, y, hit: None }, now)
+}
+
+/// Button down: presses what is under the pointer.
+pub fn click(x: f32, y: f32, now: Tick) -> InputEvent<u32> {
+    ev(InputKind::Click { x, y, hit: None }, now)
+}
+
+/// Motion with the button held (the player's scrub bar).
+pub fn drag(x: f32, y: f32, now: Tick) -> InputEvent<u32> {
+    ev(InputKind::Drag { x, y, hit: None }, now)
+}
+
+/// Button up: the dispatcher's press machine releases on an OK key-up (as in plx-native's bridge).
+pub fn release(now: Tick) -> InputEvent<u32> {
+    ev(InputKind::Key { key: Key::Ok, sym: 0, wcode: 0, edge: Edge::Up, at_edge: false }, now)
+}
+
+/// A wheel notch (the Magic Remote's scroll wheel) as Up / Down, both edges.
+pub fn wheel(dy: i32, now: Tick) -> Vec<InputEvent<u32>> {
+    let key = if dy < 0 { Key::Down } else { Key::Up };
+    [Edge::Down, Edge::Up].into_iter().map(|edge| ev(InputKind::Key { key, sym: 0, wcode: 0, edge, at_edge: false }, now)).collect()
+}
+
 pub fn key_input(sym: u32, wcode: u32, state: u32, now: Tick) -> InputEvent<u32> {
     use plx_ui::consts::{classify, Key as K};
+    if matches!(classify(sym, wcode), K::PointerHidden) {
+        // The Magic Remote's pointer timed out: back to D-pad focus.
+        return ev(InputKind::PointerHidden, now);
+    }
     let key = match classify(sym, wcode) {
         K::Up => Key::Up,
         K::Down => Key::Down,

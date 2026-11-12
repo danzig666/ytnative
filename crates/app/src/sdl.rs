@@ -30,6 +30,10 @@ pub const SDL_APP_WILLENTERFOREGROUND: u32 = 0x105;
 pub const SDL_APP_DIDENTERFOREGROUND: u32 = 0x106;
 pub const SDL_KEYDOWN: u32 = 0x300;
 pub const SDL_KEYUP: u32 = 0x301;
+pub const SDL_MOUSEMOTION: u32 = 0x400;
+pub const SDL_MOUSEBUTTONDOWN: u32 = 0x401;
+pub const SDL_MOUSEBUTTONUP: u32 = 0x402;
+pub const SDL_MOUSEWHEEL: u32 = 0x403;
 
 extern "C" {
     pub fn SDL_SetMainReady();

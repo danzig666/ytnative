@@ -194,6 +194,9 @@ impl Screen<YtHost> for FeedScreen {
         let p = f.painter;
         let cx = f.cx;
         ui::text(p, &ui::ellipsize(&self.title(cx), 70), 112.0, 64.0, 46, ui::WHITE, ui::ALIGN_LEFT, true);
+        if self.channel().is_some() {
+            ui::stop(f, FocusKey { entry: self.entry, elem: SUB_BTN }, SUB_RECT, Rect::new(0.0, 0.0, 1920.0, 1080.0));
+        }
         if let Some(ch) = self.channel() {
             let sub = cx.views.store.subscribed.get(ch).copied();
             let focused = cx.focus.current.is_some_and(|k| k.elem == SUB_BTN);

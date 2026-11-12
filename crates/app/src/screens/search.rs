@@ -233,6 +233,9 @@ impl Screen<YtHost> for SearchScreen {
     fn draw(&mut self, f: &mut DrawFrame<'_, '_, YtHost>) {
         let p = f.painter;
         let cx = f.cx;
+        for i in 0..keys().len() {
+            ui::stop(f, self.kkey(i), Self::key_rect(i), Rect::new(0.0, 0.0, 1920.0, 1080.0));
+        }
         ui::text(p, "Search", 100.0, 60.0, 46, ui::WHITE, ui::ALIGN_LEFT, true);
         // Query field
         let field = Rect::new(100.0, 150.0, 1720.0, 100.0);
@@ -255,6 +258,7 @@ impl Screen<YtHost> for SearchScreen {
         if !sugs.is_empty() {
             let rows: Vec<Row> = sugs.iter().map(|s| Row::new(format!("\u{1F50D}  {s}"))).collect();
             self.sug.draw(p, &rows, self.sug.focused(cx, sugs.len()));
+            self.sug.stops(f, sugs.len());
         } else {
             ui::text(p, "Suggestions appear here as you type.", 1000.0, 310.0, 28, ui::FAINT, ui::ALIGN_LEFT, false);
         }

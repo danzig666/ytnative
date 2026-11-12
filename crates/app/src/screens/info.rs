@@ -148,6 +148,7 @@ impl Screen<YtHost> for InfoScreen {
                 .map(|(i, (t, ms))| Row::new(ui::ellipsize(t, 34)).value(ui::fmt_time(*ms)).active(Some(i) == cur))
                 .collect();
             self.list.draw(p, &rows, self.list.focused(cx, rows.len()));
+            self.list.stops(f, rows.len());
         }
     }
     fn render(&self) -> RenderStrategy {

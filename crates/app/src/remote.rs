@@ -55,6 +55,25 @@ impl Remote {
         }
         while now.ms >= self.next_ms {
             let Some(tok) = self.queue.pop_front() else { break };
+            // "move:X,Y" hovers, "click:X,Y" moves there and clicks (logical 1920x1080 coordinates).
+            let xy = |s: &str| s.split_once(',').and_then(|(x, y)| Some((x.parse::<f32>().ok()?, y.parse::<f32>().ok()?)));
+            if let Some((x, y)) = tok.strip_prefix("move:").and_then(xy) {
+                out.push(crate::input::pointer(x, y, now));
+                self.next_ms = now.ms + 150;
+                continue;
+            }
+            if let Some((x, y)) = tok.strip_prefix("click:").and_then(xy) {
+                out.push(crate::input::pointer(x, y, now));
+                out.push(crate::input::click(x, y, now));
+                self.queue.push_front("release".into());
+                self.next_ms = now.ms + 120;
+                continue;
+            }
+            if tok == "release" {
+                out.push(crate::input::release(now));
+                self.next_ms = now.ms + 400;
+                continue;
+            }
             if let Some(ms) = tok.strip_prefix("wait:").and_then(|m| m.parse::<u32>().ok()) {
                 self.next_ms = now.ms + ms;
                 continue;

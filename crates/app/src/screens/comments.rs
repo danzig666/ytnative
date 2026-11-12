@@ -151,6 +151,7 @@ impl Screen<YtHost> for CommentsScreen {
     fn draw(&mut self, f: &mut DrawFrame<'_, '_, YtHost>) {
         let p = f.painter;
         let cx = f.cx;
+        self.list.stops(f, self.len(cx));
         // Opened from the player: the video plays behind the UI plane, so dim it for reading.
         ui::fill(p, Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, [0.03, 0.03, 0.05, 0.94]);
         let title = match &self.replies_to {

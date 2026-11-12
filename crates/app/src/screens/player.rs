@@ -141,6 +141,30 @@ impl Machine<YtHost> for PlayerScreen {
                 fx.invalidate(plx_machine::present::Provenance::Timer(T_TICK));
                 Handled::Yes
             }
+            // Magic Remote pointer: moving shows the controls; a click on the seek bar seeks there,
+            // on "Options" opens the menu, anywhere else shows the controls or toggles pause.
+            ScreenEvent::Input(InputEvent { kind: InputKind::Pointer { .. } | InputKind::Drag { .. }, .. }) => {
+                self.show_hud(cx, fx); // up, and kept up while the pointer moves
+                Handled::Yes
+            }
+            ScreenEvent::Input(InputEvent { kind: InputKind::Click { x, y, .. }, .. }) => {
+                let st = cx.views.player;
+                let (x, y) = (*x, *y);
+                if self.hud && (890.0..=960.0).contains(&y) && (96.0..=1824.0).contains(&x) && st.duration_ms > 0 && !st.live {
+                    let to = ((x - 96.0) / 1728.0).clamp(0.0, 1.0) as f64 * st.duration_ms as f64;
+                    fx.push(Fx::App(YtFx::SeekTo(to as u64)));
+                    self.preview_until = cx.views.now_ms + 1500;
+                    self.show_hud(cx, fx);
+                } else if self.hud && x > 1600.0 && y > 990.0 {
+                    fx.push(Fx::Nav(NavOp::Present(YtArg::PlayerMenu)));
+                } else if !self.hud {
+                    self.show_hud(cx, fx);
+                } else {
+                    fx.push(Fx::App(YtFx::TogglePause));
+                    self.show_hud(cx, fx);
+                }
+                Handled::Yes
+            }
             ScreenEvent::Input(InputEvent { kind: InputKind::Key { key, wcode, edge, .. }, .. }) => {
                 if *edge == Edge::Up {
                     return if *key == Key::Back && !self.hud { Handled::No } else { Handled::Yes };

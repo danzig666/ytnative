@@ -23,6 +23,9 @@ const OK_SETTLE_MS: u32 = 400;
 
 enum Step {
     Key(u32, u32),
+    Move(f32, f32),
+    Click(f32, f32),
+    ReleasePointer,
     Release(u32, u32),
     Wait(u32),
     Shot(PathBuf),
@@ -68,6 +71,12 @@ fn parse(tok: &str) -> Option<Step> {
         "back" => Step::Key(0, 482),
         "exit" => Step::Exit,
         t if t.starts_with("wait:") => Step::Wait(t[5..].parse().ok()?),
+        t if t.starts_with("move:") || t.starts_with("click:") => {
+            let (kind, rest) = t.split_once(':')?;
+            let (x, y) = rest.split_once(',')?;
+            let (x, y) = (x.parse().ok()?, y.parse().ok()?);
+            if kind == "move" { Step::Move(x, y) } else { Step::Click(x, y) }
+        }
         t if t == "shot" || t.starts_with("shot:") => {
             let name = t.strip_prefix("shot:").filter(|n| !n.is_empty()).map(str::to_string).unwrap_or_else(|| {
                 format!("sim-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs())
@@ -169,6 +178,23 @@ impl Remote {
                     out.push(crate::input::key_input(sym, wcode, 0, now));
                     // OK commits a beat after its release; a key arriving sooner cancels it.
                     self.not_before = now.ms + if sym == 13 { OK_SETTLE_MS } else { KEY_GAP_MS / 2 };
+                    break;
+                }
+                Step::Move(x, y) => {
+                    out.push(crate::input::pointer(x, y, now));
+                    self.not_before = now.ms + KEY_GAP_MS;
+                    break;
+                }
+                Step::Click(x, y) => {
+                    out.push(crate::input::pointer(x, y, now));
+                    out.push(crate::input::click(x, y, now));
+                    self.steps.push_front(Step::ReleasePointer);
+                    self.not_before = now.ms + KEY_GAP_MS;
+                    break;
+                }
+                Step::ReleasePointer => {
+                    out.push(crate::input::release(now));
+                    self.not_before = now.ms + OK_SETTLE_MS;
                     break;
                 }
                 Step::Wait(ms) => self.not_before = now.ms + ms,

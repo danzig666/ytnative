@@ -135,6 +135,13 @@ impl CardSource<YtHost> for CardsSrc<'_> {
     }
 }
 
+/// One pointer stop: hovering focuses it, a click presses it (OK).
+pub fn stop(f: &mut plx_ui::screen::DrawFrame<'_, '_, YtHost>, key: FocusKey<u32>, rect: Rect, clip: Rect) {
+    use plx_ui::screen::{Activate, Hover, Stop};
+    let p = f.painter;
+    f.stop(p, Stop { key, rect, rest_rect: rect, clip, hover: Hover::Focus, activate: Activate::Press });
+}
+
 /// One row of a vertical list.
 #[derive(Clone, Debug, Default)]
 pub struct Row {
@@ -221,6 +228,15 @@ impl VList {
     pub fn focused(&self, cx: &Cx<'_, YtHost>, len: usize) -> Option<usize> {
         cx.focus.current.filter(|k| k.entry == self.entry).and_then(|k| self.index(k.elem, len))
     }
+    /// Registers the visible rows with the pointer hit map (Magic Remote hover / click).
+    pub fn stops(&self, f: &mut plx_ui::screen::DrawFrame<'_, '_, YtHost>, len: usize) {
+        let focus = self.focused(f.cx, len);
+        let top = self.top_for(focus, len);
+        for i in (top..len).take(self.rows_visible()) {
+            stop(f, FocusKey { entry: self.entry, elem: self.elem(i) }, self.row_rect(i, top), self.rect);
+        }
+    }
+
     pub fn draw(&self, p: Painter, rows: &[Row], focus: Option<usize>) {
         let top = self.top_for(focus, rows.len());
         let vis = self.rows_visible();
