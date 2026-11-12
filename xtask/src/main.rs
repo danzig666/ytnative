@@ -7,6 +7,11 @@
 //! (`/media/developer/apps/usr/palm/applications/<id>`), and only use the TV's normal app
 //! installer / application manager. Nothing here touches system partitions.
 
+mod checks;
+mod crash;
+mod elf;
+mod release;
+
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::io::Write;
@@ -32,7 +37,17 @@ cargo xtask <command>
   key <tokens...>       press remote keys in the running app (up down left right ok back exit)
   shot [file] [method]  screenshot the TV (DISPLAY = video+UI, VIDEO, GRAPHIC) to target/shots/
   pull-sysroot          copy the TV's shared libraries we link/check against into sysroot/
-  symcheck              verify every dynamic symbol the TV binary imports exists on the TV
+  symcheck              verify every import of the TV binary resolves against sysroot/lib
+                        (transitively: GL symbols come from libmali via libGLESv2.so.2)
+  needed [--check|file] print the binary's DT_NEEDED; --check compares with ci/expected-dt-needed.txt
+  fwcompat <dir> [-v]   grade the binary's imports (with symbol versions) against every TV
+                        snapshot under <dir>/<name>/lib (see docs/debugging.md)
+  stub-symbols          regenerate ci/symbols/*.txt from sysroot/lib (link stub lists)
+  stubs                 generate the link-only stub libraries into target/stubs/
+  crash [log-file]      fetch /tmp/ytnative/crash.log from the TV (or read a local file) and
+                        symbolize it against target/.../ytnative.debug
+  release-manifest [ipk-url] [out]
+                        write the Homebrew Channel manifest for target/ipk/*.ipk
 ";
 
 fn main() {
@@ -59,7 +74,20 @@ fn run() -> Result<()> {
         Some("key") => tv_ssh_print(&format!("echo {} > {TV_TMP}/remote", args[1..].join(" "))),
         Some("shot") => shot(args.get(1).map(String::as_str), args.get(2).map(String::as_str).unwrap_or("DISPLAY")),
         Some("pull-sysroot") => pull_sysroot(),
-        Some("symcheck") => symcheck(),
+        Some("symcheck") => checks::symcheck(&binary()),
+        Some("needed") => match args.get(1).map(String::as_str) {
+            Some("--check") => checks::needed(&binary(), true),
+            Some(f) => checks::describe_file(Path::new(f)),
+            None => checks::needed(&binary(), false),
+        },
+        Some("fwcompat") => {
+            let dir = args.get(1).context("usage: cargo xtask fwcompat <dir-of-sysroots> [-v]")?;
+            checks::fwcompat(&binary(), Path::new(dir), args.iter().any(|a| a == "-v" || a == "--verbose"))
+        }
+        Some("stub-symbols") => checks::stub_symbols(),
+        Some("stubs") => stubs(),
+        Some("crash") => crash::run(args.get(1).map(String::as_str)),
+        Some("release-manifest") => release::manifest(args.get(1).map(String::as_str), args.get(2).map(String::as_str)),
         _ => {
             print!("{USAGE}");
             Ok(())
@@ -94,8 +122,19 @@ fn app_field(key: &str) -> Result<String> {
     appinfo()?[key].as_str().map(str::to_string).with_context(|| format!("appinfo.json has no {key}"))
 }
 
-fn binary() -> PathBuf {
+/// What cargo links (line tables, symbols): never shipped.
+fn linked_binary() -> PathBuf {
     PathBuf::from(format!("target/{TARGET}/release/ytnative"))
+}
+
+/// The stripped binary that goes into the IPK / onto the TV.
+fn binary() -> PathBuf {
+    PathBuf::from(format!("target/{TARGET}/release/dist/ytnative"))
+}
+
+/// The unstripped twin of `binary()`, kept for symbolizing crash logs.
+fn debug_binary() -> PathBuf {
+    PathBuf::from(format!("target/{TARGET}/release/dist/ytnative.debug"))
 }
 
 // ---------------------------------------------------------------- TV access
@@ -171,9 +210,22 @@ fn build() -> Result<()> {
     if !st.success() {
         bail!("cross build failed");
     }
+    // Keep the linked binary (line tables + symbols) as ytnative.debug and ship a stripped copy.
+    std::fs::create_dir_all(binary().parent().unwrap())?;
+    std::fs::copy(linked_binary(), debug_binary())?;
+    let st = Command::new("python")
+        .args(["-m", "ziglang", "objcopy", "--strip-all"])
+        .arg(linked_binary())
+        .arg(binary())
+        .status()
+        .context("running zig objcopy")?;
+    if !st.success() {
+        bail!("zig objcopy --strip-all failed");
+    }
     let size = std::fs::metadata(binary())?.len();
-    println!("built {} ({} KiB)", binary().display(), size / 1024);
-    Ok(())
+    let dbg = std::fs::metadata(debug_binary())?.len();
+    println!("built {} ({} KiB; {} KiB with debug info in ytnative.debug)", binary().display(), size / 1024, dbg / 1024);
+    checks::needed(&binary(), true)
 }
 
 /// Writes an IPK the way plx-native's ci/mkipk.py does: deterministic tar members with explicit
@@ -384,6 +436,15 @@ const SYSROOT_LIBS: &[&str] = &[
     "/usr/lib/libglib-2.0.so.0",
     "/usr/lib/libcurl.so.4",
     "/usr/lib/libplayerAPIs.so.1",
+    // Indirect dependencies of the above, so `symcheck`/`fwcompat` can walk the whole closure.
+    "/lib/ld-linux.so.3",
+    "/usr/lib/libstdc++.so.6",
+    "/usr/lib/libfreetype.so.6",
+    "/usr/lib/libwayland-server.so.0",
+    "/usr/lib/libffi.so.8",
+    "/usr/lib/libPmLogLib.so.3",
+    "/usr/lib/libpbnjson_c.so.2",
+    "/usr/lib/libpcre.so.1",
 ];
 
 fn pull_sysroot() -> Result<()> {
@@ -412,92 +473,12 @@ fn pull_sysroot() -> Result<()> {
     Ok(())
 }
 
-fn symcheck() -> Result<()> {
-    let bin = std::fs::read(binary()).context("build first")?;
-    let needed = elf::undefined_symbols(&bin)?;
-    let mut provided = std::collections::HashSet::new();
-    let dir = Path::new("sysroot/lib");
-    if !dir.is_dir() {
-        bail!("run `cargo xtask pull-sysroot` first");
+/// Link-only stub libraries (target/stubs/) from ci/symbols/*.txt; crates/app/build.rs runs the
+/// same generator, this is for running it by hand.
+fn stubs() -> Result<()> {
+    let st = Command::new("python").args(["tools/gen-stubs.py", "--out", "target/stubs"]).status().context("running python")?;
+    if !st.success() {
+        bail!("stub generation failed");
     }
-    for e in std::fs::read_dir(dir)? {
-        let data = std::fs::read(e?.path())?;
-        provided.extend(elf::defined_symbols(&data).unwrap_or_default());
-    }
-    let missing: Vec<_> = needed.iter().filter(|s| !provided.contains(*s)).collect();
-    println!("{} imported symbols, {} provided by sysroot/", needed.len(), needed.len() - missing.len());
-    if missing.is_empty() {
-        println!("symcheck OK");
-        Ok(())
-    } else {
-        for m in &missing {
-            println!("  MISSING on TV: {m}");
-        }
-        bail!("{} symbols are not exported by the TV's libraries", missing.len())
-    }
-}
-
-/// Just enough 32-bit little-endian ELF parsing to list dynamic symbols.
-mod elf {
-    use anyhow::{bail, Result};
-
-    fn u16le(b: &[u8], o: usize) -> u16 {
-        u16::from_le_bytes([b[o], b[o + 1]])
-    }
-    fn u32le(b: &[u8], o: usize) -> u32 {
-        u32::from_le_bytes(b[o..o + 4].try_into().unwrap())
-    }
-
-    /// (name, defined) for every entry of .dynsym; versioned names are reported without version.
-    fn dynsyms(b: &[u8]) -> Result<Vec<(String, bool)>> {
-        if b.len() < 52 || &b[..4] != b"\x7fELF" || b[4] != 1 || b[5] != 1 {
-            bail!("not a 32-bit little-endian ELF");
-        }
-        let shoff = u32le(b, 32) as usize;
-        let shentsize = u16le(b, 46) as usize;
-        let shnum = u16le(b, 48) as usize;
-        let sec = |i: usize| -> (u32, usize, usize, u32) {
-            let o = shoff + i * shentsize;
-            (u32le(b, o + 4), u32le(b, o + 16) as usize, u32le(b, o + 20) as usize, u32le(b, o + 24))
-        };
-        let mut out = Vec::new();
-        for i in 0..shnum {
-            let (ty, off, size, link) = sec(i);
-            if ty != 11 {
-                continue; // SHT_DYNSYM
-            }
-            let (_, stroff, strsize, _) = sec(link as usize);
-            let strtab = &b[stroff..stroff + strsize];
-            for k in 1..size / 16 {
-                let o = off + k * 16;
-                let name_off = u32le(b, o) as usize;
-                let shndx = u16le(b, o + 14);
-                let info = b[o + 12];
-                let bind = info >> 4;
-                let end = strtab[name_off..].iter().position(|&c| c == 0).unwrap_or(0);
-                let name = String::from_utf8_lossy(&strtab[name_off..name_off + end]).into_owned();
-                if name.is_empty() {
-                    continue;
-                }
-                // Weak undefined symbols are allowed to be missing.
-                let defined = shndx != 0;
-                if !defined && bind == 2 {
-                    continue;
-                }
-                out.push((name, defined));
-            }
-        }
-        Ok(out)
-    }
-
-    pub fn undefined_symbols(b: &[u8]) -> Result<Vec<String>> {
-        let mut v: Vec<String> = dynsyms(b)?.into_iter().filter(|s| !s.1).map(|s| s.0).collect();
-        v.sort();
-        v.dedup();
-        Ok(v)
-    }
-
-    pub fn defined_symbols(b: &[u8]) -> Result<Vec<String>> {
-        Ok(dynsyms(b)?.into_iter().filter(|s| s.1).map(|s| s.0).collect())
-    }
+    Ok(())
 }

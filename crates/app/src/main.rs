@@ -3,6 +3,7 @@
 //! Boot and frame loop follow plx-native's `app/boot.rs` + `app/run.rs` (GPL-3.0-or-later):
 //! SDL + GLES2 window, transparent UI plane over the video plane, the plx_ui dispatcher.
 
+mod crashtrace; // fatal-signal tracer -> /tmp/ytnative/crash.log (see `cargo xtask crash`)
 mod host;
 mod images;
 mod input;
@@ -51,6 +52,7 @@ pub fn log(s: &str) {
 }
 
 fn main() {
+    crashtrace::install(); // first: every later crash gets a record
     START.get_or_init(Instant::now);
     // Before anything SDL: ask webOS to deliver BACK (and EXIT) to the app.
     std::env::set_var("SDL_WEBOS_ACCESS_POLICY_KEYS_BACK", "true");

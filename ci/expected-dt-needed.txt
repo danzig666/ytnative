@@ -1,0 +1,12 @@
+# DT_NEEDED of the TV binary (checked by `cargo xtask needed --check`, run by every `cargo xtask build`).
+# A new entry must exist on every firmware we support: grade it with `cargo xtask fwcompat`.
+libGLESv2.so.2
+libSDL2-2.0.so.0
+libSDL2_ttf-2.0.so.0
+libc.so.6
+libdl.so.2
+libglib-2.0.so.0
+libluna-service2.so.3
+libm.so.6
+libpthread.so.0
+libwayland-client.so.0
