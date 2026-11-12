@@ -4,6 +4,7 @@ pub mod actions;
 pub mod auth;
 pub mod bootstrap;
 pub mod captions;
+pub mod clients;
 pub mod comments;
 pub mod ext;
 pub mod innertube;

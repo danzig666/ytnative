@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "ring": ["visionos", "android_vr", "ios"],
+  "profiles": [
+    {
+      "key": "visionos",
+      "purpose": "media",
+      "clientName": "VISIONOS",
+      "clientVersion": "1.02",
+      "clientNameId": 101,
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15",
+      "deviceMake": "Apple",
+      "deviceModel": "RealityDevice17,1",
+      "osName": "visionOS",
+      "osVersion": "26.5.23O471",
+      "sendAuth": false
+    },
+    {
+      "key": "android_vr",
+      "purpose": "media",
+      "clientName": "ANDROID_VR",
+      "clientVersion": "1.65.10",
+      "clientNameId": 28,
+      "userAgent": "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+      "deviceMake": "Oculus",
+      "deviceModel": "Quest 3",
+      "osName": "Android",
+      "osVersion": "12L",
+      "androidSdkVersion": 32,
+      "sendAuth": false
+    },
+    {
+      "key": "ios",
+      "purpose": "media",
+      "clientName": "IOS",
+      "clientVersion": "21.26.4",
+      "clientNameId": 5,
+      "userAgent": "com.google.ios.youtube/21.26.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
+      "deviceMake": "Apple",
+      "deviceModel": "iPhone16,2",
+      "osName": "iPhone",
+      "osVersion": "18.3.2.22D82",
+      "sendAuth": false
+    },
+    {
+      "key": "tv",
+      "purpose": "metadata",
+      "clientName": "TVHTML5",
+      "clientVersion": "auto",
+      "clientNameId": 7,
+      "userAgent": "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/25.lts.30.1034943-gold (unlike Gecko), Unknown_TV_Unknown_0/Unknown (Unknown, Unknown)",
+      "sendAuth": true
+    }
+  ]
+}

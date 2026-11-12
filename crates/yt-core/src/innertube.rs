@@ -1,18 +1,33 @@
 //! Minimal InnerTube client: just enough to get stream URLs and prove an authenticated call works.
 
 use crate::bootstrap::{TvConfig, TV_UA};
+use crate::clients::ClientProfile;
 use anyhow::{bail, Result};
 use serde_json::{json, Value};
 
 /// Client profiles. VISIONOS returns direct (un-ciphered, no "n" challenge, no PO token) HTTPS
 /// URLs, so no JavaScript engine is needed. TVHTML5 is the logged-in TV client.
-#[derive(Clone, Copy, Debug)]
+/// `Profile` calls with a data-driven profile from `crate::clients` (what `streams::resolve` uses).
+#[derive(Clone, Copy)]
 pub enum Client {
     VisionOs,
     Tv,
     /// Fallbacks for videos VISIONOS refuses; both return direct URLs anonymously (2026-11).
     AndroidVr,
     Ios,
+    Profile(&'static ClientProfile),
+}
+
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Client::VisionOs => f.write_str("VisionOs"),
+            Client::Tv => f.write_str("Tv"),
+            Client::AndroidVr => f.write_str("AndroidVr"),
+            Client::Ios => f.write_str("Ios"),
+            Client::Profile(p) => write!(f, "Profile({})", p.key),
+        }
+    }
 }
 
 const ANDROID_VR_UA: &str = "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip";
@@ -26,13 +41,15 @@ impl Client {
             Client::Tv => TV_UA,
             Client::AndroidVr => ANDROID_VR_UA,
             Client::Ios => IOS_UA,
+            Client::Profile(p) => &p.user_agent,
         }
     }
 
     /// InnerTube `context.client` JSON, `X-YouTube-Client-Name` id and client version.
-    pub fn context(self, cfg: &TvConfig) -> (Value, &'static str, String) {
+    pub fn context(self, cfg: &TvConfig) -> (Value, String, String) {
         let visitor = cfg.visitor_data.clone().unwrap_or_default();
-        match self {
+        let (ctx, name_id, version) = match self {
+            Client::Profile(p) => return p.context(cfg),
             Client::VisionOs => (
                 json!({
                     "clientName": "VISIONOS", "clientVersion": "1.02",
@@ -71,7 +88,8 @@ impl Client {
                 "5",
                 "21.26.4".into(),
             ),
-        }
+        };
+        (ctx, name_id.to_string(), version)
     }
 }
 
