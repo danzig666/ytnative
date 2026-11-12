@@ -29,6 +29,7 @@ cargo xtask <command>
   logs [n]              show the app's log on the TV
   uninstall             remove the app from the TV
   ssh <cmd...>          run a command on the TV
+  key <tokens...>       press remote keys in the running app (up down left right ok back exit)
   shot [file] [method]  screenshot the TV (DISPLAY = video+UI, VIDEO, GRAPHIC) to target/shots/
   pull-sysroot          copy the TV's shared libraries we link/check against into sysroot/
   symcheck              verify every dynamic symbol the TV binary imports exists on the TV
@@ -55,6 +56,7 @@ fn run() -> Result<()> {
         Some("logs") => logs(args.get(1).and_then(|s| s.parse().ok()).unwrap_or(80)),
         Some("uninstall") => uninstall(),
         Some("ssh") => tv_ssh_print(&args[1..].join(" ")),
+        Some("key") => tv_ssh_print(&format!("echo {} > {TV_TMP}/remote", args[1..].join(" "))),
         Some("shot") => shot(args.get(1).map(String::as_str), args.get(2).map(String::as_str).unwrap_or("DISPLAY")),
         Some("pull-sysroot") => pull_sysroot(),
         Some("symcheck") => symcheck(),

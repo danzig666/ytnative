@@ -5,6 +5,7 @@
 
 mod host;
 mod input;
+mod remote;
 mod screens;
 mod sdl;
 mod wl;
@@ -100,6 +101,7 @@ fn main() {
         let mut d = Dispatcher::<YtHost>::with_transition(Box::new(PageDip::new()));
         d.request(MachineId::Nav, NavOp::Root(YtArg::Home));
 
+        let mut remote = remote::Remote::open();
         let mut ev = [0u8; 128];
         let mut prev = 0u32;
         let mut running = true;
@@ -134,6 +136,14 @@ fn main() {
                         wl::grab(win);
                     }
                     _ => {}
+                }
+            }
+
+            if let Some(r) = remote.as_mut() {
+                let mut quit = false;
+                inputs.extend(r.poll(tick, &mut quit));
+                if quit {
+                    running = false;
                 }
             }
 
