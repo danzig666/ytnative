@@ -86,6 +86,8 @@ pub struct Settings {
     pub boot_section: String,
     pub idle_blank_secs: u32,
     pub time_24h: bool,
+    /// "red" | "blue" | "green" | "purple" | "orange".
+    pub accent: String,
     pub ui_language: String,
     pub content_country: String,
     // Remote
@@ -144,6 +146,7 @@ impl Default for Settings {
             boot_section: "home".into(),
             idle_blank_secs: 120,
             time_24h: true,
+            accent: "red".into(),
             ui_language: "system".into(),
             content_country: "".into(),
             lounge_enabled: true,

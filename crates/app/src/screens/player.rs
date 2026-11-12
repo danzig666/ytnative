@@ -298,7 +298,7 @@ impl Screen<YtHost> for PlayerScreen {
         let bar = Rect::new(96.0, 920.0, 1728.0, 10.0);
         ui::fill(p, bar, 5.0, [1.0, 1.0, 1.0, 0.25]);
         let frac = if st.duration_ms > 0 { (st.position_ms as f32 / st.duration_ms as f32).clamp(0.0, 1.0) } else { 0.0 };
-        ui::fill(p, Rect::new(bar.x, bar.y, bar.w * frac, bar.h), 5.0, ui::ACCENT);
+        ui::fill(p, Rect::new(bar.x, bar.y, bar.w * frac, bar.h), 5.0, ui::accent());
         if st.duration_ms > 0 {
             let x_of = |ms: u64| bar.x + bar.w * (ms as f32 / st.duration_ms as f32).clamp(0.0, 1.0);
             if cx.views.store.settings.sb_markers {

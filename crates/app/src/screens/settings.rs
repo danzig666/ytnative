@@ -134,7 +134,9 @@ fn items(page: SettingsPage) -> Vec<Item> {
             Opt("Hide upcoming streams", |s| on_off(s.hide_upcoming), |s, _| s.hide_upcoming = !s.hide_upcoming),
             Opt("Hide mixes", |s| on_off(s.hide_mixes), |s, _| s.hide_mixes = !s.hide_mixes),
             Opt("Blocked channels", |s| s.blocked_channels.len().to_string(), |s, _| s.blocked_channels.clear()),
-            Opt("Child mode", |s| on_off(s.child_mode), |s, _| s.child_mode = !s.child_mode),
+            Opt("Child mode (no search, no comments)", |s| on_off(s.child_mode), |s, _| s.child_mode = !s.child_mode),
+            Action("Set settings PIN", |fx| fx.push(Fx::Nav(NavOp::Push(YtArg::Pin(crate::host::PinPurpose::Set))))),
+            Opt("Settings PIN", |s| (if s.settings_pin.is_empty() { "Off" } else { "On" }).into(), |s, _| s.settings_pin.clear()),
         ],
         SettingsPage::Interface => {
             let mut v = vec![
@@ -146,6 +148,11 @@ fn items(page: SettingsPage) -> Vec<Item> {
                     s.idle_blank_secs = cycle(&[60, 120, 300, 600], s.idle_blank_secs, d)
                 }),
                 Opt("24-hour clock", |s| on_off(s.time_24h), |s, _| s.time_24h = !s.time_24h),
+            Opt("Accent colour", |s| s.accent.clone(), |s, d| {
+                const C: &[&str] = &["red", "blue", "green", "purple", "orange"];
+                let i = C.iter().position(|c| *c == s.accent).unwrap_or(0) as i32;
+                s.accent = C[((i + d).rem_euclid(C.len() as i32)) as usize].into();
+            }),
             ];
             // One toggle per sidebar section.
             macro_rules! section_toggle {

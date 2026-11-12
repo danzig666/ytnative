@@ -51,6 +51,7 @@ pub enum YtArg {
     Info,
     /// "Save to playlist" picker for a video: (video id, title).
     PlaylistPicker(String, String),
+    Pin(PinPurpose),
     SearchFilters(String),
 }
 
@@ -74,6 +75,7 @@ impl ScreenArg for YtArg {
             YtArg::Replies(..) => 12,
             YtArg::Info => 13,
             YtArg::PlaylistPicker(..) => 14,
+            YtArg::Pin(_) => 15,
         })
     }
     fn title(&self) -> Option<&str> {
@@ -92,6 +94,17 @@ impl LogicalState for YtArg {
     fn probe(&self, out: &mut String) {
         out.push_str(&format!("{self:?}"));
     }
+}
+
+/// What a PIN entry is for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PinPurpose {
+    /// Choose a new settings PIN (entered twice).
+    Set,
+    /// Settings are locked (PIN set): unlock to open them.
+    OpenSettings,
+    /// Switch to an account protected by a password: (account id, stored hash).
+    SwitchAccount(String, String),
 }
 
 /// Sign-in progress, shown by the sign-in screen.
@@ -217,6 +230,7 @@ impl Mounter<YtHost> for Mount {
             YtArg::Comments(v) => Box::new(screens::comments::CommentsScreen::new(entry, v.clone(), None)),
             YtArg::Replies(token, author) => Box::new(screens::comments::CommentsScreen::new(entry, token.clone(), Some(author.clone()))),
             YtArg::Info => Box::new(screens::info::InfoScreen::new(entry)),
+            YtArg::Pin(p) => Box::new(screens::pin::PinScreen::new(entry, p.clone())),
             YtArg::PlaylistPicker(v, t) => Box::new(screens::menu::MenuScreen::playlists(entry, v.clone(), t.clone(), cx)),
             YtArg::SearchFilters(q) => Box::new(screens::menu::MenuScreen::filters(entry, q.clone())),
         }
@@ -323,6 +337,7 @@ impl AppRig {
     /// store, and return the notifications for the screens that asked.
     pub fn drain(&mut self, now_ms: u32) -> Vec<(Addr, YtMsg)> {
         self.now_ms = now_ms;
+        crate::ui::set_accent(&self.store.settings.accent);
         self.player_view = self.player.status.lock().unwrap().clone();
         if let Some((_, until)) = &self.store.toast {
             if now_ms > *until {

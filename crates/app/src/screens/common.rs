@@ -45,7 +45,7 @@ pub fn open_card(card: &Card, fx: &mut Effects<'_, YtHost>) {
 
 /// The app's wordmark: a small red play badge and "ytnative".
 pub fn logo(p: Painter, x: f32, y: f32) {
-    ui::fill(p, Rect::new(x, y, 54.0, 38.0), 10.0, ui::ACCENT);
+    ui::fill(p, Rect::new(x, y, 54.0, 38.0), 10.0, ui::accent());
     ui::text(p, "\u{25B6}", x + 27.0, y + 3.0, 26, ui::WHITE, ui::ALIGN_CENTER, true);
     ui::text(p, "ytnative", x + 68.0, y + 1.0, 32, ui::WHITE, ui::ALIGN_LEFT, true);
 }

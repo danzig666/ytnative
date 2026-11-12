@@ -194,7 +194,7 @@ impl Screen<YtHost> for FeedScreen {
             let focused = cx.focus.current.is_some_and(|k| k.elem == SUB_BTN);
             let (label, bg) = match sub {
                 Some(true) => ("Subscribed", [1.0, 1.0, 1.0, 0.16]),
-                Some(false) => ("Subscribe", ui::ACCENT),
+                Some(false) => ("Subscribe", ui::accent()),
                 None => ("\u{2026}", [1.0, 1.0, 1.0, 0.10]),
             };
             ui::fill(p, SUB_RECT, 25.0, if focused { ui::WHITE } else { bg });

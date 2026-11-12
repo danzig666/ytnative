@@ -65,7 +65,10 @@ impl Machine<YtHost> for AccountsScreen {
             ScreenEvent::Activate(e) => {
                 if let Some(i) = self.list.index(*e, rows.len()) {
                     match rows[i].1.clone() {
-                        RowAct::Switch(id) => fx.push(Fx::App(YtFx::Act(UserAction::SwitchAccount(id)))),
+                        RowAct::Switch(id) => match yt_core::accounts::list().ok().and_then(|l| l.into_iter().find(|a| a.id == id)).and_then(|a| a.password) {
+                            Some(hash) if !hash.is_empty() => fx.push(Fx::Nav(NavOp::Push(YtArg::Pin(crate::host::PinPurpose::SwitchAccount(id, hash))))),
+                            _ => fx.push(Fx::App(YtFx::Act(UserAction::SwitchAccount(id)))),
+                        },
                         RowAct::Add => fx.push(Fx::Nav(NavOp::Push(YtArg::SignIn))),
                         RowAct::Remove(id, name) => {
                             // Press twice to confirm.

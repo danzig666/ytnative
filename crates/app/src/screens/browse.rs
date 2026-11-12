@@ -95,7 +95,9 @@ fn nav_items(cx: &Cx<'_, YtHost>) -> Vec<NavItem> {
         v.push(NavItem::Section(Section::Home));
     }
     v.extend(s.pinned.iter().map(|(t, id, p)| NavItem::Pinned(t.clone(), id.clone(), p.clone())));
-    v.insert(0, NavItem::Search);
+    if !s.child_mode {
+        v.insert(0, NavItem::Search);
+    }
     v.push(NavItem::Settings);
     v.push(NavItem::Account);
     v
@@ -148,7 +150,14 @@ impl BrowseScreen {
             }
             NavItem::Search => fx.push(Fx::Nav(NavOp::Push(YtArg::Search))),
             NavItem::Pinned(_, id, params) => fx.push(Fx::Nav(NavOp::Push(YtArg::Feed(FeedKey::Browse { id: id.clone(), params: params.clone() })))),
-            NavItem::Settings => fx.push(Fx::Nav(NavOp::Push(YtArg::Settings(crate::host::SettingsPage::Root)))),
+            NavItem::Settings => {
+                let locked = !cx.views.store.settings.settings_pin.is_empty();
+                fx.push(Fx::Nav(NavOp::Push(if locked {
+                    YtArg::Pin(crate::host::PinPurpose::OpenSettings)
+                } else {
+                    YtArg::Settings(crate::host::SettingsPage::Root)
+                })));
+            }
             NavItem::Account => fx.push(Fx::Nav(NavOp::Push(if cx.views.store.signed_in { YtArg::Accounts } else { YtArg::SignIn }))),
         }
     }

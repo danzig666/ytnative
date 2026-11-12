@@ -5,6 +5,7 @@ pub mod common;
 pub mod feed;
 pub mod info;
 pub mod menu;
+pub mod pin;
 pub mod player;
 pub mod search;
 pub mod settings;

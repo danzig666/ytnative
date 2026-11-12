@@ -177,7 +177,9 @@ impl MenuScreen {
             acts.push(("Save to Watch later".to_string(), Act::User(UserAction::WatchLater(st.video_id.clone()))));
             acts.push(("Save to playlist\u{2026}".to_string(), Act::PickPlaylist(st.video_id.clone(), st.title.clone())));
             acts.push(("Video info & chapters".to_string(), Act::Info));
-            acts.push(("Comments".to_string(), Act::Comments(st.video_id.clone())));
+            if !cx.views.store.settings.child_mode {
+                acts.push(("Comments".to_string(), Act::Comments(st.video_id.clone())));
+            }
             if !st.channel_id.is_empty() {
                 acts.push((format!("Open {}", st.author), Act::OpenChannel(st.channel_id.clone())));
             }

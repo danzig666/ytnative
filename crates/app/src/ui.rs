@@ -18,8 +18,30 @@ pub const ALIGN_RIGHT: i32 = 2;
 pub const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 pub const DIM: [f32; 4] = [1.0, 1.0, 1.0, 0.62];
 pub const FAINT: [f32; 4] = [1.0, 1.0, 1.0, 0.35];
-/// The brand red (the app icon's).
-pub const ACCENT: [f32; 4] = [1.0, 0.031, 0.278, 1.0];
+/// The accent colour (default: the app icon's red), chosen in settings.
+static ACCENT_IDX: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+const ACCENTS: [[f32; 4]; 5] = [
+    [1.0, 0.031, 0.278, 1.0],
+    [0.16, 0.47, 1.0, 1.0],
+    [0.12, 0.72, 0.38, 1.0],
+    [0.56, 0.32, 0.96, 1.0],
+    [1.0, 0.55, 0.1, 1.0],
+];
+
+pub fn accent() -> [f32; 4] {
+    ACCENTS[ACCENT_IDX.load(std::sync::atomic::Ordering::Relaxed) as usize % ACCENTS.len()]
+}
+
+pub fn set_accent(name: &str) {
+    let i = match name {
+        "blue" => 1,
+        "green" => 2,
+        "purple" => 3,
+        "orange" => 4,
+        _ => 0,
+    };
+    ACCENT_IDX.store(i, std::sync::atomic::Ordering::Relaxed);
+}
 pub const PANEL: [f32; 4] = [0.06, 0.06, 0.08, 0.92];
 pub const ROW_FOCUS: [f32; 4] = [1.0, 1.0, 1.0, 0.16];
 pub const SCRIM: [f32; 4] = [0.0, 0.0, 0.0, 0.62];
@@ -89,7 +111,7 @@ impl CardSource<YtHost> for CardsSrc<'_> {
             let w = 14.0 * b.chars().count() as f32 + 20.0;
             let badge = Rect::new(r.x + r.w - w - 10.0, r.y + r.h - 44.0, w, 34.0);
             let live = matches!(self.cards[i].item.kind, yt_core::model::ItemKind::Live);
-            fill(p, badge, 6.0, if live { ACCENT } else { [0.0, 0.0, 0.0, 0.78] });
+            fill(p, badge, 6.0, if live { accent() } else { [0.0, 0.0, 0.0, 0.78] });
             text(p, b, badge.x + w / 2.0, badge.y + 4.0, 22, WHITE, ALIGN_CENTER, true);
         }
     }
@@ -191,7 +213,7 @@ impl VList {
                 fill(p, r, 12.0, ROW_FOCUS);
             }
             if row.active {
-                fill(p, Rect::new(r.x, r.y + 12.0, 6.0, r.h - 24.0), 3.0, ACCENT);
+                fill(p, Rect::new(r.x, r.y + 12.0, 6.0, r.h - 24.0), 3.0, accent());
             }
             let ty = r.y + (r.h - self.text_size as f32 * 1.3) / 2.0;
             let col = if focused || row.active { WHITE } else { DIM };

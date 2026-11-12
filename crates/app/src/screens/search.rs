@@ -237,7 +237,7 @@ impl Screen<YtHost> for SearchScreen {
         for (i, k) in keys().into_iter().enumerate() {
             let r = Self::key_rect(i);
             let is_focus = focused == Some(KEY_BASE + i as u32);
-            let bg = if is_focus { ui::WHITE } else if k == K::Go { ui::ACCENT } else { [1.0, 1.0, 1.0, 0.10] };
+            let bg = if is_focus { ui::WHITE } else if k == K::Go { ui::accent() } else { [1.0, 1.0, 1.0, 0.10] };
             ui::fill(p, r, 14.0, bg);
             let size = if matches!(k, K::Ch(_)) { 36 } else { 22 };
             let ink = if is_focus { [0.0, 0.0, 0.0, 1.0] } else { ui::WHITE };
