@@ -1,0 +1,13 @@
+{
+  "id": "com.ytnative.poc",
+  "version": "0.1.4",
+  "vendor": "ytnative",
+  "type": "native",
+  "main": "tvplay",
+  "title": "ytnative PoC",
+  "icon": "icon.png",
+  "largeIcon": "largeIcon.png",
+  "transparent": true,
+  "nativeLifeCycleInterfaceVersion": 2,
+  "requiredMemory": 64
+}

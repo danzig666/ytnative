@@ -1,0 +1,22 @@
+# build output
+/target
+/tvplay/target
+/tvplay/pkg/tvplay
+*.ipk
+
+# secrets / personal data (never commit: the repo is public)
+token.json
+*.token.json
+login.log
+
+# scratch output from the PoC CLI (signed URLs contain the requester's IP)
+last_streams.txt
+last.mpd
+master.m3u8
+h264.m3u8
+v1080.txt
+mp4url.txt
+*.mp4
+
+# local TV config
+.tv-host
