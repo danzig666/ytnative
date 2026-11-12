@@ -456,7 +456,7 @@ fn main() {
                 }
                 if !mouse_down && top == Some("browse") && (120.0..1056.0).contains(&y) {
                     let speed = 900.0 * dt;
-                    let dx = if x >= 1860.0 { speed } else if (390.0..450.0).contains(&x) { -speed } else { 0.0 };
+                    let dx = if x >= 1860.0 { speed } else if (40.0..110.0).contains(&x) { -speed } else { 0.0 };
                     if dx != 0.0 {
                         inputs.push(plx_machine::machine::InputEvent {
                             at: tick,
@@ -476,7 +476,7 @@ fn main() {
             d.prune(&r.unmounted);
             plx_ui::tex::note_queued(&mut d.budget);
 
-            let present = foreground && !blanked && (r.presented || had_input || input_echo > 0 || plx_machine::idle::should_present(now) || plx_ui::tex::has_pending());
+            let present = foreground && !blanked && (r.presented || had_input || input_echo > 0 || ui::take_animating() || plx_machine::idle::should_present(now) || plx_ui::tex::has_pending());
             // Simulator: a requested screenshot forces a full draw of the current state.
             #[cfg(windows)]
             let present = present || remote.as_ref().is_some_and(|r| r.shot_pending());

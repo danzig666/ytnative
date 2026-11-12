@@ -94,6 +94,19 @@ impl Thumbs {
 }
 
 fn fetch(http: &reqwest::blocking::Client, url: &str) -> Result<Decoded, PosterError> {
+    match fetch_one(http, url) {
+        Ok(d) => Ok(d),
+        // DeArrow renders crowd thumbnails on demand and often has none yet (204 / 404 / an
+        // empty body): fall back to the video's own thumbnail instead of a blank card.
+        Err(e) if url.contains("dearrow-thumb") => match url.split("videoID=").nth(1).map(|r| r.split('&').next().unwrap_or(r)) {
+            Some(id) if !id.is_empty() => fetch_one(http, &format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg")),
+            _ => Err(e),
+        },
+        Err(e) => Err(e),
+    }
+}
+
+fn fetch_one(http: &reqwest::blocking::Client, url: &str) -> Result<Decoded, PosterError> {
     let bytes = http.get(url).send().and_then(|r| r.error_for_status()).and_then(|r| r.bytes()).map_err(|_| PosterError::Fetch)?;
     let (w, h, rgba) = plx_gfx::img::img_decode_owned(&bytes).ok_or(PosterError::Decode)?;
     // Storyboard sheets are frame grids: keep full resolution so each frame stays sharp.

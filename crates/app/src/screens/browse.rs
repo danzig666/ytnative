@@ -17,20 +17,24 @@ use std::borrow::Cow;
 
 pub const STYLE: RowStyle = RowStyle { w: 336.0, h: 189.0, gap: 40.0, ..RowStyle::HOME };
 /// Width the cards of a row share (right of the sidebar).
-const ROW_W: f32 = 1464.0;
+const ROW_W: f32 = 1768.0;
+/// Left edge of the content (the sidebar is hidden and slides in over it).
+const LEFT: f32 = 96.0;
+/// Sidebar width.
+const NAV_W: f32 = 390.0;
 
 fn spec() -> GridSpec {
-    GridSpec::new(150.0, 96.0).columns(ui::card_cols(), ui::card_style(ui::card_cols(), ROW_W, 40.0), 420.0)
+    GridSpec::new(150.0, 96.0).columns(ui::card_cols(), ui::card_style(ui::card_cols(), ROW_W, 40.0), LEFT)
 }
 const G_NAV: GroupId = GroupId(1);
 const G_GRID: GroupId = GroupId(2);
 const NAV_BASE: u32 = 0x4000_0000;
 const T_SWITCH: plx_machine::machine::TimerId = plx_machine::machine::TimerId(31);
 /// Shelf rows (Home, topics): 16:9 cards starting right of the sidebar.
-const SHELF_STYLE: RowStyle = RowStyle { w: 336.0, h: 189.0, gap: 40.0, margin_x: 420.0, ..RowStyle::HOME };
+const SHELF_STYLE: RowStyle = RowStyle { w: 336.0, h: 189.0, gap: 40.0, margin_x: LEFT, ..RowStyle::HOME };
 /// Shelf styles for 3, 4 and 5 cards per row (sections hold a `&'static` style).
 static SHELF_STYLES: std::sync::LazyLock<[RowStyle; 3]> = std::sync::LazyLock::new(|| {
-    [3usize, 4, 5].map(|c| RowStyle { margin_x: 420.0, ..ui::card_style(c, ROW_W, 40.0) })
+    [3usize, 4, 5].map(|c| RowStyle { margin_x: LEFT, ..ui::card_style(c, ROW_W, 40.0) })
 });
 
 fn shelf_style() -> &'static RowStyle {
@@ -105,6 +109,13 @@ pub struct BrowseScreen {
     stack: Stack<usize>,
     rows: Rows,
     section: Section,
+    /// Sidebar slide position (0 hidden, 1 shown) and the clock it was last stepped at.
+    nav_t: f32,
+    /// The user went to the sidebar (keys or pointer), as opposed to focus waiting there.
+    user_nav: std::cell::Cell<bool>,
+    nav_ms: u32,
+    /// The pointer rests on the screen's left edge: show the sidebar.
+    pointer_open: bool,
     /// Section the sidebar focus rests on, switched to when `T_SWITCH` fires.
     pending: Option<Section>,
     state: State,
@@ -136,10 +147,14 @@ impl BrowseScreen {
             nav: VList { entry, group: G_NAV, base: NAV_BASE, rect: Rect::new(24.0, 150.0, 340.0, 860.0), row_h: 68.0, text_size: 30 },
             grid: Grid::new(entry, spec()),
             cols: ui::card_cols(),
-            stack: Stack::new(entry).clipped(Rect::new(390.0, 0.0, 1530.0, 1080.0)),
+            stack: Stack::new(entry).clipped(Rect::new(0.0, 0.0, 1920.0, 1080.0)),
             rows: Rows { key: FeedKey::Section(section) },
             section,
             pending: None,
+            nav_t: 0.0,
+            user_nav: std::cell::Cell::new(false),
+            nav_ms: 0,
+            pointer_open: false,
             state: State(section.key().into()),
         }
     }
@@ -161,7 +176,7 @@ impl BrowseScreen {
         self.state = State(section.key().into());
         self.grid = Grid::new(self.entry, spec());
         self.cols = ui::card_cols();
-        self.stack = Stack::new(self.entry).clipped(Rect::new(390.0, 0.0, 1530.0, 1080.0));
+        self.stack = Stack::new(self.entry).clipped(Rect::new(0.0, 0.0, 1920.0, 1080.0));
         self.rows = Rows { key: self.key() };
         if cx.views.store.feed(&self.key()).is_none() {
             fx.push(Fx::App(YtFx::Load(self.key())));
@@ -207,6 +222,23 @@ impl Machine<YtHost> for BrowseScreen {
             return self.step(&a, cx, fx);
         }
         let items = nav_items(cx);
+        // The pointer at the left edge brings the sidebar; leaving it to the right sends it away.
+        if let ScreenEvent::Input(plx_machine::machine::InputEvent { kind: plx_machine::machine::InputKind::Pointer { x, .. }, .. }) = ev {
+            let was = self.pointer_open;
+            if *x < 24.0 {
+                self.pointer_open = true;
+            } else if *x > NAV_W + 30.0 {
+                self.pointer_open = false;
+            }
+            if was != self.pointer_open {
+                fx.invalidate(plx_machine::present::Provenance::Input);
+            }
+        }
+        if let ScreenEvent::FocusMoved { to, .. } = ev {
+            if to.elem < NAV_BASE {
+                self.user_nav.set(false);
+            }
+        }
         match ev {
             ScreenEvent::Mount => {
                 if !cx.views.store.signed_in {
@@ -221,7 +253,7 @@ impl Machine<YtHost> for BrowseScreen {
                 if self.cols != ui::card_cols() {
                     self.cols = ui::card_cols();
                     self.grid = Grid::new(self.entry, spec());
-                    self.stack = Stack::new(self.entry).clipped(Rect::new(390.0, 0.0, 1530.0, 1080.0));
+                    self.stack = Stack::new(self.entry).clipped(Rect::new(0.0, 0.0, 1920.0, 1080.0));
                 }
                 // Back from sign-in or settings: feeds may have been cleared.
                 if cx.views.store.feed(&self.key()).is_none() {
@@ -236,6 +268,9 @@ impl Machine<YtHost> for BrowseScreen {
             // the page and start a load for every section passed). Pointer hover: never; a click
             // switches (`Activate`).
             ScreenEvent::FocusMoved { to, by, .. } if to.elem >= NAV_BASE => {
+                if matches!(by, plx_machine::machine::By::Dir | plx_machine::machine::By::Pointer) {
+                    self.user_nav.set(true);
+                }
                 if *by != plx_machine::machine::By::Pointer {
                     if let Some(NavItem::Section(s)) = self.nav.index(to.elem, items.len()).map(|i| items[i].clone()) {
                         self.pending = Some(s);
@@ -370,6 +405,13 @@ impl Focusable<YtHost> for BrowseScreen {
     }
     fn reconcile(&self, want: FocusKey<u32>, cx: &Cx<'_, YtHost>) -> FocusKey<u32> {
         let items = nav_items(cx);
+        // Focus parked on the sidebar only because nothing had loaded yet: move to the content
+        // once it is there (the sidebar opens only when the user goes to it).
+        if want.elem >= NAV_BASE && !self.user_nav.get() {
+            if let Some(c) = self.src(cx).cards.first() {
+                return FocusKey { entry: self.entry, elem: c.elem };
+            }
+        }
         if self.rows_mode(cx) && want.elem < NAV_BASE {
             return self.stack.view(&self.rows).reconcile(want, cx);
         }
@@ -421,24 +463,41 @@ impl Screen<YtHost> for BrowseScreen {
         if self.rows_mode(cx) {
             let mut view = self.stack.view(&self.rows);
             ui::reset_focused_caption();
-            Part::draw(&mut view, f, Rect::new(390.0, 0.0, 1530.0, 1080.0));
-            ui::draw_focused_caption(p, f.measure, 400.0);
+            Part::draw(&mut view, f, Rect::new(0.0, 0.0, 1920.0, 1080.0));
+            ui::draw_focused_caption(p, f.measure, 20.0);
             view.record_stops(f);
         } else if src.cards.is_empty() {
-            common::empty_state(p, feed, Rect::new(420.0, 150.0, 1460.0, 800.0));
+            common::empty_state(p, feed, Rect::new(LEFT, 150.0, 1920.0 - 2.0 * LEFT, 800.0));
         } else {
             ui::reset_focused_caption();
             self.grid.draw(f, p, &src);
-            ui::draw_focused_caption(p, f.measure, 400.0);
+            ui::draw_focused_caption(p, f.measure, 20.0);
             self.grid.record_stops(f, p, &src);
         }
         // Sidebar
         // Page title over a header band, after the content: scrolled rows go under it.
-        ui::header_band(p, Rect::new(390.0, 0.0, 1530.0, 118.0));
-        ui::text(p, self.section.title(), 420.0, 30.0, 44, ui::WHITE, ui::ALIGN_LEFT, true);
-        // Drawn after the content and opaque: a scrolled shelf's cards slide under it.
+        ui::header_band(p, Rect::new(0.0, 0.0, 1920.0, 118.0));
+        ui::text(p, self.section.title(), LEFT, 30.0, 44, ui::WHITE, ui::ALIGN_LEFT, true);
+        // The sidebar: hidden; slides in over the content while it has focus (Left from the first
+        // tile) or the pointer rests on the screen's left edge, and out again after.
+        let open = cx.focus.current.is_some_and(|k| k.entry == self.entry && k.elem >= NAV_BASE) || self.pointer_open;
+        let now = cx.views.now_ms;
+        let dt = now.wrapping_sub(self.nav_ms).min(100) as f32;
+        self.nav_ms = now;
+        let target = if open { 1.0 } else { 0.0 };
+        self.nav_t += (target - self.nav_t) * (1.0 - (-dt / 60.0).exp());
+        if (target - self.nav_t).abs() < 0.004 {
+            self.nav_t = target;
+        } else {
+            ui::animating();
+        }
+        let t = self.nav_t;
+        if t > 0.0 {
+            ui::fill(p, Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, [0.0, 0.0, 0.0, 0.45 * t]);
+        }
+        let p = p.translate(-NAV_W * (1.0 - t), 0.0);
         let bg = plx_ui::theme::CLEAR_RGB;
-        ui::fill(p, Rect::new(0.0, 0.0, 390.0, 1080.0), 0.0, [bg.0 * 0.65, bg.1 * 0.65, bg.2 * 0.65, 1.0]);
+        ui::fill(p, Rect::new(0.0, 0.0, NAV_W, 1080.0), 0.0, [bg.0 * 0.65, bg.1 * 0.65, bg.2 * 0.65, 1.0]);
         common::logo(p, 48.0, 52.0);
         let items = nav_items(cx);
         let rows: Vec<Row> = items
@@ -457,7 +516,9 @@ impl Screen<YtHost> for BrowseScreen {
             })
             .collect();
         self.nav.draw(p, &rows, self.nav.focused(cx, items.len()));
-        self.nav.stops(f, items.len());
+        if t > 0.9 {
+            self.nav.stops(f, items.len());
+        }
 
         common::toast(p, cx);
     }

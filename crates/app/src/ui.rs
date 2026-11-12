@@ -101,7 +101,7 @@ pub fn draw_focused_caption(p: Painter, m: &dyn plx_machine::machine::Measure, _
             let _scope = plx_ui::screen::ClipScope::open_in(p, Rect::new(ix, iy - 4.0, w, 40.0));
             text(p, &title, ix - off, iy, SIZE, WHITE, ALIGN_LEFT, true);
         }
-        plx_machine::idle::note_motion();
+        animating();
     }
     if !detail.is_empty() {
         let d = m.fit_line(&detail, w, 20, false).to_string_lossy().into_owned();
@@ -162,6 +162,19 @@ fn wrap2(m: &dyn plx_machine::machine::Measure, s: &str, w: f32, size: i32) -> (
 pub fn card_style(cols: usize, width: f32, gap: f32) -> plx_ui::card_row::RowStyle {
     let w = ((width - (cols as f32 - 1.0) * gap) / cols as f32).floor();
     plx_ui::card_row::RowStyle { w, h: (w * 9.0 / 16.0).floor(), gap, ..plx_ui::card_row::RowStyle::HOME }
+}
+
+static ANIMATING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A time-driven animation (marquee, sliding sidebar, comments panel) needs another frame.
+pub fn animating() {
+    ANIMATING.store(true, std::sync::atomic::Ordering::Relaxed);
+    plx_machine::idle::note_motion();
+}
+
+/// Taken by the main loop once per frame: present the next frame too.
+pub fn take_animating() -> bool {
+    ANIMATING.swap(false, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Set by the browse screen while it shows shelf rows: its page scrolls on `InputKind::Wheel`
