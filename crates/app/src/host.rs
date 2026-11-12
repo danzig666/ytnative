@@ -391,7 +391,7 @@ impl AppRig {
         let dt = now_ms.wrapping_sub(self.video_ms).min(100) as f32;
         self.video_ms = now_ms;
         if self.video_now != self.video_target {
-            let a = 1.0 - (-dt / 70.0).exp();
+            let a = 1.0 - (-dt / 45.0).exp();
             for i in 0..4 {
                 self.video_now[i] += (self.video_target[i] - self.video_now[i]) * a;
                 if (self.video_now[i] - self.video_target[i]).abs() < 1.0 {

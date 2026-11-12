@@ -256,6 +256,12 @@ pub fn text(p: Painter, s: &str, x: f32, y: f32, size: i32, col: [f32; 4], align
 }
 
 /// Truncates to roughly `max` characters with an ellipsis (cheap, measure-free).
+/// [`text`] in an extra face (1..=4, the subtitle fonts), bold weight.
+pub fn text_face(p: Painter, s: &str, x: f32, y: f32, size: i32, col: [f32; 4], align: i32, face: i32) -> f32 {
+    let Ok(c) = CString::new(s.replace('\0', "")) else { return 0.0 };
+    p.text(c.as_ptr(), x, y, size, col, align, 1 | (face.clamp(0, 4) << 4))
+}
+
 pub fn ellipsize(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()

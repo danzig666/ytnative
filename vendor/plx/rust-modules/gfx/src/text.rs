@@ -372,6 +372,22 @@ static FONTS: [AtomicPtr<TtfFont>; FONT_SLOTS] =
     [const { AtomicPtr::new(std::ptr::null_mut()) }; FONT_SLOTS];
 static FONTS_B: [AtomicPtr<TtfFont>; FONT_SLOTS] =
     [const { AtomicPtr::new(std::ptr::null_mut()) }; FONT_SLOTS];
+
+/// ytnative local change: extra faces (subtitle fonts), chosen by `bold >> 4` (1..=EXTRA_FACES);
+/// the low bit stays "bold". Every cache keys on the whole `bold` int, so faces never mix.
+pub const EXTRA_FACES: usize = 4;
+static FONTS_X: [[AtomicPtr<TtfFont>; FONT_SLOTS]; EXTRA_FACES] =
+    [const { [const { AtomicPtr::new(std::ptr::null_mut()) }; FONT_SLOTS] }; EXTRA_FACES];
+
+/// File of extra face `n` (1-based) in the app dir.
+fn extra_face_file(n: usize) -> &'static str {
+    match n {
+        1 => "subfont-sans.ttf",
+        2 => "subfont-serif.ttf",
+        3 => "subfont-mono.ttf",
+        _ => "subfont-roboto.ttf",
+    }
+}
 static mut TEXT_OK: c_int = 0;
 
 #[derive(Clone, Copy)]
@@ -901,6 +917,24 @@ fn log_font_fallback_once() {
 }
 
 unsafe fn font_at(sz: c_int, bold: c_int) -> *mut TtfFont {
+    let face = ((bold >> 4) & 0xf) as usize;
+    if (1..=EXTRA_FACES).contains(&face) {
+        let szi = sz.clamp(8, FONT_SLOTS as c_int - 1) as usize;
+        let slot = &FONTS_X[face - 1][szi];
+        let mut f = slot.load(Ordering::Relaxed);
+        if f.is_null() {
+            let path = CString::new(plx_base::paths::in_app_dir(extra_face_file(face)).into_os_string().into_encoded_bytes())
+                .unwrap_or_default();
+            f = TTF_OpenFont(path.as_ptr(), szi as c_int);
+            if f.is_null() {
+                return font_at(sz, bold & 1);
+            }
+            TTF_SetFontHinting(f, TTF_HINTING_LIGHT);
+            slot.store(f, Ordering::Relaxed);
+        }
+        return f;
+    }
+    let bold = bold & 1;
     let sz = sz.clamp(8, FONT_SLOTS as c_int - 1) as usize;
     // Rendering is main-thread-only, so `Relaxed` is all the slot needs; it is an `AtomicPtr` so
     // the table is not a `static mut` that every access reborrows through a raw pointer.

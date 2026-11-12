@@ -69,6 +69,8 @@ pub struct CommentsScreen {
     scroll_to: f32,
     /// When the panel opened (it slides in from the right).
     opened_ms: u32,
+    /// Already gave the video back (BACK, then Unmount).
+    released: bool,
     /// Wheel travel not yet turned into whole rows (the pointer's edge scroll is fractional).
     wheel: f32,
     state: State,
@@ -85,11 +87,22 @@ impl CommentsScreen {
             scroll_at: std::cell::Cell::new(0.0),
             scroll_to: 0.0,
             opened_ms: 0,
+            released: false,
             wheel: 0.0,
         }
     }
     fn len(&self, cx: &Cx<'_, YtHost>) -> usize {
         cx.views.store.comments.get(&self.video_id).map_or(0, |c| c.items.len())
+    }
+    /// Gives the video back (once): full size unless another comments panel is still open.
+    fn release(&mut self, fx: &mut Effects<'_, YtHost>) {
+        if std::mem::replace(&mut self.released, true) {
+            return;
+        }
+        ui::COMMENTS_OPEN.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        if !ui::comments_open() {
+            fx.push(Fx::App(YtFx::VideoRect(None)));
+        }
     }
     /// First visible comment.
     fn top(&self, cx: &Cx<'_, YtHost>) -> usize {
@@ -130,11 +143,12 @@ impl Machine<YtHost> for CommentsScreen {
                 fx.push(Fx::App(YtFx::VideoRect(Some(VIDEO))));
                 fx.invalidate(plx_machine::present::Provenance::Nav);
             }
-            ScreenEvent::Unmount => {
-                ui::COMMENTS_OPEN.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-                if !ui::comments_open() {
-                    fx.push(Fx::App(YtFx::VideoRect(None)));
-                }
+            ScreenEvent::Unmount => self.release(fx),
+            ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: plx_machine::machine::Key::Back, edge: plx_machine::machine::Edge::Down, .. }, .. }) => {
+                // Grow the video back and bring the player's captions at once; the panel's close
+                // fade runs alongside instead of before.
+                self.release(fx);
+                return Handled::No;
             }
             // The wheel scrolls the list; focus stays on its comment.
             ScreenEvent::Input(InputEvent { kind: InputKind::Wheel { dy }, .. }) => {

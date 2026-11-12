@@ -56,6 +56,8 @@ pub struct Settings {
     pub subtitle_color: String,
     /// "outline", "shadow" or "box".
     pub subtitle_style: String,
+    /// Subtitle font: "default", "sans", "serif", "mono", "roboto".
+    pub subtitle_font: String,
     /// Background opacity 0..=100.
     pub subtitle_background: u32,
     // SponsorBlock / DeArrow / RYD
@@ -140,6 +142,7 @@ impl Default for Settings {
             subtitle_auto_translate: false,
             subtitle_size: 44,
             subtitle_style: "outline".into(),
+            subtitle_font: "default".into(),
             subtitle_bottom_offset: 90,
             subtitle_color: "white".into(),
             subtitle_background: 72,

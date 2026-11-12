@@ -143,6 +143,11 @@ fn items(page: SettingsPage) -> Vec<Item> {
                 let i = C.iter().position(|c| *c == s.subtitle_color).unwrap_or(0) as i32;
                 s.subtitle_color = C[((i + d).rem_euclid(C.len() as i32)) as usize].into();
             }),
+            Opt("Font", |s| s.subtitle_font.clone(), |s, d| {
+                const F: &[&str] = &["default", "sans", "serif", "mono", "roboto"];
+                let i = F.iter().position(|x| *x == s.subtitle_font).unwrap_or(0) as i32;
+                s.subtitle_font = F[((i + d).rem_euclid(F.len() as i32)) as usize].into();
+            }),
             Opt("Style", |s| s.subtitle_style.clone(), |s, d| {
                 const T: &[&str] = &["outline", "shadow", "box"];
                 let i = T.iter().position(|x| *x == s.subtitle_style).unwrap_or(0) as i32;

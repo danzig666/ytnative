@@ -419,6 +419,7 @@ impl Screen<YtHost> for PlayerScreen {
                 let lift = if self.hud { 330.0 } else { 0.0 };
                 let s = &cx.views.store.settings;
                 SUB_STYLE.with(|c| c.set(match s.subtitle_style.as_str() { "shadow" => 1, "box" => 2, _ => 0 }));
+                SUB_FACE.with(|c| c.set(match s.subtitle_font.as_str() { "sans" => 1, "serif" => 2, "mono" => 3, "roboto" => 4, _ => 0 }));
                 let ink = match s.subtitle_color.as_str() {
                     "light gray" => [0.85, 0.85, 0.85, 1.0],
                     "gray" => [0.70, 0.70, 0.70, 1.0],
@@ -663,6 +664,8 @@ fn draw_caption_at(p: plx_ui::Painter, text: &str, size: i32, bottom: f32, ink: 
 thread_local! {
     /// The subtitle style for this frame's captions (0 outline, 1 shadow, 2 box).
     static SUB_STYLE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    /// The subtitle face (0 app font, 1..=4 the subtitle fonts).
+    static SUB_FACE: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
 }
 
 fn draw_caption_styled(p: plx_ui::Painter, text: &str, size: i32, bottom: f32, ink: [f32; 4], cx: f32, style: u8) {
@@ -675,7 +678,7 @@ fn draw_caption_styled(p: plx_ui::Painter, text: &str, size: i32, bottom: f32, i
         let y = top + i as f32 * lh;
         match style {
             1 => {
-                ui::text(p, line, cx + o * 1.2, y + o * 1.2, size, [0.0, 0.0, 0.0, 0.85], ui::ALIGN_CENTER, true);
+                cap_text(p, line, cx + o * 1.2, y + o * 1.2, size, [0.0, 0.0, 0.0, 0.85]);
             }
             2 => {
                 let w = line.chars().count() as f32 * size as f32 * 0.52 + 32.0;
@@ -683,11 +686,23 @@ fn draw_caption_styled(p: plx_ui::Painter, text: &str, size: i32, bottom: f32, i
             }
             _ => {
                 for (dx, dy) in [(-o, 0.0), (o, 0.0), (0.0, -o), (0.0, o), (-o, -o), (o, -o), (-o, o), (o, o)] {
-                    ui::text(p, line, cx + dx, y + dy, size, outline, ui::ALIGN_CENTER, true);
+                    cap_text(p, line, cx + dx, y + dy, size, outline);
                 }
             }
         }
-        ui::text(p, line, cx, y, size, ink, ui::ALIGN_CENTER, true);
+        cap_text(p, line, cx, y, size, ink);
+    }
+}
+
+/// One caption run in the chosen subtitle font.
+fn cap_text(p: plx_ui::Painter, s: &str, x: f32, y: f32, size: i32, ink: [f32; 4]) {
+    match SUB_FACE.with(|c| c.get()) {
+        0 => {
+            ui::text(p, s, x, y, size, ink, ui::ALIGN_CENTER, true);
+        }
+        face => {
+            ui::text_face(p, s, x, y, size, ink, ui::ALIGN_CENTER, face);
+        }
     }
 }
 

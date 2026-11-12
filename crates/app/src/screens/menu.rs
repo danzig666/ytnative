@@ -45,6 +45,7 @@ enum Act {
     SubSize,
     SubColor,
     SubStyle,
+    SubFont,
     RepeatMode,
     Close,
 }
@@ -74,6 +75,7 @@ pub struct MenuScreen {
 const SUB_SIZES: &[u32] = &[32, 38, 44, 52, 60, 72];
 const SUB_COLORS: &[&str] = &["white", "light gray", "gray", "dark gray", "yellow", "light yellow", "cyan", "green", "orange", "pink"];
 const SUB_STYLES: &[&str] = &["outline", "shadow", "box"];
+const SUB_FONTS: &[&str] = &["default", "sans", "serif", "mono", "roboto"];
 const SPEEDS: &[f32] = &[0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
 
 /// Card-menu item kinds, in the default order, with their settings labels.
@@ -233,6 +235,7 @@ impl MenuScreen {
             ("Subtitle size".to_string(), Act::SubSize),
             ("Subtitle colour".to_string(), Act::SubColor),
             ("Subtitle style".to_string(), Act::SubStyle),
+            ("Subtitle font".to_string(), Act::SubFont),
             ("When the video ends".to_string(), Act::RepeatMode),
             ("Close".to_string(), Act::Close),
         ]);
@@ -280,6 +283,7 @@ impl MenuScreen {
             Act::Subtitles => format!("{}  \u{203A}", if s.subtitles { "On" } else { "Off" }),
             Act::SubSize => format!("{}  \u{203A}", s.subtitle_size),
             Act::SubColor => format!("{}  \u{203A}", crate::i18n::tr(&s.subtitle_color)),
+            Act::SubFont => format!("{}  \u{203A}", crate::i18n::tr(&s.subtitle_font)),
             Act::SubStyle => format!("{}  \u{203A}", crate::i18n::tr(&s.subtitle_style)),
             Act::RepeatMode => format!(
                 "{}  \u{203A}",
@@ -324,6 +328,7 @@ impl MenuScreen {
             }
             Act::SubSize => (SUB_SIZES.iter().map(|v| v.to_string()).collect(), SUB_SIZES.iter().position(|v| *v == s.subtitle_size).unwrap_or(2)),
             Act::SubColor => (SUB_COLORS.iter().map(|v| v.to_string()).collect(), SUB_COLORS.iter().position(|v| *v == s.subtitle_color).unwrap_or(0)),
+            Act::SubFont => (SUB_FONTS.iter().map(|v| v.to_string()).collect(), SUB_FONTS.iter().position(|v| *v == s.subtitle_font).unwrap_or(0)),
             Act::SubStyle => (SUB_STYLES.iter().map(|v| v.to_string()).collect(), SUB_STYLES.iter().position(|v| *v == s.subtitle_style).unwrap_or(0)),
             Act::RepeatMode => {
                 const R: &[Repeat] = &[Repeat::Autoplay, Repeat::Off, Repeat::One, Repeat::List];
@@ -420,6 +425,10 @@ impl MenuScreen {
             Act::SubColor => fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| {
                 let i = SUB_COLORS.iter().position(|v| *v == s.subtitle_color).unwrap_or(0) as i32;
                 s.subtitle_color = SUB_COLORS[(i + dir).rem_euclid(SUB_COLORS.len() as i32) as usize].into();
+            })))),
+            Act::SubFont => fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| {
+                let i = SUB_FONTS.iter().position(|v| *v == s.subtitle_font).unwrap_or(0) as i32;
+                s.subtitle_font = SUB_FONTS[(i + dir).rem_euclid(SUB_FONTS.len() as i32) as usize].into();
             })))),
             Act::SubStyle => fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| {
                 let i = SUB_STYLES.iter().position(|v| *v == s.subtitle_style).unwrap_or(0) as i32;
