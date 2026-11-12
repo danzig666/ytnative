@@ -67,6 +67,19 @@ pub struct MenuScreen {
 
 const SPEEDS: &[f32] = &[0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
 
+/// Card-menu item kinds, in the default order, with their settings labels.
+pub const CARD_ITEMS: [(&str, &str); 9] = [
+    ("play", "Card menu: Play"),
+    ("open", "Card menu: Open channel / playlist"),
+    ("groups", "Card menu: Channel groups"),
+    ("pin", "Card menu: Pin to sidebar"),
+    ("watch_later", "Card menu: Save to Watch later"),
+    ("playlist", "Card menu: Save to playlist"),
+    ("youtube", "Card menu: YouTube's items"),
+    ("more_from", "Card menu: More from channel"),
+    ("block", "Card menu: Block channel"),
+];
+
 impl MenuScreen {
     fn make(entry: EntryId, title: String, acts: Vec<(String, Act)>) -> Self {
         MenuScreen {
@@ -79,34 +92,38 @@ impl MenuScreen {
     }
 
     pub fn card(entry: EntryId, elem: u32, cx: &Cx<'_, YtHost>) -> Self {
+        // (kind, label, action): kinds order and hide the items per the settings.
+        let mut tagged: Vec<(&'static str, String, Act)> = Vec::new();
         let mut acts = Vec::new();
+        let mut kind = "play";
         let mut title = "Options".to_string();
         if let Some(card) = cx.views.store.card(elem) {
             title = card.title.clone();
             if let Some(v) = card.video_id() {
-                acts.push(("Play".to_string(), Act::Play(v.to_string())));
+                kind = "play";
+                tagged.push((kind, "Play".to_string(), Act::Play(v.to_string())));
             }
             if let Some(Endpoint::Browse { browse_id, params }) = &card.item.endpoint {
                 if browse_id.starts_with("UC") {
-                    acts.push(("Open channel".into(), Act::OpenChannel(browse_id.clone())));
+                    tagged.push(("open", "Open channel".into(), Act::OpenChannel(browse_id.clone())));
                 } else {
-                    acts.push(("Open".into(), Act::OpenPlaylist(browse_id.clone())));
+                    tagged.push(("open", "Open".into(), Act::OpenPlaylist(browse_id.clone())));
                 }
                 if browse_id.starts_with("UC") {
                     for (gid, gt) in &cx.views.store.groups {
-                        acts.push((format!("Add to group \u{201C}{gt}\u{201D}"), Act::AddToGroup(Some(gid.clone()), browse_id.clone(), card.title.clone(), card.item.thumbnail.clone())));
+                        tagged.push(("groups", format!("Add to group \u{201C}{gt}\u{201D}"), Act::AddToGroup(Some(gid.clone()), browse_id.clone(), card.title.clone(), card.item.thumbnail.clone())));
                     }
-                    acts.push(("Add to a new group".into(), Act::AddToGroup(None, browse_id.clone(), card.title.clone(), card.item.thumbnail.clone())));
+                    tagged.push(("groups", "Add to a new group".into(), Act::AddToGroup(None, browse_id.clone(), card.title.clone(), card.item.thumbnail.clone())));
                 }
                 if cx.views.store.settings.pinned.iter().any(|p| &p.1 == browse_id) {
-                    acts.push(("Unpin from sidebar".into(), Act::Unpin(browse_id.clone())));
+                    tagged.push(("pin", "Unpin from sidebar".into(), Act::Unpin(browse_id.clone())));
                 } else {
-                    acts.push(("Pin to sidebar".into(), Act::Pin(card.title.clone(), browse_id.clone(), params.clone())));
+                    tagged.push(("pin", "Pin to sidebar".into(), Act::Pin(card.title.clone(), browse_id.clone(), params.clone())));
                 }
             }
             if let Some(v) = card.video_id() {
-                acts.push(("Save to Watch later".to_string(), Act::User(UserAction::WatchLater(v.to_string()))));
-                acts.push(("Save to playlist\u{2026}".to_string(), Act::PickPlaylist(v.to_string(), card.title.clone())));
+                tagged.push(("watch_later", "Save to Watch later".to_string(), Act::User(UserAction::WatchLater(v.to_string()))));
+                tagged.push(("playlist", "Save to playlist\u{2026}".to_string(), Act::PickPlaylist(v.to_string(), card.title.clone())));
             }
             // The card's own YouTube menu (Not interested, Don't recommend channel, Remove from
             // history, ...). Lazy "More" panels and plain navigation entries are left out.
@@ -117,14 +134,19 @@ impl MenuScreen {
                     MenuKind::NotInterested | MenuKind::DontRecommendChannel | MenuKind::RemoveFromHistory | MenuKind::RemoveFromWatchLater
                 ) || matches!(m.command, MenuCommand::Feedback { .. });
                 if useful && !m.label.is_empty() {
-                    acts.push((m.label.clone(), Act::User(UserAction::Menu(m.clone()))));
+                    tagged.push(("youtube", m.label.clone(), Act::User(UserAction::Menu(m.clone()))));
                 }
             }
             if let Some(ch) = &card.item.channel {
-                acts.push((format!("More from {ch}"), Act::SearchFor(ch.clone())));
-                acts.push((format!("Block {ch}"), Act::BlockChannel(ch.clone())));
+                tagged.push(("more_from", format!("More from {ch}"), Act::SearchFor(ch.clone())));
+                tagged.push(("block", format!("Block {ch}"), Act::BlockChannel(ch.clone())));
             }
         }
+        let s = &cx.views.store.settings;
+        let rank = |k: &str| s.card_menu.iter().position(|x| x == k).unwrap_or(usize::MAX);
+        tagged.sort_by_key(|(k, _, _)| rank(k)); // stable: items of one kind keep their order
+        let _ = kind;
+        acts.extend(tagged.into_iter().filter(|(k, _, _)| !s.card_menu_hidden.iter().any(|h| h == k)).map(|(_, l, a)| (l, a)));
         acts.push(("Close".into(), Act::Close));
         Self::make(entry, title, acts)
     }

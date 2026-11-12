@@ -2,7 +2,7 @@
 //! results. Title from the response; pages in more as you scroll; BACK returns.
 
 use super::common;
-use crate::host::{YtArg, YtFx, YtHost, YtMsg};
+use crate::host::{YtArg, YtFx, YtHost};
 use crate::store::FeedKey;
 use crate::ui::{self, CardsSrc};
 use plx_machine::machine::{Canon, Cx, Effects, EntryId, FocusKey, Fx, GroupId, Handled, LogicalState, Machine, NavOp, ScreenEvent};
@@ -14,7 +14,9 @@ use plx_ui::Rect;
 use std::borrow::Cow;
 
 const STYLE: RowStyle = RowStyle { w: 380.0, h: 214.0, gap: 44.0, ..RowStyle::HOME };
-const SPEC: GridSpec = GridSpec::new(170.0, 96.0).columns(4, STYLE, 112.0);
+fn spec() -> GridSpec {
+    GridSpec::new(170.0, 96.0).columns(ui::card_cols(), ui::card_style(ui::card_cols(), 1652.0, 44.0), 112.0)
+}
 const G: GroupId = GroupId(1);
 const G_BTN: GroupId = GroupId(2);
 const SUB_BTN: u32 = 0x7900_0000;
@@ -39,7 +41,7 @@ pub struct FeedScreen {
 
 impl FeedScreen {
     pub fn new(entry: EntryId, key: FeedKey) -> Self {
-        FeedScreen { entry, state: State(format!("{key:?}")), key, grid: Grid::new(entry, SPEC) }
+        FeedScreen { entry, state: State(format!("{key:?}")), key, grid: Grid::new(entry, spec()) }
     }
     fn src<'a>(&self, cx: &Cx<'a, YtHost>) -> CardsSrc<'a> {
         let f = cx.views.store.feed(&self.key);

@@ -92,6 +92,11 @@ pub struct Settings {
     pub content_country: String,
     // Remote
     pub lounge_enabled: bool,
+    /// Card menu: item kinds in display order (see `screens::menu::CARD_ITEMS`) and the hidden ones.
+    pub card_menu: Vec<String>,
+    pub card_menu_hidden: Vec<String>,
+    /// Cards per grid row / shelf: 3 (large), 4 (default) or 5 (small).
+    pub card_columns: u8,
     /// Playback engine: "system" (engine A, the TV's DASH player) or "auto" (engine B for 4K / VP9 / AV1).
     pub engine: String,
     /// Actions of the red, green, yellow and blue remote buttons ("none", "search", "settings",
@@ -162,6 +167,9 @@ impl Default for Settings {
             ui_language: "system".into(),
             content_country: "".into(),
             lounge_enabled: true,
+            card_menu: crate::screens::menu::CARD_ITEMS.iter().map(|(k, _)| k.to_string()).collect(),
+            card_menu_hidden: Vec::new(),
+            card_columns: 4,
             engine: "system".into(),
             color_keys: ["none".into(), "subtitles".into(), "speed".into(), "search".into()],
             proxy_url: String::new(),

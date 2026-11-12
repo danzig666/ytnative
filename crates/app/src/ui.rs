@@ -32,6 +32,23 @@ pub fn accent() -> [f32; 4] {
     ACCENTS[ACCENT_IDX.load(std::sync::atomic::Ordering::Relaxed) as usize % ACCENTS.len()]
 }
 
+static CARD_COLS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(4);
+
+/// Cards per row (3..=5), from the "Card size" setting.
+pub fn card_cols() -> usize {
+    CARD_COLS.load(std::sync::atomic::Ordering::Relaxed).clamp(3, 5) as usize
+}
+
+pub fn set_card_cols(n: u8) {
+    CARD_COLS.store(n.clamp(3, 5), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// A 16:9 card style that fits `cols` cards (with `gap`) into `width`.
+pub fn card_style(cols: usize, width: f32, gap: f32) -> plx_ui::card_row::RowStyle {
+    let w = ((width - (cols as f32 - 1.0) * gap) / cols as f32).floor();
+    plx_ui::card_row::RowStyle { w, h: (w * 9.0 / 16.0).floor(), gap, ..plx_ui::card_row::RowStyle::HOME }
+}
+
 pub fn set_accent(name: &str) {
     let i = match name {
         "blue" => 1,

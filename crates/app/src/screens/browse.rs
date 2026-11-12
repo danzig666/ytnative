@@ -16,12 +16,25 @@ use plx_ui::Rect;
 use std::borrow::Cow;
 
 pub const STYLE: RowStyle = RowStyle { w: 336.0, h: 189.0, gap: 40.0, ..RowStyle::HOME };
-const SPEC: GridSpec = GridSpec::new(150.0, 96.0).columns(4, STYLE, 420.0);
+/// Width the cards of a row share (right of the sidebar).
+const ROW_W: f32 = 1464.0;
+
+fn spec() -> GridSpec {
+    GridSpec::new(150.0, 96.0).columns(ui::card_cols(), ui::card_style(ui::card_cols(), ROW_W, 40.0), 420.0)
+}
 const G_NAV: GroupId = GroupId(1);
 const G_GRID: GroupId = GroupId(2);
 const NAV_BASE: u32 = 0x4000_0000;
 /// Shelf rows (Home, topics): 16:9 cards starting right of the sidebar.
 const SHELF_STYLE: RowStyle = RowStyle { w: 336.0, h: 189.0, gap: 40.0, margin_x: 420.0, ..RowStyle::HOME };
+/// Shelf styles for 3, 4 and 5 cards per row (sections hold a `&'static` style).
+static SHELF_STYLES: std::sync::LazyLock<[RowStyle; 3]> = std::sync::LazyLock::new(|| {
+    [3usize, 4, 5].map(|c| RowStyle { margin_x: 420.0, ..ui::card_style(c, ROW_W, 40.0) })
+});
+
+fn shelf_style() -> &'static RowStyle {
+    &SHELF_STYLES[ui::card_cols() - 3]
+}
 const SPACER: usize = usize::MAX;
 
 /// The section's titled rows as a plx `Stack` page.
@@ -39,7 +52,7 @@ impl StackPage<YtHost> for Rows {
         out.push(SectionSpec::new(SPACER, Kind::Custom { height: 110.0, focusable: false }, GroupId(90)));
         if let Some(f) = cx.views.store.feed(&self.key) {
             for i in 0..f.shelves.len() {
-                out.push(SectionSpec::new(i, Kind::Shelf { style: &SHELF_STYLE, heading: 56.0 }, GroupId(100 + i as u32)));
+                out.push(SectionSpec::new(i, Kind::Shelf { style: shelf_style(), heading: 56.0 }, GroupId(100 + i as u32)));
             }
         }
     }
@@ -92,6 +105,8 @@ pub struct BrowseScreen {
     rows: Rows,
     section: Section,
     state: State,
+    /// Cards per row the grid / rows were built for.
+    cols: usize,
 }
 
 fn nav_items(cx: &Cx<'_, YtHost>) -> Vec<NavItem> {
@@ -116,7 +131,8 @@ impl BrowseScreen {
         BrowseScreen {
             entry,
             nav: VList { entry, group: G_NAV, base: NAV_BASE, rect: Rect::new(24.0, 150.0, 340.0, 860.0), row_h: 68.0, text_size: 30 },
-            grid: Grid::new(entry, SPEC),
+            grid: Grid::new(entry, spec()),
+            cols: ui::card_cols(),
             stack: Stack::new(entry).clipped(Rect::new(390.0, 0.0, 1530.0, 1080.0)),
             rows: Rows { key: FeedKey::Section(section) },
             section,
@@ -139,7 +155,8 @@ impl BrowseScreen {
         }
         self.section = section;
         self.state = State(section.key().into());
-        self.grid = Grid::new(self.entry, SPEC);
+        self.grid = Grid::new(self.entry, spec());
+        self.cols = ui::card_cols();
         self.stack = Stack::new(self.entry).clipped(Rect::new(390.0, 0.0, 1530.0, 1080.0));
         self.rows = Rows { key: self.key() };
         if cx.views.store.feed(&self.key()).is_none() {
@@ -196,6 +213,12 @@ impl Machine<YtHost> for BrowseScreen {
                 }
             }
             ScreenEvent::Uncover => {
+                // Back from settings with another card size: rebuild the layouts.
+                if self.cols != ui::card_cols() {
+                    self.cols = ui::card_cols();
+                    self.grid = Grid::new(self.entry, spec());
+                    self.stack = Stack::new(self.entry).clipped(Rect::new(390.0, 0.0, 1530.0, 1080.0));
+                }
                 // Back from sign-in or settings: feeds may have been cleared.
                 if cx.views.store.feed(&self.key()).is_none() {
                     fx.push(Fx::App(YtFx::Load(self.key())));
@@ -373,7 +396,7 @@ impl Screen<YtHost> for BrowseScreen {
             .iter()
             .map(|i| match i {
                 NavItem::Section(s) => Row::new(s.title()).active(*s == self.section),
-                NavItem::Search => Row::new("\u{1F50D}  Search"),
+                NavItem::Search => Row::new(format!("\u{1F50D}  {}", crate::i18n::tr("Search"))),
                 NavItem::Pinned(t, ..) => Row::new(format!("\u{2605} {}", ui::ellipsize(t, 16))),
                 NavItem::Group(_, t) => Row::new(format!("\u{2022} {}", ui::ellipsize(t, 16))),
                 NavItem::Settings => Row::new("Settings"),

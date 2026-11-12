@@ -32,6 +32,33 @@ fn cycle_key(k: &mut String, d: i32) {
     *k = A[((i + d).rem_euclid(A.len() as i32)) as usize].into();
 }
 
+/// Card-menu row value: its position, or hidden.
+fn card_item_status(s: &Settings, key: &str) -> String {
+    if s.card_menu_hidden.iter().any(|h| h == key) {
+        return "hidden".into();
+    }
+    match s.card_menu.iter().position(|k| k == key) {
+        Some(i) => format!("#{}", i + 1),
+        None => "shown".into(),
+    }
+}
+
+/// LEFT moves the item one place up; OK / RIGHT shows or hides it.
+fn card_item_edit(s: &mut Settings, key: &str, d: i32) {
+    if !s.card_menu.iter().any(|k| k == key) {
+        s.card_menu.push(key.to_string());
+    }
+    if d < 0 {
+        if let Some(i) = s.card_menu.iter().position(|k| k == key).filter(|i| *i > 0) {
+            s.card_menu.swap(i, i - 1);
+        }
+    } else if let Some(i) = s.card_menu_hidden.iter().position(|h| h == key) {
+        s.card_menu_hidden.remove(i);
+    } else {
+        s.card_menu_hidden.push(key.to_string());
+    }
+}
+
 fn on_off(b: bool) -> String {
     if b { "On".into() } else { "Off".into() }
 }
@@ -158,6 +185,9 @@ fn items(page: SettingsPage) -> Vec<Item> {
                 Opt("Blank screen when idle (OLED)", |s| format!("{} min", s.idle_blank_secs / 60), |s, d| {
                     s.idle_blank_secs = cycle(&[60, 120, 300, 600], s.idle_blank_secs, d)
                 }),
+                Opt("Card size", |s| match s.card_columns { 3 => "large".into(), 5 => "small".into(), _ => "medium".into() }, |s, d| {
+                    s.card_columns = cycle(&[3u8, 4, 5], s.card_columns, d)
+                }),
                 Opt("Interface language", |s| s.ui_language.clone(), |s, d| {
                     let mut l = vec!["system", "en"];
                     l.extend(crate::i18n::languages());
@@ -201,6 +231,14 @@ fn items(page: SettingsPage) -> Vec<Item> {
                 section_toggle!("Sidebar: Sports", Section::Sports),
                 section_toggle!("Sidebar: Trending", Section::Trending),
             ]);
+            macro_rules! card_item {
+                ($i:expr) => {
+                    Opt(super::menu::CARD_ITEMS[$i].1, |s| card_item_status(s, super::menu::CARD_ITEMS[$i].0), |s, d| {
+                        card_item_edit(s, super::menu::CARD_ITEMS[$i].0, d)
+                    })
+                };
+            }
+            v.extend([card_item!(0), card_item!(1), card_item!(2), card_item!(3), card_item!(4), card_item!(5), card_item!(6), card_item!(7), card_item!(8)]);
             v
         }
         SettingsPage::Remote => vec![

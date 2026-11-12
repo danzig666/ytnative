@@ -362,6 +362,7 @@ impl AppRig {
     pub fn drain(&mut self, now_ms: u32) -> Vec<(Addr, YtMsg)> {
         self.now_ms = now_ms;
         crate::ui::set_accent(&self.store.settings.accent);
+        crate::ui::set_card_cols(self.store.settings.card_columns);
         if self.store.settings.ui_language != self.applied_language {
             self.applied_language = self.store.settings.ui_language.clone();
             crate::i18n::set_language(&self.applied_language, plx_platform::i18n::current().format_locale());
