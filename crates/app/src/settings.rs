@@ -92,6 +92,8 @@ pub struct Settings {
     pub content_country: String,
     // Remote
     pub lounge_enabled: bool,
+    /// Playback engine: "system" (engine A, the TV's DASH player) or "auto" (engine B for 4K / VP9 / AV1).
+    pub engine: String,
     /// Actions of the red, green, yellow and blue remote buttons ("none", "search", "settings",
     /// "accounts", "subtitles", "speed").
     pub color_keys: [String; 4],
@@ -159,6 +161,7 @@ impl Default for Settings {
             ui_language: "system".into(),
             content_country: "".into(),
             lounge_enabled: true,
+            engine: "system".into(),
             color_keys: ["none".into(), "subtitles".into(), "speed".into(), "search".into()],
             proxy_url: String::new(),
             doh: "off".into(),

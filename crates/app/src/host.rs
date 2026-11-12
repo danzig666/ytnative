@@ -366,6 +366,7 @@ impl AppRig {
             self.applied_language = self.store.settings.ui_language.clone();
             crate::i18n::set_language(&self.applied_language, plx_platform::i18n::current().format_locale());
         }
+        self.player.tick();
         self.player_view = self.player.status.lock().unwrap().clone();
         if let Some((_, until)) = &self.store.toast {
             if now_ms > *until {
@@ -786,6 +787,15 @@ impl Rig<YtHost> for AppRig {
                             None
                         }
                     });
+                #[cfg(not(windows))]
+                {
+                    let codec = match s.codec {
+                        crate::settings::Codec::Avc => crate::feed::VideoCodec::H264,
+                        crate::settings::Codec::Vp9 => crate::feed::VideoCodec::Vp9,
+                        crate::settings::Codec::Av1 => crate::feed::VideoCodec::Av1,
+                    };
+                    self.player.feed_prefs = (s.engine == "auto").then(|| crate::feed::Prefs::new(s.max_height as u32, codec));
+                }
                 self.player.start(video_id, self.session.clone(), prefs, extras, start);
             }
             YtFx::Stop => {

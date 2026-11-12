@@ -95,6 +95,8 @@ impl Player {
         self.seek_by(to_ms as i64 - pos);
     }
 
+    pub fn tick(&mut self) {}
+
     pub fn set_zoom(&mut self, zoom: crate::player::Zoom) {
         self.status.lock().unwrap().zoom = zoom;
     }

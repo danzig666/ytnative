@@ -90,6 +90,9 @@ fn items(page: SettingsPage) -> Vec<Item> {
                 },
                 |s, d| s.repeat = cycle(&[Repeat::Autoplay, Repeat::Off, Repeat::One, Repeat::List], s.repeat, d),
             ),
+            Opt("Playback engine", |s| if s.engine == "auto" { "4K / VP9 / AV1 (engine B)".into() } else { "System player".into() }, |s, _| {
+                s.engine = if s.engine == "auto" { "system".into() } else { "auto".into() }
+            }),
             Opt("Resume where you left off", |s| on_off(s.resume_playback), |s, _| s.resume_playback = !s.resume_playback),
             Opt("Hide controls after", |s| format!("{} s", s.hud_timeout_secs), |s, d| s.hud_timeout_secs = cycle(&[2, 3, 4, 6, 8, 12], s.hud_timeout_secs, d)),
             Opt("Clock in player", |s| on_off(s.show_clock), |s, _| s.show_clock = !s.show_clock),

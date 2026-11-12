@@ -113,12 +113,44 @@ pub struct Player {
     window: Option<CString>,
     media_id: Arc<Mutex<Option<String>>>,
     luna: Option<&'static Luna>,
+    /// Engine B settings; `Some` lets a video go to the Feed engine when it needs it (4K, VP9, AV1).
+    pub feed_prefs: Option<crate::feed::Prefs>,
+    feed: crate::feed::FeedPlayer,
+    /// A resolved video the worker hands to engine B (started on the main thread in `tick`).
+    handoff: Arc<Mutex<Option<Handoff>>>,
+}
+
+#[cfg(not(windows))]
+struct Handoff {
+    video_id: String,
+    resolved: yt_core::streams::Resolved,
+    start_ms: Option<u64>,
+}
+
+/// Engine B is worth it: not live, and its best format is above 1080p or not H.264.
+#[cfg(not(windows))]
+fn wants_feed(resolved: &yt_core::streams::Resolved, prefs: &crate::feed::Prefs) -> bool {
+    if resolved.is_live || !crate::feed::FeedPlayer::available() {
+        return false;
+    }
+    match crate::feed::FeedPlayer::choose(resolved, prefs) {
+        Some(c) => c.video_codec != crate::feed::VideoCodec::H264 || c.video["height"].as_u64().unwrap_or(0) > 1080,
+        None => false,
+    }
 }
 
 #[cfg(not(windows))]
 impl Player {
     pub fn new() -> Self {
-        Player { status: Default::default(), window: None, media_id: Default::default(), luna: None }
+        Player {
+            status: Default::default(),
+            window: None,
+            media_id: Default::default(),
+            luna: None,
+            feed_prefs: None,
+            feed: crate::feed::FeedPlayer::new(),
+            handoff: Default::default(),
+        }
     }
 
     /// A playback session (and its video window) exists.
@@ -169,8 +201,9 @@ impl Player {
             return;
         };
         let (status, media_id) = (self.status.clone(), self.media_id.clone());
+        let feed = self.feed_prefs.clone().map(|p| (p, self.handoff.clone()));
         let spawned = plx_base::task::spawn("play", move || {
-            match run(luna, &video_id, &window_id, &session, &status, &media_id, prefs, start_ms) {
+            match run(luna, &video_id, &window_id, &session, &status, &media_id, prefs, start_ms, feed) {
                 Ok(()) => {
                     let (v, s2, st2) = (video_id.clone(), session.clone(), status.clone());
                     let _ = plx_base::task::spawn("track", move || track_history(&v, &s2, &st2));
@@ -188,12 +221,31 @@ impl Player {
         }
     }
 
+    /// Main thread, every frame: starts a handed-off engine B session, drives engine B.
+    pub fn tick(&mut self) {
+        let h = self.handoff.lock().unwrap().take();
+        if let Some(h) = h {
+            let prefs = self.feed_prefs.clone().unwrap_or_else(|| crate::feed::Prefs::new(2160, crate::feed::VideoCodec::Vp9));
+            self.feed.status = self.status.clone();
+            let wid = self.window.as_ref().map(|w| w.to_string_lossy().into_owned());
+            if let Err(e) = self.feed.start(h.video_id, h.resolved, prefs, wid, h.start_ms) {
+                self.fail(&format!("engine B: {e:#}"));
+            }
+        }
+        if self.feed.active() {
+            self.feed.tick();
+        }
+    }
+
     fn fail(&mut self, why: &str) {
         crate::log(&format!("player: {why}"));
         self.status.lock().unwrap().phase = Phase::Failed(why.to_string());
     }
 
     pub fn toggle_pause(&mut self) {
+        if self.feed.active() {
+            return self.feed.toggle_pause();
+        }
         let Some(luna) = self.luna else { return };
         let Some(mid) = self.media_id.lock().unwrap().clone() else { return };
         let paused = self.status.lock().unwrap().phase == Phase::Paused;
@@ -205,6 +257,9 @@ impl Player {
     }
 
     pub fn seek_to(&mut self, to_ms: u64) {
+        if self.feed.active() {
+            return self.feed.seek_to(to_ms);
+        }
         let pos = self.status.lock().unwrap().position_ms as i64;
         self.seek_by(to_ms as i64 - pos);
     }
@@ -235,6 +290,11 @@ impl Player {
 
     /// Playback speed (0.25..2.0) through uMediaServer's setPlayRate.
     pub fn set_rate(&mut self, rate: f32) {
+        if self.feed.active() {
+            // Starfish has no play-rate call in this mode.
+            self.feed.set_rate(rate);
+            return;
+        }
         let Some(luna) = self.luna else { return };
         let Some(mid) = self.media_id.lock().unwrap().clone() else { return };
         self.status.lock().unwrap().rate = rate;
@@ -246,6 +306,9 @@ impl Player {
     }
 
     pub fn seek_by(&mut self, delta_ms: i64) {
+        if self.feed.active() {
+            return self.feed.seek_by(delta_ms);
+        }
         let Some(luna) = self.luna else { return };
         let Some(mid) = self.media_id.lock().unwrap().clone() else { return };
         let (pos, dur) = {
@@ -264,6 +327,11 @@ impl Player {
 
     /// Main thread. Unloads the pipeline (if any) and destroys the video window.
     pub fn stop(&mut self) {
+        self.handoff.lock().unwrap().take();
+        if self.feed.active() {
+            // Engine B unloads first: the window it renders into is ours.
+            self.feed.stop();
+        }
         let mid = self.media_id.lock().unwrap().take();
         if let (Some(luna), Some(mid)) = (self.luna, mid) {
             // Synchronous on purpose: the window must outlive the pipeline that renders into it.
@@ -295,6 +363,7 @@ fn run(
     media_id: &Arc<Mutex<Option<String>>>,
     prefs: yt_core::streams::Prefs,
     start_ms: Option<u64>,
+    feed: Option<(crate::feed::Prefs, Arc<Mutex<Option<Handoff>>>)>,
 ) -> anyhow::Result<()> {
     let resolved = {
         let mut g = session.lock().unwrap();
@@ -318,6 +387,21 @@ fn run(
         s.captions = resolved.captions.clone();
         s.audio_tracks = resolved.audio_tracks();
         s.audio_track = prefs.audio_track.clone();
+    }
+    if let Some((fp, slot)) = feed {
+        if wants_feed(&resolved, &fp) {
+            crate::log("player: handing the video to engine B (Feed)");
+            *slot.lock().unwrap() = Some(Handoff { video_id: video_id.to_string(), resolved, start_ms });
+            plx_machine::present::wake_from_worker();
+            // Let the main thread start it before the extras land in the shared status.
+            for _ in 0..60 {
+                if slot.lock().unwrap().is_none() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            return Ok(());
+        }
     }
     std::fs::create_dir_all("/tmp/ytnative")?;
     // Live: the HLS master reduced to H.264 renditions (DASH-from-formats only works for VOD).
