@@ -27,6 +27,7 @@ enum Act {
     SearchFor(String),
     User(UserAction),
     Comments(String),
+    Info,
     Filter(u8),
     ApplyFilters(String),
     Speed,
@@ -143,6 +144,7 @@ impl MenuScreen {
                 ));
             }
             acts.push(("Save to Watch later".to_string(), Act::User(UserAction::WatchLater(st.video_id.clone()))));
+            acts.push(("Video info & chapters".to_string(), Act::Info));
             acts.push(("Comments".to_string(), Act::Comments(st.video_id.clone())));
             if !st.channel_id.is_empty() {
                 acts.push((format!("Open {}", st.author), Act::OpenChannel(st.channel_id.clone())));
@@ -244,6 +246,10 @@ impl MenuScreen {
             Act::User(a) => {
                 fx.push(Fx::App(YtFx::Act(a.clone())));
                 fx.push(Fx::Nav(NavOp::Pop));
+            }
+            Act::Info => {
+                fx.push(Fx::Nav(NavOp::Pop));
+                fx.push(Fx::Nav(NavOp::Push(YtArg::Info)));
             }
             Act::Comments(v) => {
                 fx.push(Fx::Nav(NavOp::Pop));

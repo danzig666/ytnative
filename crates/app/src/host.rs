@@ -45,6 +45,10 @@ pub enum YtArg {
     PlayerMenu,
     Accounts,
     Comments(String),
+    /// Replies to one comment: (replies continuation, parent author).
+    Replies(String, String),
+    /// Video info: description + chapters.
+    Info,
     SearchFilters(String),
 }
 
@@ -65,6 +69,8 @@ impl ScreenArg for YtArg {
             YtArg::Accounts => 9,
             YtArg::Comments(_) => 10,
             YtArg::SearchFilters(_) => 11,
+            YtArg::Replies(..) => 12,
+            YtArg::Info => 13,
         })
     }
     fn title(&self) -> Option<&str> {
@@ -112,7 +118,8 @@ pub enum YtFx {
     Act(UserAction),
     SetQueue(Vec<String>, bool),
     EditFilters(Box<dyn FnOnce(&mut yt_core::search_filters::Filters) + Send>),
-    LoadComments { video_id: String, continuation: Option<String> },
+    /// `key` names the list in the store: a video id (top-level comments) or a replies token.
+    LoadComments { key: String, continuation: Option<String>, append: bool },
     Load(FeedKey),
     More(FeedKey),
     Play { video_id: String, playlist: Option<String> },
@@ -195,7 +202,9 @@ impl Mounter<YtHost> for Mount {
             YtArg::Menu(elem) => Box::new(screens::menu::MenuScreen::card(entry, *elem, cx)),
             YtArg::PlayerMenu => Box::new(screens::menu::MenuScreen::player(entry, cx)),
             YtArg::Accounts => Box::new(screens::accounts::AccountsScreen::new(entry)),
-            YtArg::Comments(v) => Box::new(screens::comments::CommentsScreen::new(entry, v.clone())),
+            YtArg::Comments(v) => Box::new(screens::comments::CommentsScreen::new(entry, v.clone(), None)),
+            YtArg::Replies(token, author) => Box::new(screens::comments::CommentsScreen::new(entry, token.clone(), Some(author.clone()))),
+            YtArg::Info => Box::new(screens::info::InfoScreen::new(entry)),
             YtArg::SearchFilters(q) => Box::new(screens::menu::MenuScreen::filters(entry, q.clone())),
         }
     }
@@ -660,13 +669,13 @@ impl Rig<YtHost> for AppRig {
                     Work::Toast { msg: r, accounts_changed: changed }
                 });
             }
-            YtFx::LoadComments { video_id, continuation } => {
+            YtFx::LoadComments { key, continuation, append } => {
+                let video_id = key;
                 let c = self.store.comments.entry(video_id.clone()).or_default();
                 if c.loading {
                     return;
                 }
                 c.loading = true;
-                let append = continuation.is_some();
                 self.spawn(from, "comments", move |s| {
                     let page = with_session(s, |s| {
                         let token = match &continuation {

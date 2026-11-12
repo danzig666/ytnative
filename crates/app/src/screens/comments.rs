@@ -1,6 +1,7 @@
 //! Comments for a video: a scrolling list; more pages load as you approach the end.
 
-use crate::host::{YtFx, YtHost, YtMsg};
+use crate::host::{YtArg, YtFx, YtHost, YtMsg};
+use plx_machine::machine::NavOp;
 use crate::ui::{self, VList};
 use plx_machine::machine::{Canon, Cx, Effects, EntryId, FocusKey, Fx, GroupId, Handled, LogicalState, Machine, ScreenEvent};
 use plx_ui::frame::Budget;
@@ -51,15 +52,19 @@ impl LogicalState for State {
 }
 
 pub struct CommentsScreen {
+    /// Store key: the video id, or the replies continuation for a reply thread.
     video_id: String,
+    /// Some(parent author) when showing replies.
+    replies_to: Option<String>,
     list: VList,
     state: State,
 }
 
 impl CommentsScreen {
-    pub fn new(entry: EntryId, video_id: String) -> Self {
+    pub fn new(entry: EntryId, video_id: String, replies_to: Option<String>) -> Self {
         CommentsScreen {
             state: State(video_id.clone()),
+            replies_to,
             video_id,
             list: VList { entry, group: G, base: BASE, rect: Rect::new(160.0, 170.0, 1600.0, 880.0), row_h: 176.0, text_size: TEXT },
         }
@@ -73,7 +78,19 @@ impl Machine<YtHost> for CommentsScreen {
     type Ev = ScreenEvent<YtHost>;
     fn step(&mut self, ev: &Self::Ev, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) -> Handled {
         match ev {
-            ScreenEvent::Mount => fx.push(Fx::App(YtFx::LoadComments { video_id: self.video_id.clone(), continuation: None })),
+            ScreenEvent::Mount => {
+                let continuation = self.replies_to.as_ref().map(|_| self.video_id.clone());
+                fx.push(Fx::App(YtFx::LoadComments { key: self.video_id.clone(), continuation, append: false }));
+            }
+            ScreenEvent::Activate(e) => {
+                let n = self.len(cx);
+                if let Some(i) = self.list.index(*e, n) {
+                    let c = &cx.views.store.comments[&self.video_id].items[i];
+                    if let Some(token) = &c.replies_continuation {
+                        fx.push(Fx::Nav(NavOp::Push(YtArg::Replies(token.clone(), c.author.clone()))));
+                    }
+                }
+            }
             ScreenEvent::Async(_, YtMsg::Comments) => fx.invalidate(plx_machine::present::Provenance::Lifecycle),
             ScreenEvent::FocusMoved { to, .. } => {
                 let n = self.len(cx);
@@ -81,7 +98,7 @@ impl Machine<YtHost> for CommentsScreen {
                     let c = &cx.views.store.comments[&self.video_id];
                     if i + 4 >= n && !c.loading {
                         if let Some(next) = c.next.clone() {
-                            fx.push(Fx::App(YtFx::LoadComments { video_id: self.video_id.clone(), continuation: Some(next) }));
+                            fx.push(Fx::App(YtFx::LoadComments { key: self.video_id.clone(), continuation: Some(next), append: true }));
                         }
                     }
                 }
@@ -132,7 +149,11 @@ impl Screen<YtHost> for CommentsScreen {
     fn draw(&mut self, f: &mut DrawFrame<'_, '_, YtHost>) {
         let p = f.painter;
         let cx = f.cx;
-        ui::text(p, "Comments", 160.0, 70.0, 48, ui::WHITE, ui::ALIGN_LEFT, true);
+        let title = match &self.replies_to {
+            Some(a) => format!("Replies to {a}"),
+            None => "Comments".into(),
+        };
+        ui::text(p, &title, 160.0, 70.0, 48, ui::WHITE, ui::ALIGN_LEFT, true);
         let Some(c) = cx.views.store.comments.get(&self.video_id) else {
             ui::text(p, "Loading\u{2026}", 960.0, 500.0, 34, ui::DIM, ui::ALIGN_CENTER, false);
             return;
@@ -167,7 +188,7 @@ impl Screen<YtHost> for CommentsScreen {
                 foot.push_str(&format!("Likes {l}"));
             }
             if cm.reply_count > 0 {
-                foot.push_str(&format!("   {} replies", cm.reply_count));
+                foot.push_str(&format!("   {} replies  (OK)", cm.reply_count));
             }
             ui::text(p, &foot, r.x + r.w - 24.0, r.y + 14.0, 22, ui::FAINT, ui::ALIGN_RIGHT, false);
         }
