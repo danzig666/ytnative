@@ -69,6 +69,13 @@ impl Remote {
                 "right" => (79 | ARROW, 0),
                 "ok" | "enter" => (13, 0),
                 "back" => (0, 482),
+                "red" => (0, 403),
+                "green" => (0, 404),
+                "yellow" => (0, 405),
+                "blue" => (0, 406),
+                "play" => (0, 450),
+                "ff" => (0, 451),
+                "rw" => (0, 452),
                 "exit" => {
                     *quit = true;
                     continue;

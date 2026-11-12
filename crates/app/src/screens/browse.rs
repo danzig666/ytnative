@@ -375,7 +375,7 @@ impl Screen<YtHost> for BrowseScreen {
                 NavItem::Section(s) => Row::new(s.title()).active(*s == self.section),
                 NavItem::Search => Row::new("\u{1F50D}  Search"),
                 NavItem::Pinned(t, ..) => Row::new(format!("\u{2605} {}", ui::ellipsize(t, 16))),
-                NavItem::Group(_, t) => Row::new(format!("\u{25A4} {}", ui::ellipsize(t, 16))),
+                NavItem::Group(_, t) => Row::new(format!("\u{2022} {}", ui::ellipsize(t, 16))),
                 NavItem::Settings => Row::new("Settings"),
                 NavItem::Account => Row::new(match (&cx.views.store.account, cx.views.store.signed_in) {
                     (Some(a), true) if !a.trim().is_empty() => ui::ellipsize(a, 18),

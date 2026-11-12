@@ -115,10 +115,9 @@ impl Machine<YtHost> for CommentsScreen {
 
 impl Focusable<YtHost> for CommentsScreen {
     fn groups(&self, cx: &Cx<'_, YtHost>, out: &mut Vec<GroupSpec>) {
-        let n = self.len(cx);
-        if n > 0 {
-            out.push(self.list.spec(n));
-        }
+        // Always one row, even while loading, so focus is seated on entry and lands on the first
+        // comment once they arrive.
+        out.push(self.list.spec(self.len(cx).max(1)));
     }
     fn group_of(&self, _key: &u32, _cx: &Cx<'_, YtHost>) -> Option<GroupId> {
         Some(G)
@@ -127,11 +126,11 @@ impl Focusable<YtHost> for CommentsScreen {
         self.list.neighbour(key, dir, self.len(cx))
     }
     fn place(&self, key: &u32, cx: &Cx<'_, YtHost>, _at: At) -> Option<Placed> {
-        let n = self.len(cx);
+        let n = self.len(cx).max(1);
         self.list.place(*key, n, self.list.focused(cx, n))
     }
     fn reconcile(&self, want: FocusKey<u32>, cx: &Cx<'_, YtHost>) -> FocusKey<u32> {
-        if self.list.index(want.elem, self.len(cx)).is_some() { want } else { self.list.key(0) }
+        if self.list.index(want.elem, self.len(cx).max(1)).is_some() { want } else { self.list.key(0) }
     }
     fn seat(&self, _g: GroupId, _from: Placed, _cx: &Cx<'_, YtHost>) -> FocusKey<u32> {
         self.list.key(0)
@@ -152,6 +151,8 @@ impl Screen<YtHost> for CommentsScreen {
     fn draw(&mut self, f: &mut DrawFrame<'_, '_, YtHost>) {
         let p = f.painter;
         let cx = f.cx;
+        // Opened from the player: the video plays behind the UI plane, so dim it for reading.
+        ui::fill(p, Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, [0.03, 0.03, 0.05, 0.94]);
         let title = match &self.replies_to {
             Some(a) => format!("Replies to {a}"),
             None => "Comments".into(),

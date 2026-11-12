@@ -272,7 +272,21 @@ fn main() {
 
             if let Some(r) = remote.as_mut() {
                 let mut quit = false;
-                inputs.extend(r.poll(tick, &mut quit));
+                for ev in r.poll(tick, &mut quit) {
+                    // Colour buttons from the dev remote take the same remapping as the real ones.
+                    if let plx_machine::machine::InputKind::Key { wcode, edge, .. } = ev.kind {
+                        if (403..=406).contains(&wcode) {
+                            let act = rig.store.settings.color_keys[(wcode - 403) as usize].clone();
+                            if act != "none" {
+                                if edge == plx_machine::machine::Edge::Down {
+                                    color_key(&act, &mut rig, &mut d);
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                    inputs.push(ev);
+                }
                 if quit {
                     running = false;
                 }
@@ -375,7 +389,10 @@ fn main() {
                 let (x, y, w, h) = plx_base::surface::viewport();
                 sdl::glViewport(x, y, w, h);
                 // Keep the video plane visible under the player's own overlays and menus.
-                let video = rig.player.active()
+                // Only while the player or one of its overlays is on top: a full page opened from the
+                // player (Search, Settings, a channel) must not be see-through.
+                let top = d.top_screen().map(|s| s.name());
+                let video = (rig.player.active() && matches!(top, Some("player" | "menu" | "comments" | "info")))
                     || d.top_screen().map(|s| s.render()) == Some(plx_ui::screen::RenderStrategy::VideoPlane);
                 if video {
                     // Alpha 0: the compositor shows the hardware video plane through the UI plane.

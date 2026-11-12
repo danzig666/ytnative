@@ -305,7 +305,7 @@ impl Screen<YtHost> for PlayerScreen {
         ui::text(p, &byline, 96.0, 842.0, 30, ui::DIM, ui::ALIGN_LEFT, false);
         if let Some(w) = &ex.watch {
             if let Some(i) = yt_core::watch::chapter_at(&w.chapters, st.position_ms) {
-                let t = format!("\u{25B8} {}", ui::ellipsize(&w.chapters[i].title, 60));
+                let t = format!("\u{25B6} {}", ui::ellipsize(&w.chapters[i].title, 60));
                 ui::text(p, &t, 1824.0, 842.0, 28, ui::WHITE, ui::ALIGN_RIGHT, false);
             }
         }

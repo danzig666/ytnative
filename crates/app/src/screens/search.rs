@@ -237,7 +237,7 @@ impl Screen<YtHost> for SearchScreen {
         // Query field
         let field = Rect::new(100.0, 150.0, 1720.0, 100.0);
         ui::fill(p, field, 18.0, [1.0, 1.0, 1.0, 0.08]);
-        let shown = if self.query.is_empty() { "Type with the keyboard below\u{2026}".to_string() } else { format!("{}\u{258F}", self.query) };
+        let shown = if self.query.is_empty() { "Type with the keyboard below\u{2026}".to_string() } else { format!("{}|", self.query) };
         ui::text(p, &shown, field.x + 36.0, field.y + 26.0, 40, if self.query.is_empty() { ui::FAINT } else { ui::WHITE }, ui::ALIGN_LEFT, false);
         // Keyboard
         let focused = cx.focus.current.filter(|k| k.entry == self.entry).map(|k| k.elem);
