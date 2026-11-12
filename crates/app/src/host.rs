@@ -263,6 +263,11 @@ enum Work {
 }
 
 pub struct AppRig {
+    /// Video window: where it is going, where it is (animated), what was last applied.
+    video_target: [f32; 4],
+    video_now: [f32; 4],
+    video_applied: [i32; 4],
+    video_ms: u32,
     /// `settings.subtitles` as last seen, to load captions when they are switched on mid-video.
     subtitles_were: bool,
     /// `ui_language` the translations were last switched to.
@@ -295,6 +300,10 @@ impl AppRig {
     pub fn new() -> Self {
         let store = Store::new(Settings::load());
         let mut rig = AppRig {
+            video_target: [0.0, 0.0, 1920.0, 1080.0],
+            video_now: [0.0, 0.0, 1920.0, 1080.0],
+            video_applied: [0, 0, 1920, 1080],
+            video_ms: 0,
             subtitles_were: false,
             applied_language: String::new(),
             mounter: Mount,
@@ -377,6 +386,25 @@ impl AppRig {
             crate::i18n::set_language(&self.applied_language, plx_platform::i18n::current().format_locale());
         }
         self.player.tick();
+        // Ease the video window toward its target (comments: zoom out to the left), one placement
+        // per frame while it moves.
+        let dt = now_ms.wrapping_sub(self.video_ms).min(100) as f32;
+        self.video_ms = now_ms;
+        if self.video_now != self.video_target {
+            let a = 1.0 - (-dt / 70.0).exp();
+            for i in 0..4 {
+                self.video_now[i] += (self.video_target[i] - self.video_now[i]) * a;
+                if (self.video_now[i] - self.video_target[i]).abs() < 1.0 {
+                    self.video_now[i] = self.video_target[i];
+                }
+            }
+            crate::ui::animating();
+        }
+        let r = self.video_now.map(|v| v.round() as i32);
+        if r != self.video_applied {
+            self.video_applied = r;
+            self.player.set_video_rect(if r == [0, 0, 1920, 1080] { None } else { Some(r) });
+        }
         self.player_view = self.player.status.lock().unwrap().clone();
         let subs = self.store.settings.subtitles;
         if subs && !self.subtitles_were && !self.player_view.video_id.is_empty() && self.player_view.extras.cues.is_empty() {
@@ -850,7 +878,7 @@ impl Rig<YtHost> for AppRig {
                 }
             }
             YtFx::SetZoom(z) => self.player.set_zoom(z),
-            YtFx::VideoRect(r) => self.player.set_video_rect(r),
+            YtFx::VideoRect(r) => self.video_target = r.map_or([0.0, 0.0, 1920.0, 1080.0], |r| r.map(|v| v as f32)),
             YtFx::SleepTimer(min) => {
                 self.sleep_at = (min > 0).then(|| self.now_ms + min * 60_000);
                 self.store.sleep_minutes = min;

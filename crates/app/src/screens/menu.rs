@@ -426,7 +426,7 @@ impl MenuScreen {
             }
             Act::Comments(v) => {
                 fx.push(Fx::Nav(NavOp::Pop));
-                fx.push(Fx::Nav(NavOp::Push(YtArg::Comments(v.clone()))));
+                fx.push(Fx::Nav(NavOp::Present(YtArg::Comments(v.clone()))));
             }
             Act::Filter(i) => {
                 let i = *i;

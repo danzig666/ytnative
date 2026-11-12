@@ -50,12 +50,15 @@ pub struct PlayerScreen {
     preview_until: u32,
     /// Last Magic Remote pointer position (OSD button hover).
     pointer: Option<(f32, f32)>,
+    /// Pointer jitter guard (see the Pointer event).
+    ptr_quiet: bool,
+    ptr_anchor: Option<(f32, f32)>,
     state: State,
 }
 
 impl PlayerScreen {
     pub fn new(entry: EntryId, video_id: String, playlist: Option<String>) -> Self {
-        PlayerScreen { entry, state: State(video_id.clone()), video_id, playlist, hud: true, ended_handled: false, preview_until: 0, pointer: None }
+        PlayerScreen { entry, state: State(video_id.clone()), video_id, playlist, hud: true, ended_handled: false, preview_until: 0, pointer: None, ptr_quiet: false, ptr_anchor: None }
     }
 
     fn show_hud(&mut self, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
@@ -92,7 +95,7 @@ impl PlayerScreen {
 
 /// The OSD's pointer buttons, right-aligned on the bottom row: 0 Subtitles, 1 Comments, 2 Options.
 fn osd_button(i: usize) -> Rect {
-    const W: [f32; 3] = [300.0, 240.0, 200.0];
+    const W: [f32; 3] = [300.0, 84.0, 200.0];
     let mut x = 1824.0;
     for j in (i..3).rev() {
         x -= W[j];
@@ -159,6 +162,21 @@ impl Machine<YtHost> for PlayerScreen {
             // Magic Remote pointer: moving shows the controls; a click on the seek bar seeks there,
             // on "Options" opens the menu, anywhere else shows the controls or toggles pause.
             ScreenEvent::Input(InputEvent { kind: InputKind::Pointer { x, y, .. } | InputKind::Drag { x, y, .. }, .. }) => {
+                // Jitter guard: after a key (BACK hiding the controls, say) the Magic Remote's
+                // pointer shakes; it brings the controls back only once it really moves.
+                if self.ptr_quiet {
+                    match self.ptr_anchor {
+                        None => {
+                            self.ptr_anchor = Some((*x, *y));
+                            return Handled::Yes;
+                        }
+                        Some((ax, ay)) if (x - ax).hypot(y - ay) < 80.0 => return Handled::Yes,
+                        _ => {
+                            self.ptr_quiet = false;
+                            self.ptr_anchor = None;
+                        }
+                    }
+                }
                 self.pointer = Some((*x, *y));
                 self.show_hud(cx, fx); // up, and kept up while the pointer moves
                 Handled::Yes
@@ -176,7 +194,7 @@ impl Machine<YtHost> for PlayerScreen {
                     self.show_hud(cx, fx);
                 } else if self.hud && osd_button(1).contains(x, y) {
                     if !st.video_id.is_empty() && !cx.views.store.settings.child_mode {
-                        fx.push(Fx::Nav(NavOp::Push(YtArg::Comments(st.video_id.clone()))));
+                        fx.push(Fx::Nav(NavOp::Present(YtArg::Comments(st.video_id.clone()))));
                     }
                 } else if self.hud && osd_button(2).contains(x, y) {
                     fx.push(Fx::Nav(NavOp::Present(YtArg::PlayerMenu)));
@@ -194,6 +212,8 @@ impl Machine<YtHost> for PlayerScreen {
                 Handled::Yes
             }
             ScreenEvent::Input(InputEvent { kind: InputKind::Key { key, wcode, edge, .. }, .. }) => {
+                self.ptr_quiet = true;
+                self.ptr_anchor = None;
                 if *edge == Edge::Up {
                     return if *key == Key::Back && !self.hud { Handled::No } else { Handled::Yes };
                 }
@@ -340,8 +360,16 @@ impl Screen<YtHost> for PlayerScreen {
                     "cyan" => [0.45, 0.95, 1.0, 1.0],
                     _ => ui::WHITE,
                 };
-                draw_caption(p, &cue.text, s.subtitle_size as i32, s.subtitle_bottom_offset as f32 + lift, ink, s.subtitle_background as f32 / 100.0);
+                if ui::comments_open() {
+                    // On the shrunk video beside the comments.
+                    draw_caption_at(p, &cue.text, (s.subtitle_size as f32 * 0.7) as i32, 1080.0 - 882.0 + s.subtitle_bottom_offset as f32 * 0.6, ink, 618.0);
+                } else {
+                    draw_caption(p, &cue.text, s.subtitle_size as i32, s.subtitle_bottom_offset as f32 + lift, ink, s.subtitle_background as f32 / 100.0);
+                }
             }
+        }
+        if ui::comments_open() {
+            return;
         }
         if !self.hud && st.phase == Phase::Playing {
             common::toast(p, cx);
@@ -456,7 +484,7 @@ impl Screen<YtHost> for PlayerScreen {
         let tr = crate::i18n::tr;
         let labels = [
             format!("CC  {}: {}", tr("Subtitles"), tr(if subs_on { "On" } else { "Off" })),
-            tr("Comments").to_string(),
+            "\u{1F4AC}".to_string(),
             format!("\u{25BC} {}", tr("Options")),
         ];
         for (i, label) in labels.iter().enumerate() {
@@ -517,6 +545,28 @@ fn short_num(n: u64) -> String {
 
 /// Subtitles: centred lines on a dark backing, `bottom` px above the screen's bottom edge.
 fn draw_caption(p: plx_ui::Painter, text: &str, size: i32, bottom: f32, ink: [f32; 4], bg: f32) {
+    let _ = bg;
+    draw_caption_at(p, text, size, bottom, ink, 960.0);
+}
+
+/// Caption lines centred on `cx`, `bottom` px above the screen's bottom edge, outlined.
+fn draw_caption_at(p: plx_ui::Painter, text: &str, size: i32, bottom: f32, ink: [f32; 4], cx: f32) {
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let lh = size as f32 * 1.3;
+    let top = 1080.0 - bottom - lh * lines.len() as f32;
+    let o = (size as f32 / 16.0).max(2.0);
+    let outline = [0.0, 0.0, 0.0, 0.92];
+    for (i, line) in lines.iter().enumerate() {
+        let y = top + i as f32 * lh;
+        for (dx, dy) in [(-o, 0.0), (o, 0.0), (0.0, -o), (0.0, o), (-o, -o), (o, -o), (-o, o), (o, o)] {
+            ui::text(p, line, cx + dx, y + dy, size, outline, ui::ALIGN_CENTER, true);
+        }
+        ui::text(p, line, cx, y, size, ink, ui::ALIGN_CENTER, true);
+    }
+}
+
+#[allow(dead_code)]
+fn draw_caption_old(p: plx_ui::Painter, text: &str, size: i32, bottom: f32, ink: [f32; 4], bg: f32) {
     let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     let lh = size as f32 * 1.3;
     let top = 1080.0 - bottom - lh * lines.len() as f32;

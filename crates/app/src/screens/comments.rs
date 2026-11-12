@@ -64,6 +64,8 @@ pub struct CommentsScreen {
     /// First visible comment while the wheel has scrolled the list (focus stays where it was);
     /// `None`: the list follows the focus.
     scroll: Option<usize>,
+    /// When the panel opened (it slides in from the right).
+    opened_ms: u32,
     /// Wheel travel not yet turned into whole rows (the pointer's edge scroll is fractional).
     wheel: f32,
     state: State,
@@ -77,6 +79,7 @@ impl CommentsScreen {
             video_id,
             list: VList { entry, group: G, base: BASE, rect: Rect::new(PANEL.x + 20.0, 100.0, PANEL.w - 40.0, 970.0), row_h: 192.0, text_size: TEXT },
             scroll: None,
+            opened_ms: 0,
             wheel: 0.0,
         }
     }
@@ -115,12 +118,19 @@ impl Machine<YtHost> for CommentsScreen {
                 let continuation = self.replies_to.as_ref().map(|_| self.video_id.clone());
                 fx.push(Fx::App(YtFx::LoadComments { key: self.video_id.clone(), continuation, append: false }));
                 fx.push(Fx::App(YtFx::VideoRect(Some(VIDEO))));
+                ui::COMMENTS_OPEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.opened_ms = cx.views.now_ms;
             }
             ScreenEvent::Uncover => {
                 fx.push(Fx::App(YtFx::VideoRect(Some(VIDEO))));
                 fx.invalidate(plx_machine::present::Provenance::Nav);
             }
-            ScreenEvent::Unmount => fx.push(Fx::App(YtFx::VideoRect(None))),
+            ScreenEvent::Unmount => {
+                ui::COMMENTS_OPEN.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                if !ui::comments_open() {
+                    fx.push(Fx::App(YtFx::VideoRect(None)));
+                }
+            }
             // The wheel scrolls the list; focus stays on its comment.
             ScreenEvent::Input(InputEvent { kind: InputKind::Wheel { dy }, .. }) => {
                 self.wheel -= *dy;
@@ -146,7 +156,7 @@ impl Machine<YtHost> for CommentsScreen {
                 if let Some(i) = self.list.index(*e, n) {
                     let c = &cx.views.store.comments[&self.video_id].items[i];
                     if let Some(token) = &c.replies_continuation {
-                        fx.push(Fx::Nav(NavOp::Push(YtArg::Replies(token.clone(), c.author.clone()))));
+                        fx.push(Fx::Nav(NavOp::Present(YtArg::Replies(token.clone(), c.author.clone()))));
                     }
                 }
             }
@@ -205,8 +215,16 @@ impl Screen<YtHost> for CommentsScreen {
     fn draw(&mut self, f: &mut DrawFrame<'_, '_, YtHost>) {
         let p = f.painter;
         let cx = f.cx;
-        // A panel on the right; the video, shrunk, plays on the left (the UI plane is clear there).
-        ui::fill(p, PANEL, 0.0, [0.06, 0.06, 0.08, 0.97]);
+        // A panel on the right, sliding in with the video's zoom-out; the video, shrunk, plays on
+        // the left (the UI plane is clear there).
+        // Replies open over the comments panel: no slide, so nothing shows through.
+        let k = if self.replies_to.is_some() { 1.0 } else { ((cx.views.now_ms.wrapping_sub(self.opened_ms)) as f32 / 260.0).clamp(0.0, 1.0) };
+        let ease = 1.0 - (1.0 - k).powi(3);
+        if ease < 1.0 {
+            ui::animating();
+        }
+        let p = p.translate(PANEL.w * (1.0 - ease), 0.0);
+        ui::fill(p, PANEL, 0.0, [0.06, 0.06, 0.08, 1.0]);
         {
             let n = self.len(cx);
             let top = self.top(cx);

@@ -164,6 +164,13 @@ pub fn card_style(cols: usize, width: f32, gap: f32) -> plx_ui::card_row::RowSty
     plx_ui::card_row::RowStyle { w, h: (w * 9.0 / 16.0).floor(), gap, ..plx_ui::card_row::RowStyle::HOME }
 }
 
+/// Comments panels open over the player (the player hides its controls, shrinks its captions).
+pub static COMMENTS_OPEN: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+pub fn comments_open() -> bool {
+    COMMENTS_OPEN.load(std::sync::atomic::Ordering::Relaxed) > 0
+}
+
 static ANIMATING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// A time-driven animation (marquee, sliding sidebar, comments panel) needs another frame.
