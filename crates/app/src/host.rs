@@ -65,6 +65,10 @@ pub enum Feed {
 
 pub enum YtFx {
     Load(Feed),
+    Play(String),
+    Stop,
+    TogglePause,
+    SeekBy(i64),
 }
 
 pub enum YtMsg {
@@ -77,6 +81,7 @@ pub enum YtMsg {
 #[derive(Clone, Debug, Default)]
 pub struct Card {
     pub elem: u32,
+    pub video_id: String,
     pub title: String,
     pub detail: String,
     pub thumb: String,
@@ -121,7 +126,10 @@ impl Mounter<YtHost> for Mount {
         };
         match arg {
             YtArg::Home => Box::new(screens::home::HomeScreen::new(entry)),
-            YtArg::Video(i) => Box::new(screens::home::HomeScreen::detail(entry, *i)),
+            YtArg::Video(i) => {
+                let id = cx.views.home.iter().find(|c| c.elem == *i).map(|c| c.video_id.clone()).unwrap_or_default();
+                Box::new(screens::player::PlayerScreen::new(entry, id))
+            }
         }
     }
 }
@@ -135,6 +143,7 @@ pub struct AppRig {
     session: Arc<Mutex<Option<yt_core::session::Session>>>,
     done: Arc<Mutex<Vec<Done>>>,
     next_req: u32,
+    pub player: crate::player::Player,
 }
 
 impl AppRig {
@@ -146,6 +155,7 @@ impl AppRig {
             session: Default::default(),
             done: Default::default(),
             next_req: 0,
+            player: crate::player::Player::new(),
         }
     }
 
@@ -176,12 +186,18 @@ impl AppRig {
 }
 
 fn cards_of(page: &yt_core::model::Page) -> Vec<Card> {
+    let mut seen = std::collections::HashSet::new();
     page.shelves
         .iter()
         .flat_map(|s| s.items.iter())
+        .filter(|it| seen.insert(it.id.clone()))
         .enumerate()
         .map(|(i, it)| Card {
             elem: i as u32 + 1,
+            video_id: match &it.endpoint {
+                Some(yt_core::model::Endpoint::Watch { video_id, .. }) if !video_id.is_empty() => video_id.clone(),
+                _ => String::new(),
+            },
             title: it.title.clone(),
             detail: it.lines.join(" \u{2022} "),
             thumb: it.thumbnail.clone().unwrap_or_default(),
@@ -211,6 +227,13 @@ impl Rig<YtHost> for AppRig {
                     crate::log("feed: could not start worker thread");
                 }
             }
+            YtFx::Play(id) => {
+                crate::log(&format!("play {id}"));
+                self.player.start(id, self.session.clone());
+            }
+            YtFx::Stop => self.player.stop(),
+            YtFx::TogglePause => self.player.toggle_pause(),
+            YtFx::SeekBy(ms) => self.player.seek_by(ms),
         }
     }
     fn log(&mut self, line: &str) {

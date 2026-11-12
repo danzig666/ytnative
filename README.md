@@ -149,3 +149,17 @@ Logs go to `/tmp/ytnative/tvplay.log`. Pipeline internals are in `/var/log/legac
   `luna-send -n 1 luna://com.webos.appInstallService/dev/remove '{"id":"com.ytnative.poc"}'`.
 - Scratch files in `/tmp/ytnative`, which is a tmpfs and gone on reboot.
 - One line in `/home/root/.ssh/authorized_keys` (`ytnative-claude`), added by you.
+
+---
+
+# Progress toward the full app (see [PLAN.md](PLAN.md))
+
+**2026-11-12: first end-to-end native app on the C3** (`crates/app`, installed as
+`io.github.danzig666.ytnative`):
+- Boots on plx-native's vendored UI core (GLES2, focus engine, card grid, transitions).
+- Loads your signed-in Home feed through `yt-core` on a worker thread, with thumbnails.
+- OK opens the player: streams resolved in-app, DASH manifest (720p–1080p H.264 + AAC) played
+  by the TV's media service on an exported video window. Starts at 720p and switches to 1080p.
+  OK = pause, ←/→ = seek 10 s, BACK = stop and return to Home.
+
+Dev loop (all from Windows): `cargo xtask build | install | deploy | run | key <keys> | shot | logs`.

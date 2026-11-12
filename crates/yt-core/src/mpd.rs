@@ -33,8 +33,20 @@ fn codecs(mime: &str) -> Option<&str> {
     mime.split("codecs=\"").nth(1)?.split('"').next()
 }
 
-/// `video_codec` is a prefix such as "avc1"; `max_height` caps the ladder.
-pub fn build(formats: &[Value], duration_ms: u64, video_codec: &str, max_height: u64) -> Option<(String, usize, usize)> {
+/// `video_codec` is a prefix such as "avc1"; the ladder is limited to `min_height..=max_height`.
+///
+/// The floor matters on webOS: the firmware's DASH adaptation starts at the lowest rung and climbs
+/// slowly (144p for ~10 s on the C3), so offering only the rungs we want makes playback start sharp.
+/// If the video has nothing that tall, the floor drops to its best rung under the cap.
+pub fn build(formats: &[Value], duration_ms: u64, video_codec: &str, min_height: u64, max_height: u64) -> Option<(String, usize, usize)> {
+    let best = formats
+        .iter()
+        .filter(|f| f["mimeType"].as_str().is_some_and(|m| m.starts_with("video/mp4") && codecs(m).is_some_and(|c| c.starts_with(video_codec))))
+        .filter_map(|f| f["height"].as_u64())
+        .filter(|&h| h <= max_height)
+        .max()
+        .unwrap_or(0);
+    let min_height = min_height.min(best);
     let mut video = String::new();
     let mut audio = String::new();
     let (mut nv, mut na) = (0, 0);
@@ -50,7 +62,7 @@ pub fn build(formats: &[Value], duration_ms: u64, video_codec: &str, max_height:
         );
         if mime.starts_with("video/mp4") && c.starts_with(video_codec) {
             let h = f["height"].as_u64().unwrap_or(0);
-            if h > max_height {
+            if h > max_height || h < min_height {
                 continue;
             }
             video += &format!(

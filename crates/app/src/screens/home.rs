@@ -64,7 +64,7 @@ impl Machine<YtHost> for HomeScreen {
     type Ev = ScreenEvent<YtHost>;
     fn step(&mut self, ev: &Self::Ev, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) -> Handled {
         match ev {
-            ScreenEvent::Mount if self.state.0 == 0 => fx.push(Fx::App(YtFx::Load(Feed::Home))),
+            ScreenEvent::Mount if self.state.0 == 0 && cx.views.home.is_empty() => fx.push(Fx::App(YtFx::Load(Feed::Home))),
             ScreenEvent::Async(_, YtMsg::Loaded(_)) | ScreenEvent::Async(_, YtMsg::Failed(..)) => {
                 fx.invalidate(plx_machine::present::Provenance::Lifecycle);
             }

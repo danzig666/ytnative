@@ -245,7 +245,7 @@ fn streams(api: &Api, id: &str, sample: Option<u32>, tv: bool) -> Result<()> {
     std::fs::write("last_streams.txt", format!("{}\n{}\n{}\n", v.url, a.url, sd["hlsManifestUrl"].as_str().unwrap_or("")))?;
     println!("(full URLs written to last_streams.txt: video, audio, hls)");
     let dur = formats.iter().find_map(|f| f["approxDurationMs"].as_str()?.parse::<u64>().ok()).unwrap_or(0);
-    if let Some((mpd, nv, na)) = mpd::build(&formats, dur, "avc1", 1080) {
+    if let Some((mpd, nv, na)) = mpd::build(&formats, dur, "avc1", 720, 1080) {
         std::fs::write("last.mpd", mpd)?;
         println!("DASH manifest written to last.mpd ({nv} H.264 video + {na} AAC audio representations)");
     }

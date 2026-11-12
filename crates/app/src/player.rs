@@ -1,0 +1,241 @@
+//! Playback engine A: a DASH manifest handed to the TV's media service (uMediaServer) with an SDL
+//! exported window as the video plane. Proven on the C3 by the step-2 prototype (`tvplay`).
+//!
+//! Threading: the exported window is created/destroyed on the main thread (SDL); stream
+//! resolution and every luna call run on a worker; media events update `Status`, which the
+//! player screen reads every frame.
+
+use crate::ls2::Luna;
+use std::ffi::{c_char, c_int, CStr, CString};
+use std::sync::{Arc, Mutex};
+
+#[repr(C)]
+struct SdlRect {
+    x: c_int,
+    y: c_int,
+    w: c_int,
+    h: c_int,
+}
+
+type CreateFn = unsafe extern "C" fn(c_int) -> *const c_char;
+type SetFn = unsafe extern "C" fn(*const c_char, *mut SdlRect, *mut SdlRect) -> c_int;
+type DestroyFn = unsafe extern "C" fn(*const c_char);
+
+fn sdl_sym<T>(name: &str) -> Option<T> {
+    let c = CString::new(name).ok()?;
+    let p = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c.as_ptr()) };
+    (!p.is_null()).then(|| unsafe { std::mem::transmute_copy(&p) })
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Phase {
+    #[default]
+    Idle,
+    Resolving,
+    Loading,
+    Playing,
+    Paused,
+    Ended,
+    Failed(String),
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Status {
+    pub phase: Phase,
+    pub title: String,
+    pub author: String,
+    pub position_ms: u64,
+    pub duration_ms: u64,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+}
+
+pub struct Player {
+    pub status: Arc<Mutex<Status>>,
+    window: Option<CString>,
+    media_id: Arc<Mutex<Option<String>>>,
+    luna: Option<&'static Luna>,
+}
+
+impl Player {
+    pub fn new() -> Self {
+        Player { status: Default::default(), window: None, media_id: Default::default(), luna: None }
+    }
+
+    fn bus(&mut self) -> Option<&'static Luna> {
+        if self.luna.is_none() {
+            match Luna::connect(plx_base::paths::app_id()) {
+                Ok(l) => self.luna = Some(l),
+                Err(e) => crate::log(&format!("player: LS2 unavailable: {e}")),
+            }
+        }
+        self.luna
+    }
+
+    /// Main thread. Starts playback of `video_id`; `session` resolves streams on the worker.
+    pub fn start(&mut self, video_id: String, session: Arc<Mutex<Option<yt_core::session::Session>>>) {
+        self.stop();
+        *self.status.lock().unwrap() = Status { phase: Phase::Resolving, ..Default::default() };
+        let Some(create) = sdl_sym::<CreateFn>("SDL_webOSCreateExportedWindow") else {
+            self.fail("no SDL exported-window support on this TV");
+            return;
+        };
+        let wid = unsafe { create(0) };
+        if wid.is_null() {
+            self.fail("could not create the video window");
+            return;
+        }
+        let wid = unsafe { CStr::from_ptr(wid) }.to_owned();
+        if let Some(set) = sdl_sym::<SetFn>("SDL_webOSSetExportedWindow") {
+            let mut src = SdlRect { x: 0, y: 0, w: 1920, h: 1080 };
+            let mut dst = SdlRect { x: 0, y: 0, w: 1920, h: 1080 };
+            unsafe { set(wid.as_ptr(), &mut src, &mut dst) };
+        }
+        let window_id = wid.to_string_lossy().into_owned();
+        self.window = Some(wid);
+        let Some(luna) = self.bus() else {
+            self.fail("media bus unavailable");
+            return;
+        };
+        let (status, media_id) = (self.status.clone(), self.media_id.clone());
+        let spawned = plx_base::task::spawn("play", move || {
+            if let Err(e) = run(luna, &video_id, &window_id, &session, &status, &media_id) {
+                crate::log(&format!("player: {e:#}"));
+                status.lock().unwrap().phase = Phase::Failed(format!("{e:#}"));
+            }
+            plx_machine::present::wake_from_worker();
+        });
+        if spawned.is_none() {
+            self.fail("could not start the player thread");
+        }
+    }
+
+    fn fail(&mut self, why: &str) {
+        crate::log(&format!("player: {why}"));
+        self.status.lock().unwrap().phase = Phase::Failed(why.to_string());
+    }
+
+    pub fn toggle_pause(&mut self) {
+        let Some(luna) = self.luna else { return };
+        let Some(mid) = self.media_id.lock().unwrap().clone() else { return };
+        let paused = self.status.lock().unwrap().phase == Phase::Paused;
+        let method = if paused { "play" } else { "pause" };
+        let payload = format!(r#"{{"mediaId":{}}}"#, json_str(&mid));
+        let _ = plx_base::task::spawn("media", move || {
+            luna.call(&format!("luna://com.webos.media/{method}"), &payload);
+        });
+    }
+
+    pub fn seek_by(&mut self, delta_ms: i64) {
+        let Some(luna) = self.luna else { return };
+        let Some(mid) = self.media_id.lock().unwrap().clone() else { return };
+        let (pos, dur) = {
+            let s = self.status.lock().unwrap();
+            (s.position_ms as i64, s.duration_ms as i64)
+        };
+        let to = (pos + delta_ms).clamp(0, (dur - 1000).max(0));
+        let payload = format!(r#"{{"mediaId":{},"position":{to}}}"#, json_str(&mid));
+        let _ = plx_base::task::spawn("media", move || {
+            luna.call("luna://com.webos.media/seek", &payload);
+        });
+    }
+
+    /// Main thread. Unloads the pipeline (if any) and destroys the video window.
+    pub fn stop(&mut self) {
+        let mid = self.media_id.lock().unwrap().take();
+        if let (Some(luna), Some(mid)) = (self.luna, mid) {
+            // Synchronous on purpose: the window must outlive the pipeline that renders into it.
+            let r = luna.call("luna://com.webos.media/unload", &format!(r#"{{"mediaId":{}}}"#, json_str(&mid)));
+            crate::log(&format!("player: unload -> {r}"));
+        }
+        if let Some(w) = self.window.take() {
+            if let Some(destroy) = sdl_sym::<DestroyFn>("SDL_webOSDestroyExportedWindow") {
+                unsafe { destroy(w.as_ptr()) };
+            }
+        }
+        self.status.lock().unwrap().phase = Phase::Idle;
+    }
+}
+
+fn json_str(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into())
+}
+
+/// Worker: resolve, write the manifest, load, subscribe, foreground, play.
+fn run(
+    luna: &'static Luna,
+    video_id: &str,
+    window_id: &str,
+    session: &Mutex<Option<yt_core::session::Session>>,
+    status: &Arc<Mutex<Status>>,
+    media_id: &Arc<Mutex<Option<String>>>,
+) -> anyhow::Result<()> {
+    let resolved = {
+        let mut g = session.lock().unwrap();
+        if g.is_none() {
+            *g = Some(yt_core::session::Session::new()?);
+        }
+        g.as_mut().unwrap().resolve(video_id)?
+    };
+    {
+        let mut s = status.lock().unwrap();
+        s.title = resolved.title.clone();
+        s.author = resolved.author.clone();
+        s.duration_ms = resolved.length_secs * 1000;
+        s.phase = Phase::Loading;
+    }
+    let mpd = resolved.mpd(Default::default()).ok_or_else(|| anyhow::anyhow!("no H.264 streams for this video"))?;
+    let path = "/tmp/ytnative/play.mpd";
+    std::fs::create_dir_all("/tmp/ytnative")?;
+    std::fs::write(path, mpd)?;
+
+    let app_id = plx_base::paths::app_id();
+    let load = format!(
+        r#"{{"uri":"file://{path}","type":"media","payload":{{"option":{{"appId":{},"windowId":{}}}}}}}"#,
+        json_str(app_id),
+        json_str(window_id)
+    );
+    let r = luna.call("luna://com.webos.media/load", &load);
+    crate::log(&format!("player: load -> {r}"));
+    let v: serde_json::Value = serde_json::from_str(&r).unwrap_or_default();
+    let mid = v["mediaId"].as_str().ok_or_else(|| anyhow::anyhow!("media service refused the load: {r}"))?.to_string();
+    *media_id.lock().unwrap() = Some(mid.clone());
+
+    let st = status.clone();
+    luna.subscribe("luna://com.webos.media/subscribe", &format!(r#"{{"mediaId":{},"subscribe":true}}"#, json_str(&mid)), move |msg| {
+        on_event(&st, msg);
+    });
+    luna.call("luna://com.webos.media/notifyForeground", &format!(r#"{{"connectionId":{}}}"#, json_str(&mid)));
+    let r = luna.call("luna://com.webos.media/play", &format!(r#"{{"mediaId":{}}}"#, json_str(&mid)));
+    crate::log(&format!("player: play -> {r}"));
+    Ok(())
+}
+
+fn on_event(status: &Mutex<Status>, msg: &str) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(msg) else { return };
+    let mut s = status.lock().unwrap();
+    if let Some(t) = v["currentTime"]["currentTime"].as_u64() {
+        s.position_ms = t;
+    } else if v.get("playing").is_some() {
+        s.phase = Phase::Playing;
+    } else if v.get("paused").is_some() {
+        s.phase = Phase::Paused;
+    } else if v.get("endOfStream").is_some() {
+        s.phase = Phase::Ended;
+    } else if let Some(vi) = v.get("videoInfo") {
+        s.width = vi["width"].as_u64().unwrap_or(0) as u32;
+        s.height = vi["height"].as_u64().unwrap_or(0) as u32;
+        s.fps = vi["frameRate"].as_f64().unwrap_or(0.0) as u32;
+        crate::log(&format!("player: video {}x{}@{}", s.width, s.height, s.fps));
+    } else if let Some(d) = v["sourceInfo"]["programInfo"][0]["duration"].as_u64() {
+        s.duration_ms = d;
+    } else if let Some(e) = v.get("error") {
+        crate::log(&format!("player: media error {e}"));
+        s.phase = Phase::Failed(e["errorText"].as_str().unwrap_or("playback error").to_string());
+    } else {
+        return;
+    }
+    drop(s);
+    plx_machine::present::wake_from_worker();
+}

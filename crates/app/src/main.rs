@@ -6,6 +6,8 @@
 mod host;
 mod images;
 mod input;
+mod ls2;
+mod player;
 mod remote;
 mod screens;
 mod sdl;
@@ -164,8 +166,14 @@ fn main() {
                 plx_gfx::text::begin_frame();
                 let (x, y, w, h) = plx_base::surface::viewport();
                 sdl::glViewport(x, y, w, h);
-                let c = plx_ui::theme::CLEAR_RGB;
-                plx_gfx::gfx::frame_clear(c.0, c.1, c.2);
+                let video = d.top_screen().map(|s| s.render()) == Some(plx_ui::screen::RenderStrategy::VideoPlane);
+                if video {
+                    // Alpha 0: the compositor shows the hardware video plane through the UI plane.
+                    plx_gfx::gfx::frame_clear_through();
+                } else {
+                    let c = plx_ui::theme::CLEAR_RGB;
+                    plx_gfx::gfx::frame_clear(c.0, c.1, c.2);
+                }
                 plx_ui::guard(|| {
                     d.draw(&mut rig, true);
                 });

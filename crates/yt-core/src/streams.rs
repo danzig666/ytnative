@@ -48,6 +48,7 @@ pub struct Resolved {
 
 #[derive(Debug, Clone, Copy)]
 pub struct Prefs {
+    pub min_height: u64,
     pub max_height: u64,
     /// Video codec family for the DASH manifest: "avc1" today (engine A), "vp09"/"av01" with the
     /// Feed engine later.
@@ -56,7 +57,7 @@ pub struct Prefs {
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { max_height: 1080, codec: "avc1" }
+        Prefs { min_height: 720, max_height: 1080, codec: "avc1" }
     }
 }
 
@@ -141,7 +142,7 @@ impl Resolved {
             .iter()
             .find_map(|f| f["approxDurationMs"].as_str()?.parse::<u64>().ok())
             .unwrap_or(self.length_secs * 1000);
-        mpd::build(&self.adaptive, dur, prefs.codec, prefs.max_height).map(|m| m.0)
+        mpd::build(&self.adaptive, dur, prefs.codec, prefs.min_height, prefs.max_height).map(|m| m.0)
     }
 
     /// Caption download URL in the given format ("vtt" or "ttml"), optionally auto-translated.
