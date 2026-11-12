@@ -471,6 +471,11 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
                 wake();
             }
         }
+        if let Some(h) = pipe.ev.hdr.lock().unwrap().take() {
+            crate::log(&format!("feed: pipeline hdrType={h}"));
+            sh.status.lock().unwrap().hdr = h;
+            wake();
+        }
         if pipe.ev.eos.load(Relaxed) && eos_pushed {
             set_phase(sh, Phase::Ended);
         }

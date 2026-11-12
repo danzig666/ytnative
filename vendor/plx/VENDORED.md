@@ -41,3 +41,6 @@ The ytnative simulator (`cargo xtask sim`, `crates/app/src/sim/`) builds these c
 - `base/src/surface.rs`: `set_ui_scale` (ytnative's Screen size / overscan setting) multiplies the fitted scale before the viewport is derived.
 - `ui/src/card_row.rs`, `ui/src/poster_grid.rs`: `set_label_band_extra` adds room under every row (titles under every thumbnail); the collapsed band is read through `label_band_collapsed()`.
 - `gfx/src/text.rs`: extra faces (`subfont-*.ttf`, subtitle fonts) selected by `bold >> 4` in `font_at`.
+- gfx/src/gfx/tokens.rs: `set_clear_black` / `clear_rgb()` — runtime ground colour (OLED black);
+  gfx.rs, ui/popover.rs and ui/widgets.rs read `clear_rgb()` instead of the `CLEAR_RGB` constant,
+  so page-transition snapshots clear to black too.

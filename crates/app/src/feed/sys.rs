@@ -29,6 +29,8 @@ pub struct Events {
     pub error: Mutex<Option<(i64, String)>>,
     /// Last `videoInfo`-like JSON string the pipeline reported (diagnostics).
     pub info: Mutex<Option<String>>,
+    /// The pipeline's `video.hdrType` ("none", "HDR10", "HLG", ...), taken by the engine.
+    pub hdr: Mutex<Option<String>>,
 }
 
 impl Events {
@@ -82,6 +84,13 @@ pub extern "C" fn sf_on_event(epoch: c_uint, ty: c_int, num: i64, s: *const c_ch
             _ => {
                 if !text.is_empty() {
                     crate::log(&format!("feed: smp_cb type={ty} num={num} {}", short(&text)));
+                }
+            }
+        }
+        if text.contains("\"hdrType\"") {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Some(h) = v["video"]["hdrType"].as_str() {
+                    *ev.hdr.lock().unwrap() = Some(h.to_string());
                 }
             }
         }

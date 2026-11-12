@@ -37,6 +37,8 @@ pub struct Settings {
     pub max_height: u32,
     pub min_height: u32,
     pub codec: Codec,
+    /// Play HDR (PQ/HLG) formats when a video has them (engine B).
+    pub hdr: bool,
     pub speed: f32,
     pub remember_speed_per_channel: bool,
     pub speed_by_channel: std::collections::HashMap<String, f32>,
@@ -132,6 +134,7 @@ impl Default for Settings {
             max_height: 1080,
             min_height: 720,
             codec: Codec::Avc,
+            hdr: false,
             speed: 1.0,
             remember_speed_per_channel: false,
             speed_by_channel: Default::default(),

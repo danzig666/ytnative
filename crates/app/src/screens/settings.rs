@@ -121,6 +121,7 @@ fn items(page: SettingsPage) -> Vec<Item> {
                 },
                 |s, d| s.codec = cycle(&[Codec::Avc, Codec::Vp9, Codec::Av1], s.codec, d),
             ),
+            Opt("HDR", |s| on_off(s.hdr), |s, _| s.hdr = !s.hdr),
             Opt("Default speed", |s| format!("{}x", s.speed), |s, d| s.speed = cycle(&[0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0], s.speed, d)),
             Opt("Remember speed per channel", |s| on_off(s.remember_speed_per_channel), |s, _| s.remember_speed_per_channel = !s.remember_speed_per_channel),
             Opt("Seek step", |s| format!("{} s", s.seek_step_secs), |s, d| s.seek_step_secs = cycle(&[5, 10, 15, 30, 60], s.seek_step_secs, d)),

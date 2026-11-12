@@ -109,6 +109,8 @@ pub struct Status {
     pub height: u32,
     /// Best height the stream offers within the quality setting, shown until the decoder reports.
     pub quality_hint: u32,
+    /// Engine B: the pipeline's HDR type ("" / "none" when SDR).
+    pub hdr: String,
     pub fps: u32,
 }
 

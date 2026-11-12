@@ -1100,7 +1100,7 @@ pub mod host {
         fn draw(&self, alpha: f32, clear: bool) {
             if !self.valid() { return; }
             if clear {
-                let c = crate::theme::CLEAR_RGB;
+                let c = plx_gfx::gfx::tokens::clear_rgb();
                 plx_gfx::gfx::frame_clear(c.0, c.1, c.2);
             }
             cache(|c| c.draw_alpha(alpha));

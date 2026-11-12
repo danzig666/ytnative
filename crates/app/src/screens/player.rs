@@ -576,6 +576,9 @@ impl Screen<YtHost> for PlayerScreen {
         let h = if st.height > 0 { st.height } else { st.quality_hint };
         if h > 0 {
             info.push_str(&format!("   {}p{}", h, if st.fps > 30 { st.fps.to_string() } else { String::new() }));
+            if !st.hdr.is_empty() && !st.hdr.eq_ignore_ascii_case("none") {
+                info.push_str(&format!("  {}", st.hdr));
+            }
         } else if !matches!(st.phase, Phase::Failed(_)) {
             info.push_str("   \u{2014}p");
         }

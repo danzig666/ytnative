@@ -44,6 +44,23 @@ pub const NEUTRAL_1000: [f32; 4] = rgb8(0x05, 0x05, 0x08);
 /// while a trailer preview has presented a frame (`gfx::frame_clear_through`).
 pub const CLEAR_RGB: (f32, f32, f32) = (NEUTRAL_500[0], NEUTRAL_500[1], NEUTRAL_500[2]);
 
+/// ytnative: the ground actually laid at runtime. [`CLEAR_RGB`] unless the app switched to a
+/// true-black ground (OLED setting), so page-transition snapshots clear to the same colour as
+/// the page itself.
+static CLEAR_BLACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_clear_black(on: bool) {
+    CLEAR_BLACK.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn clear_rgb() -> (f32, f32, f32) {
+    if CLEAR_BLACK.load(std::sync::atomic::Ordering::Relaxed) {
+        (0.0, 0.0, 0.0)
+    } else {
+        CLEAR_RGB
+    }
+}
+
 /// Hero/scroll scrim ink; use via `theme::scrim`.
 pub const SCRIM_INK: [f32; 3] = [NEUTRAL_1000[0], NEUTRAL_1000[1], NEUTRAL_1000[2]];
 

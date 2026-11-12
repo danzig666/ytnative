@@ -248,6 +248,7 @@ static BLACK_BG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::
 
 pub fn set_black_background(on: bool) {
     BLACK_BG.store(on, std::sync::atomic::Ordering::Relaxed);
+    plx_gfx::gfx::tokens::set_clear_black(on);
 }
 
 /// The page background: plx's ground, or true black (OLED setting).

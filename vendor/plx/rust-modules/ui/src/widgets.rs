@@ -7166,7 +7166,7 @@ impl TabBand {
     /// Solve once for a container and publish its face for sibling controls. A caller that
     /// chooses a flat track never requests a readback; unsettled pages retain their last sample.
     pub fn prepare(&mut self, p: Painter, track: Rect, settled: bool, glass: bool) -> [f32; 3] {
-        let (r, g, b) = theme::CLEAR_RGB;
+        let (r, g, b) = plx_gfx::gfx::tokens::clear_rgb();
         let flat = [r, g, b];
         let ground = if glass {
             let at = p.place(track);
