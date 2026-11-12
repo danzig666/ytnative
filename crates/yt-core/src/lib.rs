@@ -13,6 +13,7 @@ pub mod mpd;
 pub mod parse;
 pub mod paths;
 pub mod sabr;
+pub mod search_filters;
 pub mod session;
 pub mod storyboard;
 pub mod streams;

@@ -158,6 +158,7 @@ fn items(page: SettingsPage) -> Vec<Item> {
             v.extend([
                 section_toggle!("Sidebar: Home", Section::Home),
                 section_toggle!("Sidebar: Subscriptions", Section::Subscriptions),
+                section_toggle!("Sidebar: Channels", Section::Channels),
                 section_toggle!("Sidebar: History", Section::History),
                 section_toggle!("Sidebar: Library", Section::Library),
                 section_toggle!("Sidebar: Music", Section::Music),

@@ -64,6 +64,19 @@ impl Machine<YtHost> for FeedScreen {
             ScreenEvent::Async(_, YtMsg::Loaded(_) | YtMsg::Failed(..)) => fx.invalidate(plx_machine::present::Provenance::Lifecycle),
             _ => {}
         }
+        // Up from the top row of search results opens the filters panel.
+        if let (FeedKey::Search { query, .. }, ScreenEvent::Input(plx_machine::machine::InputEvent {
+            kind: plx_machine::machine::InputKind::Key { key: plx_machine::machine::Key::Up, edge: plx_machine::machine::Edge::Down, .. },
+            ..
+        })) = (&self.key, ev)
+        {
+            let src = self.src(cx);
+            let at_top = cx.focus.current.and_then(|k| src.cards.iter().position(|c| c.elem == k.elem)).map_or(true, |i| i < 4);
+            if at_top {
+                fx.push(Fx::Nav(NavOp::Present(YtArg::SearchFilters(query.clone()))));
+                return Handled::Yes;
+            }
+        }
         let src = self.src(cx);
         match self.grid.on(ev, cx, &src, fx) {
             Some(CardEvent::Activate(e)) => {
@@ -127,6 +140,11 @@ impl Screen<YtHost> for FeedScreen {
         let p = f.painter;
         let cx = f.cx;
         ui::text(p, &ui::ellipsize(&self.title(cx), 70), 112.0, 64.0, 46, ui::WHITE, ui::ALIGN_LEFT, true);
+        if let FeedKey::Search { params, .. } = &self.key {
+            let f = &cx.views.store.search_filters;
+            let hint = if params.is_some() && !f.is_default() { format!("{}   \u{25B2} Filters", f.summary()) } else { "\u{25B2} Filters".into() };
+            ui::text(p, &hint, 1808.0, 74.0, 26, ui::FAINT, ui::ALIGN_RIGHT, false);
+        }
         let src = self.src(cx);
         if src.cards.is_empty() {
             common::empty_state(p, cx.views.store.feed(&self.key), Rect::new(112.0, 170.0, 1700.0, 800.0));

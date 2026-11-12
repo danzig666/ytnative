@@ -10,6 +10,7 @@ use yt_core::model::{Endpoint, Item, ItemKind, Page};
 pub enum Section {
     Home,
     Subscriptions,
+    Channels,
     History,
     Library,
     Music,
@@ -26,6 +27,7 @@ impl Section {
     pub const ALL: &'static [Section] = &[
         Section::Home,
         Section::Subscriptions,
+        Section::Channels,
         Section::History,
         Section::Library,
         Section::Music,
@@ -42,6 +44,7 @@ impl Section {
         match self {
             Section::Home => "home",
             Section::Subscriptions => "subscriptions",
+            Section::Channels => "channels",
             Section::History => "history",
             Section::Library => "library",
             Section::Music => "music",
@@ -63,6 +66,7 @@ impl Section {
         match self {
             Section::Home => "Home",
             Section::Subscriptions => "Subscriptions",
+            Section::Channels => "Channels",
             Section::History => "History",
             Section::Library => "Library",
             Section::Music => "Music",
@@ -79,7 +83,7 @@ impl Section {
     pub fn browse_id(self) -> &'static str {
         match self {
             Section::Home => "FEwhat_to_watch",
-            Section::Subscriptions => "FEsubscriptions",
+            Section::Subscriptions | Section::Channels => "FEsubscriptions",
             Section::History => "FEhistory",
             Section::Library => "FElibrary",
             Section::Music => "FEtopics_music",
@@ -164,6 +168,8 @@ pub struct Comments {
 #[derive(Default)]
 pub struct Store {
     pub accounts: Vec<AccountRow>,
+    /// Filters of the last search (the filters panel edits these).
+    pub search_filters: yt_core::search_filters::Filters,
     pub comments: HashMap<String, Comments>,
     pub feeds: HashMap<FeedKey, Feed>,
     pub settings: Settings,
@@ -207,7 +213,26 @@ impl Store {
             Default::default()
         };
         let mut fresh = Vec::new();
-        for it in page.shelves.iter().flat_map(|s| s.items.iter()) {
+        let channel_items: Vec<Item>;
+        let items: Box<dyn Iterator<Item = &Item>> = if *k == FeedKey::Section(Section::Channels) {
+            channel_items = page
+                .tabs
+                .iter()
+                .filter(|t| matches!(&t.endpoint, Some(Endpoint::Browse { params: Some(_), .. })))
+                .map(|t| Item {
+                    kind: ItemKind::Channel,
+                    id: t.title.clone(),
+                    title: t.title.clone(),
+                    thumbnail: t.thumbnail.clone(),
+                    endpoint: t.endpoint.clone(),
+                    ..Default::default()
+                })
+                .collect();
+            Box::new(channel_items.iter())
+        } else {
+            Box::new(page.shelves.iter().flat_map(|s| s.items.iter()))
+        };
+        for it in items {
             if !seen.insert(it.id.clone()) || !filter.keep(it) {
                 continue;
             }

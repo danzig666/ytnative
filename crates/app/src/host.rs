@@ -45,6 +45,7 @@ pub enum YtArg {
     PlayerMenu,
     Accounts,
     Comments(String),
+    SearchFilters(String),
 }
 
 impl ScreenArg for YtArg {
@@ -63,6 +64,7 @@ impl ScreenArg for YtArg {
             YtArg::PlayerMenu => 8,
             YtArg::Accounts => 9,
             YtArg::Comments(_) => 10,
+            YtArg::SearchFilters(_) => 11,
         })
     }
     fn title(&self) -> Option<&str> {
@@ -108,6 +110,7 @@ pub enum UserAction {
 
 pub enum YtFx {
     Act(UserAction),
+    EditFilters(Box<dyn FnOnce(&mut yt_core::search_filters::Filters) + Send>),
     LoadComments { video_id: String, continuation: Option<String> },
     Load(FeedKey),
     More(FeedKey),
@@ -192,6 +195,7 @@ impl Mounter<YtHost> for Mount {
             YtArg::PlayerMenu => Box::new(screens::menu::MenuScreen::player(entry, cx)),
             YtArg::Accounts => Box::new(screens::accounts::AccountsScreen::new(entry)),
             YtArg::Comments(v) => Box::new(screens::comments::CommentsScreen::new(entry, v.clone())),
+            YtArg::SearchFilters(q) => Box::new(screens::menu::MenuScreen::filters(entry, q.clone())),
         }
     }
 }
@@ -616,6 +620,7 @@ impl Rig<YtHost> for AppRig {
                 });
             }
             YtFx::Toast(m) => self.store.toast(m, self.now_ms),
+            YtFx::EditFilters(f) => f(&mut self.store.search_filters),
         }
     }
     fn log(&mut self, line: &str) {

@@ -27,6 +27,8 @@ enum Act {
     SearchFor(String),
     User(UserAction),
     Comments(String),
+    Filter(u8),
+    ApplyFilters(String),
     Speed,
     MaxQuality,
     Subtitles,
@@ -102,6 +104,21 @@ impl MenuScreen {
         Self::make(entry, title, acts)
     }
 
+    pub fn filters(entry: EntryId, query: String) -> Self {
+        let acts = vec![
+            ("Upload date".to_string(), Act::Filter(0)),
+            ("Type".to_string(), Act::Filter(1)),
+            ("Duration".to_string(), Act::Filter(2)),
+            ("Sort by".to_string(), Act::Filter(3)),
+            ("Live".to_string(), Act::Filter(4)),
+            ("4K".to_string(), Act::Filter(5)),
+            ("HDR".to_string(), Act::Filter(6)),
+            ("Reset filters".to_string(), Act::Filter(7)),
+            ("Apply".to_string(), Act::ApplyFilters(query)),
+        ];
+        Self::make(entry, "Search filters".into(), acts)
+    }
+
     pub fn player(entry: EntryId, cx: &Cx<'_, YtHost>) -> Self {
         let st = cx.views.player;
         let mut acts = Vec::new();
@@ -144,6 +161,22 @@ impl MenuScreen {
     fn value(&self, act: &Act, cx: &Cx<'_, YtHost>) -> Option<String> {
         let s = &cx.views.store.settings;
         Some(match act {
+            Act::Filter(i) => {
+                use yt_core::search_filters::*;
+                let f = &cx.views.store.search_filters;
+                let v = match i {
+                    0 => format!("{:?}", f.upload_date),
+                    1 => format!("{:?}", f.kind),
+                    2 => format!("{:?}", f.duration),
+                    3 => format!("{:?}", f.sort),
+                    4 => (if f.live { "On" } else { "Off" }).into(),
+                    5 => (if f.hd_4k { "On" } else { "Off" }).into(),
+                    6 => (if f.hdr { "On" } else { "Off" }).into(),
+                    _ => return None,
+                };
+                let _ = (UploadDate::Any, Kind::Any);
+                format!("\u{2039}  {v}  \u{203A}")
+            }
             Act::Speed => {
                 let r = if cx.views.player.rate > 0.0 { cx.views.player.rate } else { 1.0 };
                 format!("\u{2039}  {r}x  \u{203A}")
@@ -215,6 +248,31 @@ impl MenuScreen {
             Act::Comments(v) => {
                 fx.push(Fx::Nav(NavOp::Pop));
                 fx.push(Fx::Nav(NavOp::Push(YtArg::Comments(v.clone()))));
+            }
+            Act::Filter(i) => {
+                let i = *i;
+                fx.push(Fx::App(YtFx::EditFilters(Box::new(move |f| {
+                    use yt_core::search_filters::*;
+                    fn step<T: Copy + PartialEq>(l: &[T], c: T, d: i32) -> T {
+                        let i = l.iter().position(|x| *x == c).unwrap_or(0) as i32;
+                        l[((i + d).rem_euclid(l.len() as i32)) as usize]
+                    }
+                    match i {
+                        0 => f.upload_date = step(&[UploadDate::Any, UploadDate::Hour, UploadDate::Today, UploadDate::Week, UploadDate::Month, UploadDate::Year], f.upload_date, dir),
+                        1 => f.kind = step(&[Kind::Any, Kind::Video, Kind::Channel, Kind::Playlist, Kind::Movie], f.kind, dir),
+                        2 => f.duration = step(&[Duration::Any, Duration::Short, Duration::Medium, Duration::Long], f.duration, dir),
+                        3 => f.sort = step(&[Sort::Relevance, Sort::UploadDate, Sort::ViewCount, Sort::Rating], f.sort, dir),
+                        4 => f.live = !f.live,
+                        5 => f.hd_4k = !f.hd_4k,
+                        6 => f.hdr = !f.hdr,
+                        _ => *f = Filters::default(),
+                    }
+                }))));
+            }
+            Act::ApplyFilters(q) => {
+                let params = cx.views.store.search_filters.params();
+                fx.push(Fx::Nav(NavOp::Pop));
+                fx.push(Fx::Nav(NavOp::Replace(YtArg::Feed(FeedKey::Search { query: q.clone(), params }))));
             }
             Act::Close => fx.push(Fx::Nav(NavOp::Pop)),
         }
