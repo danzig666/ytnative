@@ -3,6 +3,7 @@
 //! Boot and frame loop follow plx-native's `app/boot.rs` + `app/run.rs` (GPL-3.0-or-later):
 //! SDL + GLES2 window, transparent UI plane over the video plane, the plx_ui dispatcher.
 
+mod feed;
 mod host;
 mod images;
 mod input;

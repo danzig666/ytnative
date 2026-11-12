@@ -2126,6 +2126,7 @@ dependencies = [
  "plx_platform",
  "plx_ui",
  "reqwest",
+ "serde",
  "serde_json",
  "yt-core",
 ]
