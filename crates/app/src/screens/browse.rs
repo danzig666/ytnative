@@ -8,7 +8,8 @@ use crate::store::{FeedKey, Section};
 use crate::ui::{self, CardsSrc, Row, VList};
 use plx_machine::machine::{Canon, Cx, Effects, EntryId, FocusKey, Fx, GroupId, Handled, LogicalState, Machine, NavOp, ScreenEvent};
 use plx_ui::card_row::RowStyle;
-use plx_ui::cards::{CardEvent, Grid, GridSpec};
+use plx_ui::cards::{CardEvent, Grid, GridSpec, Kind, SectionSpec, Stack, StackEvent, StackPage};
+use plx_ui::screen::Part;
 use plx_ui::frame::Budget;
 use plx_ui::screen::{At, Dir, DrawFrame, Focusable, GroupSpec, Placed, RenderStrategy, Screen, Step};
 use plx_ui::Rect;
@@ -19,6 +20,43 @@ const SPEC: GridSpec = GridSpec::new(150.0, 96.0).columns(4, STYLE, 420.0);
 const G_NAV: GroupId = GroupId(1);
 const G_GRID: GroupId = GroupId(2);
 const NAV_BASE: u32 = 0x4000_0000;
+/// Shelf rows (Home, topics): 16:9 cards starting right of the sidebar.
+const SHELF_STYLE: RowStyle = RowStyle { w: 336.0, h: 189.0, gap: 40.0, margin_x: 420.0, ..RowStyle::HOME };
+const SPACER: usize = usize::MAX;
+
+/// The section's titled rows as a plx `Stack` page.
+struct Rows {
+    key: FeedKey,
+}
+
+impl StackPage<YtHost> for Rows {
+    type Key = usize;
+    type Cards<'a> = CardsSrc<'a>;
+    fn revision(&self, cx: &Cx<'_, YtHost>) -> u64 {
+        cx.views.store.feed(&self.key).map_or(0, |f| ((f.shelves.len() as u64) << 32) | f.gen as u64)
+    }
+    fn sections(&self, cx: &Cx<'_, YtHost>, out: &mut Vec<SectionSpec<usize>>) {
+        out.push(SectionSpec::new(SPACER, Kind::Custom { height: 110.0, focusable: false }, GroupId(90)));
+        if let Some(f) = cx.views.store.feed(&self.key) {
+            for i in 0..f.shelves.len() {
+                out.push(SectionSpec::new(i, Kind::Shelf { style: &SHELF_STYLE, heading: 56.0 }, GroupId(100 + i as u32)));
+            }
+        }
+    }
+    fn fallback(&self, _cx: &Cx<'_, YtHost>, out: &mut Vec<usize>) {
+        out.push(0);
+    }
+    fn cards<'a>(&'a self, cx: &'a Cx<'_, YtHost>, k: usize) -> Option<CardsSrc<'a>> {
+        let f = cx.views.store.feed(&self.key)?;
+        let (_, r) = f.shelves.get(k)?;
+        Some(CardsSrc { cards: &f.cards[r.clone()], more: false })
+    }
+    fn draw_heading(&self, k: usize, f: &mut DrawFrame<'_, '_, YtHost>, r: Rect, _lift: f32) {
+        if let Some((title, _)) = f.cx.views.store.feed(&self.key).and_then(|fd| fd.shelves.get(k)) {
+            ui::text(f.painter, title, SHELF_STYLE.margin_x, r.y + 8.0, 32, ui::WHITE, ui::ALIGN_LEFT, true);
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 enum NavItem {
@@ -42,6 +80,8 @@ pub struct BrowseScreen {
     entry: EntryId,
     nav: VList,
     grid: Grid,
+    stack: Stack<usize>,
+    rows: Rows,
     section: Section,
     state: State,
 }
@@ -65,6 +105,8 @@ impl BrowseScreen {
             entry,
             nav: VList { entry, group: G_NAV, base: NAV_BASE, rect: Rect::new(24.0, 150.0, 340.0, 860.0), row_h: 68.0, text_size: 30 },
             grid: Grid::new(entry, SPEC),
+            stack: Stack::new(entry).clipped(Rect::new(390.0, 0.0, 1530.0, 1080.0)),
+            rows: Rows { key: FeedKey::Section(section) },
             section,
             state: State(section.key().into()),
         }
@@ -86,6 +128,8 @@ impl BrowseScreen {
         self.section = section;
         self.state = State(section.key().into());
         self.grid = Grid::new(self.entry, SPEC);
+        self.stack = Stack::new(self.entry).clipped(Rect::new(390.0, 0.0, 1530.0, 1080.0));
+        self.rows = Rows { key: self.key() };
         if cx.views.store.feed(&self.key()).is_none() {
             fx.push(Fx::App(YtFx::Load(self.key())));
         }
@@ -103,6 +147,10 @@ impl BrowseScreen {
             NavItem::Settings => fx.push(Fx::Nav(NavOp::Push(YtArg::Settings(crate::host::SettingsPage::Root)))),
             NavItem::Account => fx.push(Fx::Nav(NavOp::Push(if cx.views.store.signed_in { YtArg::Accounts } else { YtArg::SignIn }))),
         }
+    }
+
+    fn rows_mode(&self, cx: &Cx<'_, YtHost>) -> bool {
+        cx.views.store.feed(&self.key()).is_some_and(|f| f.has_rows())
     }
 
     fn nav_index_of_section(&self, items: &[NavItem]) -> usize {
@@ -147,6 +195,37 @@ impl Machine<YtHost> for BrowseScreen {
             }
             _ => {}
         }
+        if self.rows_mode(cx) {
+            // Near the last rows: ask for the next page of shelves.
+            if let ScreenEvent::FocusMoved { to, .. } = ev {
+                if let Some(f) = cx.views.store.feed(&self.key()) {
+                    let idx = f.cards.iter().position(|c| c.elem == to.elem);
+                    let row = idx.and_then(|i| f.shelves.iter().position(|(_, r)| r.contains(&i)));
+                    if row.is_some_and(|r| r + 2 >= f.shelves.len()) && f.continuation.is_some() {
+                        fx.push(Fx::App(YtFx::More(self.key())));
+                    }
+                }
+            }
+            match self.stack.on(&self.rows, ev, cx, fx) {
+                Some(StackEvent::Card(_, CardEvent::Activate(e))) => {
+                    if let (Some(card), Some(f)) = (cx.views.store.card(e), cx.views.store.feed(&self.key())) {
+                        let row = f.shelves.iter().find(|(_, r)| f.cards[r.clone()].iter().any(|c| c.elem == e));
+                        let list = row.map(|(_, r)| &f.cards[r.clone()]).unwrap_or(&f.cards[..]);
+                        common::open_card_in(card, list, fx);
+                    }
+                    return Handled::Yes;
+                }
+                Some(StackEvent::Card(_, CardEvent::Hold(e))) => {
+                    fx.push(Fx::Nav(NavOp::Present(YtArg::Menu(e))));
+                    return Handled::Yes;
+                }
+                _ => {}
+            }
+            return match ev {
+                ScreenEvent::Input(_) => Handled::No,
+                _ => Handled::Yes,
+            };
+        }
         let src = self.src(cx);
         match self.grid.on(ev, cx, &src, fx) {
             Some(CardEvent::Activate(e)) => {
@@ -172,13 +251,29 @@ impl Machine<YtHost> for BrowseScreen {
 impl Focusable<YtHost> for BrowseScreen {
     fn groups(&self, cx: &Cx<'_, YtHost>, out: &mut Vec<GroupSpec>) {
         out.push(self.nav.spec(nav_items(cx).len()));
-        out.push(self.grid.group_spec(G_GRID, self.src(cx).cards.len()));
+        if self.rows_mode(cx) {
+            self.stack.view(&self.rows).groups(cx, out);
+        } else {
+            out.push(self.grid.group_spec(G_GRID, self.src(cx).cards.len()));
+        }
     }
-    fn group_of(&self, key: &u32, _cx: &Cx<'_, YtHost>) -> Option<GroupId> {
-        Some(if *key >= NAV_BASE { G_NAV } else { G_GRID })
+    fn group_of(&self, key: &u32, cx: &Cx<'_, YtHost>) -> Option<GroupId> {
+        if *key >= NAV_BASE {
+            return Some(G_NAV);
+        }
+        if self.rows_mode(cx) {
+            return self.stack.view(&self.rows).group_of(key, cx);
+        }
+        Some(G_GRID)
     }
     fn neighbour(&self, key: FocusKey<u32>, dir: Dir, cx: &Cx<'_, YtHost>) -> Step<u32> {
         let items = nav_items(cx);
+        if self.rows_mode(cx) && key.elem < NAV_BASE {
+            return match self.stack.view(&self.rows).neighbour(key, dir, cx) {
+                Step::Edge if dir == Dir::Left => Step::Move(self.nav.key(self.nav_index_of_section(&items))),
+                s => s,
+            };
+        }
         if key.elem >= NAV_BASE {
             if dir == Dir::Right && !self.src(cx).cards.is_empty() {
                 return Step::Move(FocusKey { entry: self.entry, elem: self.src(cx).cards[0].elem });
@@ -195,10 +290,16 @@ impl Focusable<YtHost> for BrowseScreen {
             let n = nav_items(cx).len();
             return self.nav.place(*key, n, self.nav.focused(cx, n));
         }
+        if self.rows_mode(cx) {
+            return self.stack.view(&self.rows).place(key, cx, at);
+        }
         self.grid.place(cx, &self.src(cx), key, at)
     }
     fn reconcile(&self, want: FocusKey<u32>, cx: &Cx<'_, YtHost>) -> FocusKey<u32> {
         let items = nav_items(cx);
+        if self.rows_mode(cx) && want.elem < NAV_BASE {
+            return self.stack.view(&self.rows).reconcile(want, cx);
+        }
         let src = self.src(cx);
         let valid = if want.elem >= NAV_BASE { self.nav.index(want.elem, items.len()).is_some() } else { src.cards.iter().any(|c| c.elem == want.elem) };
         if valid {
@@ -210,6 +311,9 @@ impl Focusable<YtHost> for BrowseScreen {
         }
     }
     fn seat(&self, g: GroupId, from: Placed, cx: &Cx<'_, YtHost>) -> FocusKey<u32> {
+        if self.rows_mode(cx) && g != G_NAV {
+            return self.stack.view(&self.rows).seat(g, from, cx);
+        }
         let src = self.src(cx);
         if g == G_GRID {
             if let Some(k) = self.grid.seat(&src, from) {
@@ -260,7 +364,11 @@ impl Screen<YtHost> for BrowseScreen {
         let feed = cx.views.store.feed(&self.key());
         ui::text(p, self.section.title(), 420.0, 56.0, 44, ui::WHITE, ui::ALIGN_LEFT, true);
         let src = self.src(cx);
-        if src.cards.is_empty() {
+        if self.rows_mode(cx) {
+            let mut view = self.stack.view(&self.rows);
+            Part::draw(&mut view, f, Rect::new(390.0, 0.0, 1530.0, 1080.0));
+            view.record_stops(f);
+        } else if src.cards.is_empty() {
             common::empty_state(p, feed, Rect::new(420.0, 150.0, 1460.0, 800.0));
         } else {
             self.grid.draw(f, p, &src);
@@ -269,6 +377,10 @@ impl Screen<YtHost> for BrowseScreen {
         common::toast(p, cx);
     }
     fn redraw_focused(&self, f: &mut DrawFrame<'_, '_, YtHost>, focus: Option<FocusKey<u32>>) {
+        if self.rows_mode(f.cx) {
+            self.stack.view(&self.rows).redraw_focused(f, focus);
+            return;
+        }
         let p = f.painter;
         let src = self.src(f.cx);
         self.grid.redraw_focused(f, p, &src, focus);

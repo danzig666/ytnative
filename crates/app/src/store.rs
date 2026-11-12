@@ -148,6 +148,15 @@ pub struct Feed {
     pub error: Option<String>,
     /// Bumped whenever cards change, so screens can notice.
     pub gen: u32,
+    /// Titled rows of `cards` (title, index range), in order. One untitled entry = a plain grid.
+    pub shelves: Vec<(String, std::ops::Range<usize>)>,
+}
+
+impl Feed {
+    /// Several titled rows: show as shelves (Home, topics) rather than one grid.
+    pub fn has_rows(&self) -> bool {
+        self.shelves.len() > 1 && self.shelves.iter().filter(|s| !s.0.is_empty()).count() >= 2
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -218,7 +227,7 @@ impl Store {
         };
         let mut fresh = Vec::new();
         let channel_items: Vec<Item>;
-        let items: Box<dyn Iterator<Item = &Item>> = if *k == FeedKey::Section(Section::Channels) {
+        let groups: Vec<(String, Vec<&Item>)> = if *k == FeedKey::Section(Section::Channels) {
             channel_items = page
                 .tabs
                 .iter()
@@ -232,28 +241,38 @@ impl Store {
                     ..Default::default()
                 })
                 .collect();
-            Box::new(channel_items.iter())
+            vec![(String::new(), channel_items.iter().collect())]
         } else {
-            Box::new(page.shelves.iter().flat_map(|s| s.items.iter()))
+            page.shelves.iter().map(|s| (s.title.clone(), s.items.iter().collect())).collect()
         };
-        for it in items {
-            if !seen.insert(it.id.clone()) || !filter.keep(it) {
-                continue;
+        let base = if append { self.cards(k).len() } else { 0 };
+        let mut rows = Vec::new();
+        for (title, items) in groups {
+            let start = fresh.len();
+            for it in items {
+                if !seen.insert(it.id.clone()) || !filter.keep(it) {
+                    continue;
+                }
+                self.next_elem += 1;
+                fresh.push(Card {
+                    elem: self.next_elem,
+                    title: it.title.clone(),
+                    detail: it.lines.join(" \u{2022} "),
+                    thumb: it.thumbnail.clone().unwrap_or_default(),
+                    item: it.clone(),
+                });
             }
-            self.next_elem += 1;
-            fresh.push(Card {
-                elem: self.next_elem,
-                title: it.title.clone(),
-                detail: it.lines.join(" \u{2022} "),
-                thumb: it.thumbnail.clone().unwrap_or_default(),
-                item: it.clone(),
-            });
+            if fresh.len() > start {
+                rows.push((title, base + start..base + fresh.len()));
+            }
         }
         let f = self.feeds.entry(k.clone()).or_default();
         if append {
             f.cards.extend(fresh);
+            f.shelves.extend(rows);
         } else {
             f.cards = fresh;
+            f.shelves = rows;
             if let Some(t) = page.title.clone() {
                 f.title = t;
             }
