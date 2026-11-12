@@ -397,7 +397,7 @@ mod tests {
     fn live_history_cycle() {
         use crate::actions::{menu_map, MenuKind};
         const VID: &str = "jNQXAC9IVRw";
-        crate::paths::set_data_dir("C:/Download/prog/ytnative".into());
+        crate::accounts::live_data_dir();
         let mut s = Session::new().unwrap();
         let hist = |s: &mut Session| s.raw("browse", json!({ "browseId": "FEhistory" })).unwrap();
         if menu_map(&hist(&mut s)).contains_key(VID) {
@@ -411,10 +411,14 @@ mod tests {
         s.report_end(&mut t, 5.0).unwrap();
 
         let mut token = None;
+        let mut resume = None;
         for _ in 0..10 {
-            let m = menu_map(&hist(&mut s));
-            if let Some(acts) = m.get(VID) {
+            let h = hist(&mut s);
+            if let Some(acts) = menu_map(&h).get(VID) {
                 token = acts.iter().find(|a| a.kind == MenuKind::RemoveFromHistory).and_then(|a| a.token().map(str::to_string));
+                let mut tiles = Vec::new();
+                find_tiles(&h, &mut tiles);
+                resume = tiles.iter().find(|t| t["contentId"] == VID).and_then(|t| resume_ms_from_tile(t, Some(19.0)));
                 break;
             }
             std::thread::sleep(std::time::Duration::from_secs(3));
@@ -423,5 +427,19 @@ mod tests {
         s.feedback(&[&token]).unwrap();
         std::thread::sleep(std::time::Duration::from_secs(3));
         assert!(!menu_map(&hist(&mut s)).contains_key(VID), "history entry was not removed");
+        eprintln!("resume hint after watching to 5 s: {resume:?} ms");
+    }
+
+    fn find_tiles<'a>(v: &'a Value, out: &mut Vec<&'a Value>) {
+        match v {
+            Value::Object(m) => {
+                if let Some(t) = m.get("tileRenderer") {
+                    out.push(t);
+                }
+                m.values().for_each(|c| find_tiles(c, out));
+            }
+            Value::Array(a) => a.iter().for_each(|c| find_tiles(c, out)),
+            _ => {}
+        }
     }
 }

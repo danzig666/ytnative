@@ -472,7 +472,46 @@ fn walk(v: &Value, f: &mut dyn FnMut(&str, &Value)) {
 
 // ---------- Session ----------
 
+/// Client for the playlist create/delete endpoints: TVHTML5 is refused ("Precondition check
+/// failed"), WEB/ANDROID reject the TV OAuth token ("invalid argument"), the embedded TV player
+/// client accepts it (verified 2026-11).
+const EMBED_CLIENT: (&str, &str, &str) = ("TVHTML5_SIMPLY_EMBEDDED_PLAYER", "85", "2.0");
+
+pub fn embed_context(visitor_data: Option<&str>) -> Value {
+    let (name, _, ver) = EMBED_CLIENT;
+    json!({ "client": { "clientName": name, "clientVersion": ver, "hl": "en", "gl": "US", "visitorData": visitor_data.unwrap_or_default() } })
+}
+
 impl Session {
+    /// A signed-in InnerTube call as the embedded TV player client (same OAuth token).
+    pub fn embed_raw(&mut self, endpoint: &str, mut body: Value) -> Result<Value> {
+        let bearer = self.bearer()?.with_context(|| format!("{endpoint}: not signed in"))?;
+        let (_, id, ver) = EMBED_CLIENT;
+        body["context"] = embed_context(self.cfg.visitor_data.as_deref());
+        let mut req = self
+            .http
+            .post(format!("https://www.youtube.com/youtubei/v1/{endpoint}?prettyPrint=false"))
+            .header("User-Agent", crate::bootstrap::TV_UA)
+            .header("X-YouTube-Client-Name", id)
+            .header("X-YouTube-Client-Version", ver)
+            .header("Origin", "https://www.youtube.com")
+            .bearer_auth(bearer)
+            .json(&body);
+        if let Some(v) = &self.cfg.visitor_data {
+            req = req.header("X-Goog-Visitor-Id", v);
+        }
+        if let Some(p) = &self.page_id {
+            req = req.header("X-Goog-PageId", p);
+        }
+        let resp = req.send()?;
+        let status = resp.status();
+        let v: Value = resp.json().unwrap_or(Value::Null);
+        if !status.is_success() {
+            bail!("{endpoint} (embedded client) -> HTTP {status}: {}", v["error"]["message"]);
+        }
+        Ok(v)
+    }
+
     /// `raw` that requires a signed-in session.
     pub fn signed_raw(&mut self, endpoint: &str, body: Value) -> Result<Value> {
         if !self.signed_in() {
@@ -560,12 +599,12 @@ impl Session {
 
     /// Creates a playlist; returns its id.
     pub fn create_playlist(&mut self, title: &str, privacy: Privacy, video_ids: &[&str]) -> Result<String> {
-        let r = self.signed_raw("playlist/create", create_playlist_body(title, privacy, video_ids))?;
+        let r = self.embed_raw("playlist/create", create_playlist_body(title, privacy, video_ids))?;
         r["playlistId"].as_str().map(str::to_string).context(format!("playlist/create: no playlistId in {r}"))
     }
 
     pub fn delete_playlist(&mut self, playlist_id: &str) -> Result<()> {
-        self.signed_raw("playlist/delete", delete_playlist_body(playlist_id)).map(drop)
+        self.embed_raw("playlist/delete", delete_playlist_body(playlist_id)).map(drop)
     }
 
     /// Saves someone else's playlist to the library.
@@ -809,28 +848,43 @@ mod tests {
     const TEST_CHANNEL: &str = "UC4QobU6STFB0P71PMvOGN5A";
 
     fn live() -> Session {
-        crate::paths::set_data_dir("C:/Download/prog/ytnative".into());
+        crate::accounts::live_data_dir();
         let s = Session::new().unwrap();
         assert!(s.signed_in());
         s
+    }
+
+    /// Reads are eventually consistent: poll `f` (2 s apart) until it returns `want`.
+    fn eventually<T: PartialEq + std::fmt::Debug>(mut f: impl FnMut() -> T, want: T) -> T {
+        for _ in 0..10 {
+            let v = f();
+            if v == want {
+                return v;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+        f()
+    }
+
+    fn rating(s: &mut Session) -> Rating {
+        s.video_state(TEST_VIDEO).unwrap().0.unwrap().rating
     }
 
     #[test]
     #[ignore]
     fn live_like_cycle() {
         let mut s = live();
-        let (before, _) = s.video_state(TEST_VIDEO).unwrap();
-        let before = before.unwrap().rating;
+        let before = rating(&mut s);
         if before != Rating::None {
             eprintln!("skipping: test video already rated {before:?}");
             return;
         }
         s.like(TEST_VIDEO).unwrap();
-        let liked = s.video_state(TEST_VIDEO).unwrap().0.unwrap().rating;
+        let liked = eventually(|| rating(&mut s), Rating::Like);
         s.dislike(TEST_VIDEO).unwrap();
-        let disliked = s.video_state(TEST_VIDEO).unwrap().0.unwrap().rating;
+        let disliked = eventually(|| rating(&mut s), Rating::Dislike);
         s.remove_like(TEST_VIDEO).unwrap();
-        let after = s.video_state(TEST_VIDEO).unwrap().0.unwrap().rating;
+        let after = eventually(|| rating(&mut s), Rating::None);
         assert_eq!((liked, disliked, after), (Rating::Like, Rating::Dislike, Rating::None));
     }
 
@@ -844,17 +898,23 @@ mod tests {
             return;
         }
         s.subscribe(TEST_CHANNEL, info.subscribe_params.as_deref()).unwrap();
-        let on = s.subscribe_info(TEST_CHANNEL).unwrap().unwrap();
+        let subbed = |s: &mut Session| s.subscribe_info(TEST_CHANNEL).unwrap().unwrap();
+        let on = eventually(|| subbed(&mut s).subscribed, true);
         // Bell: pick "None", then unsubscribe (which drops the preference too).
-        let off = on.notifications.iter().find(|n| n.state.ends_with("_OFF")).cloned();
+        let info2 = subbed(&mut s);
+        let off = info2.notifications.iter().find(|n| n.state.ends_with("_OFF")).cloned();
         let bell = off.map(|n| s.set_notifications(&n.params));
-        s.unsubscribe(TEST_CHANNEL, on.unsubscribe_params.as_deref().or(info.unsubscribe_params.as_deref())).unwrap();
-        let after = s.subscribe_info(TEST_CHANNEL).unwrap().unwrap();
-        assert!(on.subscribed, "subscribe did not take");
-        assert!(!after.subscribed, "unsubscribe did not take");
+        s.unsubscribe(TEST_CHANNEL, info2.unsubscribe_params.as_deref().or(info.unsubscribe_params.as_deref())).unwrap();
+        let after = eventually(|| subbed(&mut s).subscribed, false);
+        assert!(on, "subscribe did not take");
+        assert!(!after, "unsubscribe did not take");
         if let Some(b) = bell {
             b.unwrap();
         }
+    }
+
+    fn contains(s: &mut Session, playlist_id: &str) -> Option<bool> {
+        s.playlists_for(TEST_VIDEO).unwrap().iter().find(|p| p.playlist_id == playlist_id).map(|p| p.contains)
     }
 
     #[test]
@@ -867,36 +927,32 @@ mod tests {
         for p in lists.iter().filter(|p| p.title == "ytnative-test") {
             s.delete_playlist(&p.playlist_id).unwrap();
         }
-        let id = s.create_playlist("ytnative-test", Privacy::Private, &[]).unwrap();
-        let res = (|| -> Result<()> {
-            s.add_to_playlist(&id, TEST_VIDEO)?;
-            let p = s.playlists_for(TEST_VIDEO)?;
-            let mine = p.iter().find(|p| p.playlist_id == id).context("new playlist not listed")?;
-            assert!(mine.contains, "video not added");
-            s.remove_from_playlist(&id, TEST_VIDEO)?;
-            let p = s.playlists_for(TEST_VIDEO)?;
-            assert!(!p.iter().find(|p| p.playlist_id == id).unwrap().contains, "video not removed");
-            Ok(())
-        })();
+        let id = s.create_playlist("ytnative-test", Privacy::Private, &[TEST_VIDEO]).unwrap();
+        let listed = eventually(|| contains(&mut s, &id), Some(true));
+        let privacy = s.playlists_for(TEST_VIDEO).unwrap().into_iter().find(|p| p.playlist_id == id).and_then(|p| p.privacy);
+        s.remove_from_playlist(&id, TEST_VIDEO).unwrap();
+        let removed = eventually(|| contains(&mut s, &id), Some(false));
+        s.add_to_playlist(&id, TEST_VIDEO).unwrap();
+        let added = eventually(|| contains(&mut s, &id), Some(true));
         s.delete_playlist(&id).unwrap();
-        res.unwrap();
-        assert!(!s.my_playlists().unwrap().iter().any(|p| p.playlist_id == id), "playlist not deleted");
+        let gone = eventually(|| contains(&mut s, &id), None);
+        assert_eq!((listed, removed, added, gone), (Some(true), Some(false), Some(true), None));
+        assert_eq!(privacy.as_deref(), Some("PRIVATE"));
     }
 
     #[test]
     #[ignore]
     fn live_watch_later_cycle() {
         let mut s = live();
-        let wl = |s: &mut Session| s.playlists_for(TEST_VIDEO).unwrap().iter().find(|p| p.playlist_id == WATCH_LATER).unwrap().contains;
-        if wl(&mut s) {
+        if contains(&mut s, WATCH_LATER) != Some(false) {
             eprintln!("skipping: test video already in Watch Later");
             return;
         }
         s.watch_later_add(TEST_VIDEO).unwrap();
-        let added = wl(&mut s);
+        let added = eventually(|| contains(&mut s, WATCH_LATER), Some(true));
         s.watch_later_remove(TEST_VIDEO).unwrap();
-        assert!(added);
-        assert!(!wl(&mut s));
+        let removed = eventually(|| contains(&mut s, WATCH_LATER), Some(false));
+        assert_eq!((added, removed), (Some(true), Some(false)));
     }
 
     /// A public playlist the account has not saved (checked at runtime): YouTube's
@@ -917,9 +973,9 @@ mod tests {
             return;
         }
         s.save_playlist(TEST_PLAYLIST).unwrap();
-        let saved = library_has(&mut s, TEST_PLAYLIST);
+        let saved = eventually(|| library_has(&mut s, TEST_PLAYLIST), true);
         s.unsave_playlist(TEST_PLAYLIST).unwrap();
-        let after = library_has(&mut s, TEST_PLAYLIST);
+        let after = eventually(|| library_has(&mut s, TEST_PLAYLIST), false);
         assert!(!after, "unsave did not take");
         assert!(saved, "save did not show up in the library");
     }

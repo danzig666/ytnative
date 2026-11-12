@@ -485,6 +485,13 @@ impl Session {
     }
 }
 
+/// Data dir for `#[ignore]` live tests: `YTNATIVE_TEST_DATA_DIR`, else the repo root (token.json).
+#[cfg(test)]
+pub(crate) fn live_data_dir() {
+    let dir = std::env::var("YTNATIVE_TEST_DATA_DIR").unwrap_or_else(|_| "C:/Download/prog/ytnative".into());
+    crate::paths::set_data_dir(dir.into());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -592,7 +599,7 @@ mod tests {
     #[test]
     #[ignore]
     fn live_accounts() {
-        crate::paths::set_data_dir("C:/Download/prog/ytnative".into());
+        crate::accounts::live_data_dir();
         let mut s = Session::new().unwrap();
         assert!(s.signed_in());
         let a = s.ensure_profile().unwrap().unwrap();
