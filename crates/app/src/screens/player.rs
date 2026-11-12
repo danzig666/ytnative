@@ -96,10 +96,14 @@ impl PlayerScreen {
 }
 
 /// The OSD's pointer buttons, right-aligned on the bottom row: 0 Subtitles, 1 Comments, 2 Options.
+/// OSD buttons: 0 like, 1 dislike, 2 subtitles, 3 comments, 4 options.
+const OSD_N: usize = 5;
+const OSD_CC: usize = 2;
+
 fn osd_button(i: usize) -> Rect {
-    const W: [f32; 3] = [84.0, 84.0, 84.0];
+    const W: [f32; OSD_N] = [84.0; OSD_N];
     let mut x = 1824.0;
-    for j in (i..3).rev() {
+    for j in (i..OSD_N).rev() {
         x -= W[j];
         if j != i {
             x -= 16.0;
@@ -113,8 +117,21 @@ impl PlayerScreen {
     fn press_osd(&mut self, i: usize, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
         let st = cx.views.player;
         match i {
-            0 => fx.push(Fx::App(YtFx::EditSettings(Box::new(|s| s.subtitles = !s.subtitles)))),
-            1 => {
+            0 | 1 if !st.video_id.is_empty() => {
+                use yt_core::actions::Rating;
+                let cur = st.extras.watch.as_ref().map(|w| w.like_status);
+                let liked = matches!(cur, Some(yt_core::watch::LikeStatus::Like));
+                let disliked = matches!(cur, Some(yt_core::watch::LikeStatus::Dislike));
+                let r = match (i, liked, disliked) {
+                    (0, true, _) | (1, _, true) => Rating::None,
+                    (0, ..) => Rating::Like,
+                    _ => Rating::Dislike,
+                };
+                fx.push(Fx::App(YtFx::Act(crate::host::UserAction::Rate(st.video_id.clone(), r))));
+            }
+            0 | 1 => {}
+            2 => fx.push(Fx::App(YtFx::EditSettings(Box::new(|s| s.subtitles = !s.subtitles)))),
+            3 => {
                 if !st.video_id.is_empty() && !cx.views.store.settings.child_mode {
                     self.osd_sel = None;
                     fx.push(Fx::Nav(NavOp::Present(YtArg::Comments(st.video_id.clone()))));
@@ -212,7 +229,7 @@ impl Machine<YtHost> for PlayerScreen {
             ScreenEvent::Input(InputEvent { kind: InputKind::Click { x, y, .. }, .. }) => {
                 let st = cx.views.player;
                 let (x, y) = (*x, *y);
-                if let Some(i) = (0..3).find(|i| self.hud && osd_button(*i).contains(x, y)) {
+                if let Some(i) = (0..OSD_N).find(|i| self.hud && osd_button(*i).contains(x, y)) {
                     self.press_osd(i, cx, fx);
                     self.show_hud(cx, fx);
                 } else if self.hud && (890.0..=960.0).contains(&y) && (96.0..=1824.0).contains(&x) && st.duration_ms > 0 && !st.live {
@@ -239,7 +256,7 @@ impl Machine<YtHost> for PlayerScreen {
                 if let Some(sel) = self.osd_sel {
                     match key {
                         Key::Left => self.osd_sel = Some(sel.saturating_sub(1)),
-                        Key::Right => self.osd_sel = Some((sel + 1).min(2)),
+                        Key::Right => self.osd_sel = Some((sel + 1).min(OSD_N - 1)),
                         Key::Down => {
                             self.osd_sel = None;
                             fx.push(Fx::Nav(NavOp::Present(YtArg::PlayerMenu)));
@@ -318,7 +335,7 @@ impl Machine<YtHost> for PlayerScreen {
                     }
                     (Key::Down, _) => {
                         // First Down: the OSD buttons (subtitles); Down again: Options.
-                        self.osd_sel = Some(0);
+                        self.osd_sel = Some(OSD_CC);
                         self.show_hud(cx, fx);
                         Handled::Yes
                     }
@@ -532,16 +549,19 @@ impl Screen<YtHost> for PlayerScreen {
         let subs_on = cx.views.store.settings.subtitles;
         let tr = crate::i18n::tr;
         let _ = tr;
-        let labels = ["CC".to_string(), "\u{1F4AC}".to_string(), "\u{2699}".to_string()];
+        let rating = st.extras.watch.as_ref().map(|w| w.like_status);
+        let liked = matches!(rating, Some(yt_core::watch::LikeStatus::Like));
+        let disliked = matches!(rating, Some(yt_core::watch::LikeStatus::Dislike));
+        let labels = ["\u{1F44D}".to_string(), "\u{1F44E}".to_string(), "CC".to_string(), "\u{1F4AC}".to_string(), "\u{2699}".to_string()];
         for (i, label) in labels.iter().enumerate() {
             let b = osd_button(i);
             let hot = self.pointer.is_some_and(|(x, y)| b.contains(x, y)) || self.osd_sel == Some(i);
-            let on = i == 0 && subs_on;
+            let on = (i == OSD_CC && subs_on) || (i == 0 && liked) || (i == 1 && disliked);
             ui::fill(p, b, b.h / 2.0, if hot { [1.0, 1.0, 1.0, 0.9] } else if on { [1.0, 1.0, 1.0, 0.22] } else { [1.0, 1.0, 1.0, 0.10] });
             let ink = if hot { [0.0, 0.0, 0.0, 1.0] } else { ui::WHITE };
-            let (size, dy) = if i == 0 { (24, 9.0) } else { (30, 5.0) };
-            ui::text(p, label, b.x + b.w / 2.0, b.y + dy, size, if i > 0 && !hot { ui::WHITE } else { ink }, ui::ALIGN_CENTER, true);
-            if i == 0 && subs_on {
+            let (size, dy) = if i == OSD_CC { (24, 9.0) } else { (30, 5.0) };
+            ui::text(p, label, b.x + b.w / 2.0, b.y + dy, size, if i != OSD_CC && !hot { ui::WHITE } else { ink }, ui::ALIGN_CENTER, true);
+            if on {
                 // "On" mark under CC.
                 ui::fill(p, Rect::new(b.x + 22.0, b.y + b.h - 8.0, b.w - 44.0, 4.0), 2.0, ui::accent());
             }
