@@ -4,6 +4,7 @@
 //! SDL + GLES2 window, transparent UI plane over the video plane, the plx_ui dispatcher.
 
 mod host;
+mod images;
 mod input;
 mod remote;
 mod screens;
@@ -98,6 +99,7 @@ fn main() {
         plx_gfx::gfx::init_image();
         plx_gfx::gfx::init_blur();
         plx_platform::i18n::initialize(plx_platform::i18n::Preference::System, false);
+        plx_ui::tex::install(&*images::THUMBS);
         log("ytnative: graphics ready");
 
         let mut rig = AppRig::new();
@@ -151,12 +153,13 @@ fn main() {
             }
 
             plx_machine::idle::frame_begin(dt);
+            images::THUMBS.deliver();
             let results = rig.drain();
             let r = d.frame_with(&mut rig, tick, inputs, results, &mut NoTap, false);
             d.prune(&r.unmounted);
             plx_ui::tex::note_queued(&mut d.budget);
 
-            let present = foreground && (r.presented || plx_machine::idle::should_present(now));
+            let present = foreground && (r.presented || plx_machine::idle::should_present(now) || plx_ui::tex::has_pending());
             if present {
                 plx_gfx::text::begin_frame();
                 let (x, y, w, h) = plx_base::surface::viewport();

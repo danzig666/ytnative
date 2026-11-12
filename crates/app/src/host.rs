@@ -216,7 +216,9 @@ impl Rig<YtHost> for AppRig {
     fn log(&mut self, line: &str) {
         plx_base::eventlog::log(line)
     }
-    fn prepare(&mut self, _b: &mut Budget, _present: &mut Present) {}
+    fn prepare(&mut self, b: &mut Budget, present: &mut Present) {
+        crate::images::prepare(b, present);
+    }
     fn ls2_pump(&mut self) {
         crate::wl::ls2_pump()
     }

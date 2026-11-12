@@ -2053,6 +2053,7 @@ dependencies = [
  "plx_machine",
  "plx_platform",
  "plx_ui",
+ "reqwest",
  "yt-core",
 ]
 

@@ -18,6 +18,7 @@ plx_platform = { path = "../../vendor/plx/rust-modules/platform" }
 plx_ui = { path = "../../vendor/plx/rust-modules/ui" }
 yt-core = { path = "../yt-core" }
 anyhow.workspace = true
+reqwest.workspace = true
 
 [build-dependencies]
 cc = "1"
