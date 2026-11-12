@@ -27,6 +27,18 @@ fn sdl_sym<T>(name: &str) -> Option<T> {
     (!p.is_null()).then(|| unsafe { std::mem::transmute_copy(&p) })
 }
 
+/// How the picture fills the screen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Zoom {
+    /// Whole picture, letterboxed as needed.
+    #[default]
+    Fit,
+    /// Crop to fill the screen (no bars).
+    Fill,
+    /// 125 % centre crop.
+    Zoom,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum Phase {
     #[default]
@@ -69,6 +81,10 @@ pub struct Status {
     pub channel_id: String,
     pub storyboard: Option<String>,
     pub captions: Vec<yt_core::streams::CaptionTrack>,
+    /// (id, name, default) of the audio languages offered.
+    pub audio_tracks: Vec<(String, String, bool)>,
+    pub audio_track: Option<String>,
+    pub zoom: Zoom,
     pub rate: f32,
     pub title: String,
     pub author: String,
@@ -179,6 +195,30 @@ impl Player {
         self.seek_by(to_ms as i64 - pos);
     }
 
+    /// Picture fit: re-places the exported window with a cropped source rectangle.
+    pub fn set_zoom(&mut self, zoom: Zoom) {
+        let (w, h) = {
+            let mut s = self.status.lock().unwrap();
+            s.zoom = zoom;
+            (s.width.max(1) as f32, s.height.max(1) as f32)
+        };
+        let Some(win) = &self.window else { return };
+        let Some(set) = sdl_sym::<SetFn>("SDL_webOSSetExportedWindow") else { return };
+        let (sw, sh) = match zoom {
+            Zoom::Fit => (w, h),
+            Zoom::Fill => {
+                // Crop the source to the screen's 16:9.
+                let target = 16.0 / 9.0;
+                if w / h > target { (h * target, h) } else { (w, w / target) }
+            }
+            Zoom::Zoom => (w / 1.25, h / 1.25),
+        };
+        let mut src = SdlRect { x: ((w - sw) / 2.0) as c_int, y: ((h - sh) / 2.0) as c_int, w: sw as c_int, h: sh as c_int };
+        let mut dst = SdlRect { x: 0, y: 0, w: 1920, h: 1080 };
+        let r = unsafe { set(win.as_ptr(), &mut src, &mut dst) };
+        crate::log(&format!("player: zoom {zoom:?} src {}x{} -> {r}", src.w, src.h));
+    }
+
     /// Playback speed (0.25..2.0) through uMediaServer's setPlayRate.
     pub fn set_rate(&mut self, rate: f32) {
         let Some(luna) = self.luna else { return };
@@ -260,6 +300,8 @@ fn run(
         s.channel_id = resolved.channel_id.clone();
         s.storyboard = resolved.storyboard_spec.clone();
         s.captions = resolved.captions.clone();
+        s.audio_tracks = resolved.audio_tracks();
+        s.audio_track = prefs.audio_track.clone();
     }
     std::fs::create_dir_all("/tmp/ytnative")?;
     // Live: the HLS master reduced to H.264 renditions (DASH-from-formats only works for VOD).

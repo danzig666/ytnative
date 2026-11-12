@@ -39,6 +39,7 @@ pub struct Settings {
     pub codec: Codec,
     pub speed: f32,
     pub remember_speed_per_channel: bool,
+    pub speed_by_channel: std::collections::HashMap<String, f32>,
     pub seek_step_secs: u32,
     pub repeat: Repeat,
     pub resume_playback: bool,
@@ -51,6 +52,10 @@ pub struct Settings {
     pub subtitle_auto_translate: bool,
     pub subtitle_size: u32,
     pub subtitle_bottom_offset: u32,
+    /// "white" | "yellow" | "cyan".
+    pub subtitle_color: String,
+    /// Background opacity 0..=100.
+    pub subtitle_background: u32,
     // SponsorBlock / DeArrow / RYD
     pub sponsorblock: bool,
     pub sb_sponsor: SbAction,
@@ -97,6 +102,7 @@ impl Default for Settings {
             codec: Codec::Avc,
             speed: 1.0,
             remember_speed_per_channel: false,
+            speed_by_channel: Default::default(),
             seek_step_secs: 10,
             repeat: Repeat::Autoplay,
             resume_playback: true,
@@ -108,6 +114,8 @@ impl Default for Settings {
             subtitle_auto_translate: false,
             subtitle_size: 44,
             subtitle_bottom_offset: 90,
+            subtitle_color: "white".into(),
+            subtitle_background: 72,
             sponsorblock: true,
             sb_sponsor: SbAction::SkipWithToast,
             sb_intro: SbAction::Off,

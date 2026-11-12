@@ -179,6 +179,8 @@ pub struct Store {
     pub accounts: Vec<AccountRow>,
     /// Subscribe state per channel id (from YouTube, updated optimistically).
     pub subscribed: HashMap<String, bool>,
+    /// Sleep timer length chosen (0 = off), for the menu.
+    pub sleep_minutes: u32,
     /// Playlists for the "Save to playlist" picker: video id -> options.
     pub playlist_options: HashMap<String, Vec<yt_core::actions::PlaylistOption>>,
     /// Videos of the list the current video was opened from (for next/previous), and whether
@@ -292,6 +294,11 @@ impl Store {
         f.loading = false;
         f.error = Some(e);
         f.gen += 1;
+    }
+
+    /// The channel name of a video's card, if any card shows it.
+    pub fn card_channel(&self, video_id: &str) -> Option<String> {
+        self.feeds.values().flat_map(|f| f.cards.iter()).find(|c| c.video_id() == Some(video_id)).and_then(|c| c.item.channel.clone())
     }
 
     /// Where to resume a partly watched video: its card's watched percentage of its duration

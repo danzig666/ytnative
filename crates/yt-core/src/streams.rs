@@ -46,18 +46,20 @@ pub struct Resolved {
     pub raw: Value,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Prefs {
     pub min_height: u64,
     pub max_height: u64,
     /// Video codec family for the DASH manifest: "avc1" today (engine A), "vp09"/"av01" with the
     /// Feed engine later.
     pub codec: &'static str,
+    /// Audio track id for multi-language videos (None = the default track).
+    pub audio_track: Option<String>,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { min_height: 720, max_height: 1080, codec: "avc1" }
+        Prefs { min_height: 720, max_height: 1080, codec: "avc1", audio_track: None }
     }
 }
 
@@ -142,7 +144,21 @@ impl Resolved {
             .iter()
             .find_map(|f| f["approxDurationMs"].as_str()?.parse::<u64>().ok())
             .unwrap_or(self.length_secs * 1000);
-        mpd::build(&self.adaptive, dur, prefs.codec, prefs.min_height, prefs.max_height).map(|m| m.0)
+        mpd::build_with_audio(&self.adaptive, dur, prefs.codec, prefs.min_height, prefs.max_height, prefs.audio_track.as_deref()).map(|m| m.0)
+    }
+
+    /// Audio languages offered: (track id, display name, is default), deduplicated.
+    pub fn audio_tracks(&self) -> Vec<(String, String, bool)> {
+        let mut out: Vec<(String, String, bool)> = Vec::new();
+        for f in &self.adaptive {
+            let t = &f["audioTrack"];
+            if let Some(id) = t["id"].as_str() {
+                if !out.iter().any(|o| o.0 == id) {
+                    out.push((id.to_string(), t["displayName"].as_str().unwrap_or(id).to_string(), t["audioIsDefault"].as_bool().unwrap_or(false)));
+                }
+            }
+        }
+        out
     }
 
     /// Live / HLS: the master playlist reduced to H.264 renditions up to `max_height`, keeping the

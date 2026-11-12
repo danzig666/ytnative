@@ -34,6 +34,9 @@ enum Act {
     NewPlaylist(String, String),
     ApplyFilters(String),
     Speed,
+    AudioTrack,
+    ZoomMode,
+    Sleep,
     MaxQuality,
     Subtitles,
     RepeatMode,
@@ -174,6 +177,9 @@ impl MenuScreen {
         }
         acts.extend(vec![
             ("Playback speed".to_string(), Act::Speed),
+            ("Audio language".to_string(), Act::AudioTrack),
+            ("Picture".to_string(), Act::ZoomMode),
+            ("Sleep timer".to_string(), Act::Sleep),
             ("Maximum quality".to_string(), Act::MaxQuality),
             ("Subtitles".to_string(), Act::Subtitles),
             ("When the video ends".to_string(), Act::RepeatMode),
@@ -206,6 +212,20 @@ impl MenuScreen {
                 format!("\u{2039}  {r}x  \u{203A}")
             }
             Act::MaxQuality => format!("\u{2039}  {}p  \u{203A}", s.max_height),
+            Act::AudioTrack => {
+                let st = cx.views.player;
+                if st.audio_tracks.len() < 2 {
+                    return Some("only one".into());
+                }
+                let cur = st.audio_track.clone().or_else(|| st.audio_tracks.iter().find(|t| t.2).map(|t| t.0.clone()));
+                let name = st.audio_tracks.iter().find(|t| Some(&t.0) == cur.as_ref()).map(|t| t.1.clone()).unwrap_or_else(|| "default".into());
+                format!("\u{2039}  {}  \u{203A}", ui::ellipsize(&name, 18))
+            }
+            Act::ZoomMode => format!("\u{2039}  {:?}  \u{203A}", cx.views.player.zoom),
+            Act::Sleep => match cx.views.store.sleep_minutes {
+                0 => "\u{2039}  Off  \u{203A}".to_string(),
+                m => format!("\u{2039}  {m} min  \u{203A}"),
+            },
             Act::Subtitles => format!("\u{2039}  {}  \u{203A}", if s.subtitles { "On" } else { "Off" }),
             Act::RepeatMode => format!(
                 "\u{2039}  {}  \u{203A}",
@@ -249,6 +269,27 @@ impl MenuScreen {
                 let i = SPEEDS.iter().position(|s| (*s - cur).abs() < 0.01).unwrap_or(3) as i32;
                 let r = SPEEDS[((i + dir).clamp(0, SPEEDS.len() as i32 - 1)) as usize];
                 fx.push(Fx::App(YtFx::SetSpeed(r)));
+            }
+            Act::AudioTrack => {
+                let st = cx.views.player;
+                if st.audio_tracks.len() >= 2 {
+                    let cur = st.audio_track.clone().or_else(|| st.audio_tracks.iter().find(|t| t.2).map(|t| t.0.clone()));
+                    let i = st.audio_tracks.iter().position(|t| Some(&t.0) == cur.as_ref()).unwrap_or(0) as i32;
+                    let n = st.audio_tracks.len() as i32;
+                    let next = st.audio_tracks[((i + dir).rem_euclid(n)) as usize].0.clone();
+                    fx.push(Fx::App(YtFx::SetAudioTrack(next)));
+                }
+            }
+            Act::ZoomMode => {
+                use crate::player::Zoom;
+                const Z: &[Zoom] = &[Zoom::Fit, Zoom::Fill, Zoom::Zoom];
+                let i = Z.iter().position(|z| *z == cx.views.player.zoom).unwrap_or(0) as i32;
+                fx.push(Fx::App(YtFx::SetZoom(Z[((i + dir).rem_euclid(3)) as usize])));
+            }
+            Act::Sleep => {
+                const M: &[u32] = &[0, 15, 30, 60, 90];
+                let i = M.iter().position(|m| *m == cx.views.store.sleep_minutes).unwrap_or(0) as i32;
+                fx.push(Fx::App(YtFx::SleepTimer(M[((i + dir).rem_euclid(M.len() as i32)) as usize])));
             }
             Act::MaxQuality => {
                 fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| {

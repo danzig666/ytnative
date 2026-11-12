@@ -258,7 +258,12 @@ impl Screen<YtHost> for PlayerScreen {
             if let Some(cue) = yt_core::captions::cue_at(&ex.cues, st.position_ms) {
                 let lift = if self.hud { 330.0 } else { 0.0 };
                 let s = &cx.views.store.settings;
-                draw_caption(p, &cue.text, s.subtitle_size as i32, s.subtitle_bottom_offset as f32 + lift);
+                let ink = match s.subtitle_color.as_str() {
+                    "yellow" => [1.0, 0.92, 0.25, 1.0],
+                    "cyan" => [0.45, 0.95, 1.0, 1.0],
+                    _ => ui::WHITE,
+                };
+                draw_caption(p, &cue.text, s.subtitle_size as i32, s.subtitle_bottom_offset as f32 + lift, ink, s.subtitle_background as f32 / 100.0);
             }
         }
         if !self.hud && st.phase == Phase::Playing {
@@ -401,14 +406,16 @@ fn short_num(n: u64) -> String {
 }
 
 /// Subtitles: centred lines on a dark backing, `bottom` px above the screen's bottom edge.
-fn draw_caption(p: plx_ui::Painter, text: &str, size: i32, bottom: f32) {
+fn draw_caption(p: plx_ui::Painter, text: &str, size: i32, bottom: f32, ink: [f32; 4], bg: f32) {
     let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     let lh = size as f32 * 1.3;
     let top = 1080.0 - bottom - lh * lines.len() as f32;
     for (i, line) in lines.iter().enumerate() {
         let w = line.chars().count() as f32 * size as f32 * 0.52 + 32.0;
         let y = top + i as f32 * lh;
-        ui::fill(p, Rect::new(960.0 - w / 2.0, y - 4.0, w, lh), 6.0, [0.0, 0.0, 0.0, 0.72]);
-        ui::text(p, line, 960.0, y, size, ui::WHITE, ui::ALIGN_CENTER, false);
+        if bg > 0.0 {
+            ui::fill(p, Rect::new(960.0 - w / 2.0, y - 4.0, w, lh), 6.0, [0.0, 0.0, 0.0, bg]);
+        }
+        ui::text(p, line, 960.0, y, size, ink, ui::ALIGN_CENTER, bg < 0.3);
     }
 }

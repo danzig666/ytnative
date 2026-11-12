@@ -39,6 +39,19 @@ fn codecs(mime: &str) -> Option<&str> {
 /// slowly (144p for ~10 s on the C3), so offering only the rungs we want makes playback start sharp.
 /// If the video has nothing that tall, the floor drops to its best rung under the cap.
 pub fn build(formats: &[Value], duration_ms: u64, video_codec: &str, min_height: u64, max_height: u64) -> Option<(String, usize, usize)> {
+    build_with_audio(formats, duration_ms, video_codec, min_height, max_height, None)
+}
+
+/// As [`build`], with a chosen audio track (`audioTrack.id`, e.g. "en.4" / "de.3") for videos
+/// that have several languages; `None` keeps the default track.
+pub fn build_with_audio(
+    formats: &[Value],
+    duration_ms: u64,
+    video_codec: &str,
+    min_height: u64,
+    max_height: u64,
+    audio_track: Option<&str>,
+) -> Option<(String, usize, usize)> {
     let best = formats
         .iter()
         .filter(|f| f["mimeType"].as_str().is_some_and(|m| m.starts_with("video/mp4") && codecs(m).is_some_and(|c| c.starts_with(video_codec))))
@@ -72,7 +85,10 @@ pub fn build(formats: &[Value], duration_ms: u64, video_codec: &str, min_height:
             nv += 1;
         } else if mime.starts_with("audio/mp4")
             && f["isDrc"].as_bool() != Some(true)
-            && f["audioTrack"]["audioIsDefault"].as_bool() != Some(false)
+            && match audio_track {
+                Some(id) => f["audioTrack"]["id"].as_str() == Some(id),
+                None => f["audioTrack"]["audioIsDefault"].as_bool() != Some(false),
+            }
         {
             audio += &format!(
                 "<Representation id=\"{itag}\" codecs=\"{c}\" bandwidth=\"{bw}\" audioSamplingRate=\"{}\"><AudioChannelConfiguration schemeIdUri=\"urn:mpeg:dash:23003:3:audio_channel_configuration:2011\" value=\"{}\"/>{seg}</Representation>\n",

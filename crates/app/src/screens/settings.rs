@@ -72,6 +72,7 @@ fn items(page: SettingsPage) -> Vec<Item> {
                 |s, d| s.codec = cycle(&[Codec::Avc, Codec::Vp9, Codec::Av1], s.codec, d),
             ),
             Opt("Default speed", |s| format!("{}x", s.speed), |s, d| s.speed = cycle(&[0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0], s.speed, d)),
+            Opt("Remember speed per channel", |s| on_off(s.remember_speed_per_channel), |s, _| s.remember_speed_per_channel = !s.remember_speed_per_channel),
             Opt("Seek step", |s| format!("{} s", s.seek_step_secs), |s, d| s.seek_step_secs = cycle(&[5, 10, 15, 30, 60], s.seek_step_secs, d)),
             Opt(
                 "When a video ends",
@@ -101,6 +102,12 @@ fn items(page: SettingsPage) -> Vec<Item> {
             ),
             Opt("Auto-translate when missing", |s| on_off(s.subtitle_auto_translate), |s, _| s.subtitle_auto_translate = !s.subtitle_auto_translate),
             Opt("Size", |s| s.subtitle_size.to_string(), |s, d| s.subtitle_size = cycle(&[32, 38, 44, 52, 60, 72], s.subtitle_size, d)),
+            Opt("Colour", |s| s.subtitle_color.clone(), |s, d| {
+                const C: &[&str] = &["white", "yellow", "cyan"];
+                let i = C.iter().position(|c| *c == s.subtitle_color).unwrap_or(0) as i32;
+                s.subtitle_color = C[((i + d).rem_euclid(3)) as usize].into();
+            }),
+            Opt("Background", |s| format!("{}%", s.subtitle_background), |s, d| s.subtitle_background = cycle(&[0, 40, 72, 100], s.subtitle_background, d)),
             Opt("Position from bottom", |s| format!("{} px", s.subtitle_bottom_offset), |s, d| s.subtitle_bottom_offset = cycle(&[40, 90, 140, 200], s.subtitle_bottom_offset, d)),
         ],
         SettingsPage::SponsorBlock => vec![

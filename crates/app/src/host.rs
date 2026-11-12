@@ -138,6 +138,10 @@ pub enum YtFx {
     SeekBy(i64),
     SeekTo(u64),
     SetSpeed(f32),
+    SetAudioTrack(String),
+    SetZoom(crate::player::Zoom),
+    /// Minutes until playback pauses (0 = off).
+    SleepTimer(u32),
     Suggest(String),
     EditSettings(Box<dyn FnOnce(&mut Settings) + Send>),
     SignInStart,
@@ -253,6 +257,10 @@ pub struct AppRig {
     pub pending_start: Option<(String, u64)>,
     /// Default speed to apply once the new video is playing.
     pending_rate: Option<f32>,
+    /// Chosen audio track for the current video: (video id, track id).
+    audio_choice: Option<(String, String)>,
+    /// Sleep timer deadline (ms, frame clock).
+    pub sleep_at: Option<u32>,
 }
 
 impl AppRig {
@@ -274,6 +282,8 @@ impl AppRig {
             sb_offer: None,
             pending_start: None,
             pending_rate: None,
+            audio_choice: None,
+            sleep_at: None,
         };
         rig.refresh_accounts();
         rig
@@ -317,6 +327,16 @@ impl AppRig {
         if let Some((_, until)) = &self.store.toast {
             if now_ms > *until {
                 self.store.toast = None;
+            }
+        }
+        if let Some(at) = self.sleep_at {
+            if now_ms >= at {
+                self.sleep_at = None;
+                self.store.sleep_minutes = 0;
+                if self.player_view.phase == Phase::Playing {
+                    self.player.toggle_pause();
+                }
+                self.store.toast("Sleep timer: playback paused", now_ms);
             }
         }
         if self.player_view.phase == Phase::Playing {
@@ -626,7 +646,8 @@ impl Rig<YtHost> for AppRig {
             YtFx::Play { video_id, playlist } => {
                 crate::log(&format!("play {video_id} (playlist {playlist:?})"));
                 let s = &self.store.settings;
-                let prefs = yt_core::streams::Prefs { min_height: s.min_height as u64, max_height: s.max_height as u64, codec: "avc1" };
+                let audio_track = self.audio_choice.as_ref().filter(|(v, _)| *v == video_id).map(|(_, t)| t.clone());
+                let prefs = yt_core::streams::Prefs { min_height: s.min_height as u64, max_height: s.max_height as u64, codec: "avc1", audio_track };
                 let extras = crate::player::ExtrasPrefs {
                     subtitles: s.subtitles,
                     language: s.subtitle_language.clone(),
@@ -641,7 +662,11 @@ impl Rig<YtHost> for AppRig {
                 };
                 self.sb = yt_core::ext::sponsorblock::SkipTracker::new(!s.sb_skip_once);
                 self.sb_offer = None;
-                self.pending_rate = ((s.speed - 1.0).abs() > 0.01).then_some(s.speed);
+                let speed = (s.remember_speed_per_channel)
+                    .then(|| self.store.card_channel(&video_id).and_then(|ch| s.speed_by_channel.get(&ch).copied()))
+                    .flatten()
+                    .unwrap_or(s.speed);
+                self.pending_rate = ((speed - 1.0).abs() > 0.01).then_some(speed);
                 let start = self
                     .pending_start
                     .take()
@@ -659,7 +684,28 @@ impl Rig<YtHost> for AppRig {
             }
             YtFx::SeekBy(ms) => self.player.seek_by(ms),
             YtFx::SeekTo(ms) => self.player.seek_to(ms),
-            YtFx::SetSpeed(r) => self.player.set_rate(r),
+            YtFx::SetSpeed(r) => {
+                self.player.set_rate(r);
+                if self.store.settings.remember_speed_per_channel && !self.player_view.author.is_empty() {
+                    self.store.settings.speed_by_channel.insert(self.player_view.author.clone(), r);
+                    self.store.settings.save();
+                }
+            }
+            YtFx::SetAudioTrack(t) => {
+                let v = self.player_view.video_id.clone();
+                if !v.is_empty() {
+                    self.audio_choice = Some((v.clone(), t));
+                    self.pending_start = Some((v.clone(), self.player_view.position_ms));
+                    // Restart this video with the new audio track at the same position.
+                    self.app_fx(from, YtFx::Play { video_id: v, playlist: None }, _p, _out);
+                }
+            }
+            YtFx::SetZoom(z) => self.player.set_zoom(z),
+            YtFx::SleepTimer(min) => {
+                self.sleep_at = (min > 0).then(|| self.now_ms + min * 60_000);
+                self.store.sleep_minutes = min;
+                self.store.toast(if min > 0 { format!("Sleep timer: {min} min") } else { "Sleep timer off".into() }, self.now_ms);
+            }
             YtFx::Suggest(prefix) => {
                 self.spawn(from, "suggest", move |s| Work::Suggestions(with_session(s, |s| s.suggestions(&prefix)).unwrap_or_default()));
             }
