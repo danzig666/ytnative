@@ -1,0 +1,76 @@
+# Release build: IPK + webOS Homebrew Channel manifest (+ the unstripped binary for crash logs).
+#
+#   * workflow_dispatch / any push of a `v*` tag builds everything and uploads workflow artifacts;
+#   * only a `v*` tag push also publishes a GitHub release with those files attached.
+#
+# Runs on Windows like the dev PC: Rust (msvc host) + zig from the `ziglang` wheel. The TV's own
+# libraries cannot be pulled here, so the link uses stubs generated from the checked-in symbol
+# lists ci/symbols/*.txt (tools/gen-stubs.py). See docs/release.md.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # creating the release on a tag push
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: zig
+        run: python -m pip install ziglang==0.13.0
+      - name: Rust toolchain + TV target
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add armv7-unknown-linux-gnueabi
+
+      - name: Tag matches appinfo.json version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          want="${GITHUB_REF_NAME#v}"
+          have=$(python -c "import json;print(json.load(open('crates/app/pkg/appinfo.json'))['version'])")
+          if [ "$want" != "$have" ]; then
+            echo "::error::tag $GITHUB_REF_NAME but crates/app/pkg/appinfo.json says $have"; exit 1
+          fi
+
+      - name: yt-core tests
+        run: cargo test -p yt-core
+      - name: IPK (cross-build, strip, DT_NEEDED check, package)
+        run: cargo xtask ipk
+      - name: Homebrew Channel manifest
+        run: cargo xtask release-manifest
+      - name: Collect release files
+        id: files
+        shell: bash
+        run: |
+          mkdir -p dist
+          id=$(python -c "import json;print(json.load(open('crates/app/pkg/appinfo.json'))['id'])")
+          ver=$(python -c "import json;print(json.load(open('crates/app/pkg/appinfo.json'))['version'])")
+          cp target/ipk/${id}_${ver}_arm.ipk dist/
+          cp target/ipk/${id}.manifest.json target/ipk/repo.json dist/
+          # Unstripped twin of the shipped binary: `cargo xtask crash <log>` needs it (build ids match).
+          cp target/armv7-unknown-linux-gnueabi/release/dist/ytnative.debug dist/ytnative-${ver}.debug
+          (cd dist && sha256sum * > SHA256SUMS)
+          cat dist/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ytnative-release
+          path: dist/*
+
+      - name: GitHub release (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "ytnative $GITHUB_REF_NAME" \
+            --notes "Install through the webOS Homebrew Channel (custom repository) or Developer Mode: see docs/release.md."
