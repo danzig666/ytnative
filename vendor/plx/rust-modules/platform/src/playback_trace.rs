@@ -432,6 +432,12 @@ fn export_path() -> std::path::PathBuf {
 
 /// The same no-follow/owner/single-link rule as the shared private log writer. Nonblocking open
 /// prevents a pre-created FIFO from parking the export worker before descriptor validation.
+#[cfg(windows)]
+fn open_owned_log(path: &std::path::Path) -> std::io::Result<File> {
+    std::fs::File::open(path) // ytnative local change: no O_NOFOLLOW / uid checks on Windows
+}
+
+#[cfg(not(windows))]
 fn open_owned_log(path: &std::path::Path) -> std::io::Result<File> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let file = std::fs::OpenOptions::new()

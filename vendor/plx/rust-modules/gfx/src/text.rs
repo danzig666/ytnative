@@ -119,7 +119,12 @@ fn app_font(bold: bool) -> &'static CStr {
 /// The path [`app_font`] opens, as a path: for a caller that reads the face file itself and must read the
 /// one SDL_ttf opens (the HUD cost model's two faces, [`read_price_model`]).
 pub fn app_font_path(bold: bool) -> std::path::PathBuf {
+    // ytnative local change: no OsStrExt::from_bytes on Windows; the path is UTF-8 there.
+    #[cfg(windows)]
+    return std::path::PathBuf::from(app_font(bold).to_string_lossy().into_owned());
+    #[cfg(not(windows))]
     use std::os::unix::ffi::OsStrExt;
+    #[cfg(not(windows))]
     std::path::PathBuf::from(std::ffi::OsStr::from_bytes(app_font(bold).to_bytes()))
 }
 

@@ -5,6 +5,28 @@ use icu_plurals::{PluralCategory, PluralRules};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::OnceLock;
 
+#[cfg(not(windows))]
+use libc as crt;
+
+/// ytnative local change: `localtime_r` / `mktime` over the MSVC CRT for the Windows simulator.
+#[cfg(windows)]
+mod crt {
+    extern "C" {
+        fn _localtime64_s(out: *mut libc::tm, t: *const i64) -> i32;
+        fn _mktime64(t: *mut libc::tm) -> i64;
+    }
+    pub unsafe fn localtime_r(t: *const libc::time_t, out: *mut libc::tm) -> *mut libc::tm {
+        if _localtime64_s(out, t as *const i64) == 0 {
+            out
+        } else {
+            std::ptr::null_mut()
+        }
+    }
+    pub unsafe fn mktime(t: *mut libc::tm) -> libc::time_t {
+        _mktime64(t) as libc::time_t
+    }
+}
+
 pub const CONTRIBUTE_URL: &str =
     "https://github.com/GLinnik21/plx-native/blob/main/docs/localization.md";
 
@@ -783,7 +805,7 @@ pub fn local_clock_time(seconds: i64) -> Option<[i32; 2]> {
     let stamp = libc::time_t::try_from(seconds).ok()?;
     let mut out = std::mem::MaybeUninit::<libc::tm>::uninit();
     // SAFETY: both pointers are valid for localtime_r; the result is read only on success.
-    if unsafe { libc::localtime_r(&stamp, out.as_mut_ptr()) }.is_null() { return None; }
+    if unsafe { crt::localtime_r(&stamp, out.as_mut_ptr()) }.is_null() { return None; }
     let local = unsafe { out.assume_init() };
     Some([local.tm_hour, local.tm_min])
 }
@@ -793,7 +815,7 @@ pub fn local_clock_time(seconds: i64) -> Option<[i32; 2]> {
 fn civil_date_of(stamp: libc::time_t) -> Option<[i32; 3]> {
     let mut out = std::mem::MaybeUninit::<libc::tm>::uninit();
     // SAFETY: both pointers are valid for localtime_r; the result is read only on success.
-    if unsafe { libc::localtime_r(&stamp, out.as_mut_ptr()) }.is_null() { return None; }
+    if unsafe { crt::localtime_r(&stamp, out.as_mut_ptr()) }.is_null() { return None; }
     let date = unsafe { out.assume_init() };
     Some([date.tm_year.checked_add(1900)?, date.tm_mon + 1, date.tm_mday])
 }
@@ -835,7 +857,7 @@ pub fn local_midnight(date: [i32; 3]) -> Option<i64> {
             // day of the week is only filled in on success, so a -1 there tells the two apart.
             tm.tm_wday = -1;
             // SAFETY: `tm` is a valid, initialised `libc::tm` that `mktime` reads and normalises.
-            let stamp = unsafe { libc::mktime(&mut tm) };
+            let stamp = unsafe { crt::mktime(&mut tm) };
             if stamp == -1 && tm.tm_wday == -1 { return None; }
             // the first instant of the day: on it, and the second before it is not
             (civil_date_of(stamp) == Some(date) && civil_date_of(stamp.checked_sub(1)?).is_some_and(|before| before != date))

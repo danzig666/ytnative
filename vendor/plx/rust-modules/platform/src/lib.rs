@@ -28,6 +28,12 @@ pub mod playback_trace;
 pub mod labcfg; // `lab.json` (the Cloud Lab session config) and the two answers `ui/` and `screens/` ask of it: is this key the trigger, is the menu row on
 // Stage A foundation: owner adapters connect these APIs in the next integration stage.
 #[allow(dead_code)]
+#[cfg(not(windows))]
+pub mod storage;
+// ytnative local change: the storage-helper client is Unix-only; the Windows simulator gets a stub.
+#[allow(dead_code)]
+#[cfg(windows)]
+#[path = "storage/win_stub.rs"]
 pub mod storage;
 pub mod tv; // the television as everything outside the port sees it: the interfaces the webOS port fills at boot (step L15)
 pub mod webos; // which webOS this set is — nyx's os_info.json, read once at boot (release + codename)

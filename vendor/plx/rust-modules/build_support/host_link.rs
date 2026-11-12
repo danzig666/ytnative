@@ -27,6 +27,11 @@ pub fn emit(repo: &Path) {
     }
 
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    // ytnative local change: on Windows the application crate's build script links SDL2/SDL2_ttf
+    // from third_party/win and compiles nanosvg itself (no python3, pkg-config or system libGL).
+    if target_os == "windows" {
+        return;
+    }
 
     if let Some(libdirs) = sdl_search_paths(&target_os) {
         for libdir in libdirs {

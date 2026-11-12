@@ -37,7 +37,47 @@
 //! the two, on a device where diagnosis means reading a log over ssh.
 #![allow(dead_code)]
 
-use libc::{dlerror, dlopen, dlsym, RTLD_GLOBAL, RTLD_NOW};
+#[cfg(not(windows))]
+use libc::{dlerror, dlopen, dlsym, RTLD_GLOBAL, RTLD_NOLOAD, RTLD_NOW};
+#[cfg(windows)]
+use win::{dlerror, dlopen, dlsym, RTLD_GLOBAL, RTLD_NOLOAD, RTLD_NOW};
+
+/// ytnative local change: the dl* subset this module uses, over LoadLibrary/GetProcAddress, for the
+/// Windows simulator. A null handle means the process itself (the exe's own exports).
+#[cfg(windows)]
+mod win {
+    use std::cell::Cell;
+    use std::os::raw::{c_char, c_int, c_void};
+    pub const RTLD_NOW: c_int = 2;
+    pub const RTLD_GLOBAL: c_int = 0x100;
+    pub const RTLD_NOLOAD: c_int = 4;
+    extern "system" {
+        fn LoadLibraryA(name: *const c_char) -> *mut c_void;
+        fn GetModuleHandleA(name: *const c_char) -> *mut c_void;
+        fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
+    }
+    thread_local!(static FAILED: Cell<bool> = const { Cell::new(false) });
+    pub unsafe fn dlopen(name: *const c_char, flags: c_int) -> *mut c_void {
+        if flags & RTLD_NOLOAD != 0 {
+            GetModuleHandleA(name)
+        } else {
+            LoadLibraryA(name)
+        }
+    }
+    pub unsafe fn dlsym(h: *mut c_void, name: *const c_char) -> *mut c_void {
+        let m = if h.is_null() { GetModuleHandleA(std::ptr::null()) } else { h };
+        let p = GetProcAddress(m, name);
+        FAILED.with(|f| f.set(p.is_null()));
+        p
+    }
+    pub unsafe fn dlerror() -> *const c_char {
+        if FAILED.with(|f| f.replace(false)) {
+            c"symbol not found".as_ptr()
+        } else {
+            std::ptr::null()
+        }
+    }
+}
 use std::ffi::CString;
 use std::os::raw::c_void;
 use std::path::Path;
@@ -125,7 +165,7 @@ impl Handle {
     pub fn open_loaded<'a>(candidates: &[&'a str]) -> Option<(Handle, &'a str)> {
         candidates.iter().find_map(|name| {
             let c = CString::new(*name).ok()?;
-            let h = unsafe { dlopen(c.as_ptr(), RTLD_NOW | libc::RTLD_NOLOAD) };
+            let h = unsafe { dlopen(c.as_ptr(), RTLD_NOW | RTLD_NOLOAD) };
             (!h.is_null()).then_some((Handle(h), *name))
         })
     }

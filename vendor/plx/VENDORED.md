@@ -11,3 +11,29 @@
 ## Local changes
 - `ui/src/lib.rs`: `card_row` made `pub` (apps need `RowStyle` / `TileLabel` for their card sources).
 - `platform/src/tv/toast.rs`: `deliver_without_port` made `pub` (used by our `tv::Port`).
+
+### Windows desktop simulator (all `cfg(windows)`-gated; the TV build compiles exactly what it did)
+The ytnative simulator (`cargo xtask sim`, `crates/app/src/sim/`) builds these crates for
+`x86_64-pc-windows-msvc` with the `hostsim` feature. Shims for Unix-only APIs:
+- `build_support/host_link.rs`: `emit` returns early for `target_os = "windows"` (the app's
+  build.rs links SDL2/SDL2_ttf from `third_party/win` and compiles nanosvg; no python3/pkg-config/libGL).
+- `base/src/dynlib.rs`: a private `win` module implementing the `dlopen`/`dlsym`/`dlerror` subset over
+  `LoadLibraryA`/`GetModuleHandleA`/`GetProcAddress`; `RTLD_NOLOAD` imported from it / libc.
+- `base/src/eventlog.rs`: Windows `open_log_append` (plain append+create; no O_NOFOLLOW/uid/nlink checks).
+- `base/src/task/watchdog.rs`: no `pthread_self` (main thread id 0) and `probe_main_thread` returns
+  false (no SIGUSR2 freeze probe / crash tracer); `handler_is_ours` is Unix-only.
+- `gfx/src/text.rs`: `app_font_path` builds the path from UTF-8 (no `OsStrExt::from_bytes`).
+- `platform/src/lib.rs`: `storage` (the on-TV storage-helper client: fd passing, openat, statvfs, uid
+  checks) is replaced by `platform/src/storage/win_stub.rs` (new file: `state`, `wire` and a no-op
+  `diagnostics::activation`, all `webos.rs` needs).
+- `platform/src/storage_service/wire.rs`: the `activation` submodule (Unix fd/uid protocol) is not built on Windows.
+- `platform/src/imgcache.rs`: Windows `free_bytes` (assumes 4 GiB, no statvfs) and `private_dir`
+  (`create_dir_all`); `probe_dir` passes owner 0 instead of `geteuid()`.
+- `platform/src/playback_trace.rs`: Windows `open_owned_log` (plain open).
+- `platform/src/i18n/mod.rs`: `localtime_r`/`mktime` go through a `crt` alias: libc on Unix,
+  `_localtime64_s`/`_mktime64` from the MSVC CRT on Windows.
+- `platform/src/webos.rs`, `platform/src/webos/jail_repair.rs`: `libc::R_OK` via a crate-level `R_OK`
+  constant (libc has none on Windows; same value 4).
+- `ui/src/rec.rs`: `bounded_read` skips `custom_flags` on Windows; `PATH_MAX` written as its Linux
+  value 4096; Windows `file_identity` (len + mtime instead of dev/ino), `DirSink::create` (no mode)
+  and `private_new_file` (no mode/flags).
