@@ -547,7 +547,12 @@ pub(crate) fn load_extras(video_id: &str, session: &Mutex<Option<yt_core::sessio
     let publish = |ex: &Extras| {
         let mut s = status.lock().unwrap();
         if s.video_id == video_id {
-            s.extras = Arc::new(ex.clone());
+            let mut ex = ex.clone();
+            if ex.cues.is_empty() {
+                ex.cues = s.extras.cues.clone();
+                ex.caption_label = s.extras.caption_label.clone();
+            }
+            s.extras = Arc::new(ex);
         }
         drop(s);
         plx_machine::present::wake_from_worker();
@@ -574,20 +579,52 @@ pub(crate) fn load_extras(video_id: &str, session: &Mutex<Option<yt_core::sessio
         ex.votes = ext().votes(video_id).ok().flatten();
     }
     publish(&ex);
+    let _ = tracks;
     if prefs.subtitles {
-        if let Some((track, translate)) = pick_track(&tracks, &prefs.language, prefs.auto_translate) {
-            let r = crate::host::with_session(session, |s| s.captions(&track, translate.as_deref()));
-            match r {
-                Ok(cues) => {
-                    ex.caption_label = Some(match &translate {
-                        Some(l) => format!("{} \u{2192} {l}", track.name),
-                        None => track.name.clone(),
-                    });
+        load_captions(video_id, session, status, &prefs.language, prefs.auto_translate);
+    }
+}
+
+/// Fetches the captions for `video_id` into the status's extras (worker). Used at start when
+/// subtitles are on, and when they are switched on mid-video. A translation that fails (YouTube
+/// answers 429 without a PO token) falls back to the video's own track.
+pub(crate) fn load_captions(video_id: &str, session: &Mutex<Option<yt_core::session::Session>>, status: &Arc<Mutex<Status>>, lang: &str, translate: bool) {
+    let tracks = status.lock().unwrap().captions.clone();
+    if tracks.is_empty() {
+        crate::log("captions: this video has none");
+        return;
+    }
+    let mut picks = Vec::new();
+    if let Some(p) = pick_track(&tracks, lang, translate) {
+        picks.push(p);
+    }
+    // The video's own track (manual first) when the wanted language is missing or fails.
+    if let Some(t) = tracks.iter().find(|t| !t.auto).or_else(|| tracks.first()) {
+        if !picks.iter().any(|(p, tr)| p.language == t.language && tr.is_none()) {
+            picks.push((t.clone(), None));
+        }
+    }
+    for (track, tr) in picks {
+        match crate::host::with_session(session, |s| s.captions(&track, tr.as_deref())) {
+            Ok(cues) if !cues.is_empty() => {
+                let label = match &tr {
+                    Some(l) => format!("{} \u{2192} {l}", track.name),
+                    None => track.name.clone(),
+                };
+                crate::log(&format!("captions: {label} ({} cues)", cues.len()));
+                let mut s = status.lock().unwrap();
+                if s.video_id == video_id {
+                    let mut ex = (*s.extras).clone();
+                    ex.caption_label = Some(label);
                     ex.cues = cues;
+                    s.extras = Arc::new(ex);
                 }
-                Err(e) => crate::log(&format!("captions: {e:#}")),
+                drop(s);
+                plx_machine::present::wake_from_worker();
+                return;
             }
-            publish(&ex);
+            Ok(_) => crate::log(&format!("captions: {} is empty", track.name)),
+            Err(e) => crate::log(&format!("captions: {} {tr:?}: {e:#}", track.name)),
         }
     }
 }

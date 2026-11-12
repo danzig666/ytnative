@@ -48,12 +48,14 @@ pub struct PlayerScreen {
     ended_handled: bool,
     /// Show the storyboard preview until this time (ms, views.now_ms clock).
     preview_until: u32,
+    /// Last Magic Remote pointer position (OSD button hover).
+    pointer: Option<(f32, f32)>,
     state: State,
 }
 
 impl PlayerScreen {
     pub fn new(entry: EntryId, video_id: String, playlist: Option<String>) -> Self {
-        PlayerScreen { entry, state: State(video_id.clone()), video_id, playlist, hud: true, ended_handled: false, preview_until: 0 }
+        PlayerScreen { entry, state: State(video_id.clone()), video_id, playlist, hud: true, ended_handled: false, preview_until: 0, pointer: None }
     }
 
     fn show_hud(&mut self, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
@@ -86,6 +88,19 @@ impl PlayerScreen {
         self.preview_until = cx.views.now_ms + 1500;
         self.show_hud(cx, fx);
     }
+}
+
+/// The OSD's pointer buttons, right-aligned on the bottom row: 0 Subtitles, 1 Comments, 2 Options.
+fn osd_button(i: usize) -> Rect {
+    const W: [f32; 3] = [300.0, 240.0, 200.0];
+    let mut x = 1824.0;
+    for j in (i..3).rev() {
+        x -= W[j];
+        if j != i {
+            x -= 16.0;
+        }
+    }
+    Rect::new(x, 994.0, W[i], 46.0)
 }
 
 impl Machine<YtHost> for PlayerScreen {
@@ -143,20 +158,28 @@ impl Machine<YtHost> for PlayerScreen {
             }
             // Magic Remote pointer: moving shows the controls; a click on the seek bar seeks there,
             // on "Options" opens the menu, anywhere else shows the controls or toggles pause.
-            ScreenEvent::Input(InputEvent { kind: InputKind::Pointer { .. } | InputKind::Drag { .. }, .. }) => {
+            ScreenEvent::Input(InputEvent { kind: InputKind::Pointer { x, y, .. } | InputKind::Drag { x, y, .. }, .. }) => {
+                self.pointer = Some((*x, *y));
                 self.show_hud(cx, fx); // up, and kept up while the pointer moves
                 Handled::Yes
             }
             ScreenEvent::Input(InputEvent { kind: InputKind::Click { x, y, .. }, .. }) => {
                 let st = cx.views.player;
                 let (x, y) = (*x, *y);
-                if self.hud && (890.0..=960.0).contains(&y) && (96.0..=1824.0).contains(&x) && st.duration_ms > 0 && !st.live {
+                if self.hud && osd_button(0).contains(x, y) {
+                    fx.push(Fx::App(YtFx::EditSettings(Box::new(|s| s.subtitles = !s.subtitles))));
+                    self.show_hud(cx, fx);
+                } else if self.hud && osd_button(1).contains(x, y) {
+                    if !st.video_id.is_empty() && !cx.views.store.settings.child_mode {
+                        fx.push(Fx::Nav(NavOp::Push(YtArg::Comments(st.video_id.clone()))));
+                    }
+                } else if self.hud && osd_button(2).contains(x, y) {
+                    fx.push(Fx::Nav(NavOp::Present(YtArg::PlayerMenu)));
+                } else if self.hud && (890.0..=960.0).contains(&y) && (96.0..=1824.0).contains(&x) && st.duration_ms > 0 && !st.live {
                     let to = ((x - 96.0) / 1728.0).clamp(0.0, 1.0) as f64 * st.duration_ms as f64;
                     fx.push(Fx::App(YtFx::SeekTo(to as u64)));
                     self.preview_until = cx.views.now_ms + 1500;
                     self.show_hud(cx, fx);
-                } else if self.hud && x > 1600.0 && y > 990.0 {
-                    fx.push(Fx::Nav(NavOp::Present(YtArg::PlayerMenu)));
                 } else if !self.hud {
                     self.show_hud(cx, fx);
                 } else {
@@ -423,7 +446,22 @@ impl Screen<YtHost> for PlayerScreen {
             info.push_str(&format!("   {}x", st.rate));
         }
         ui::text(p, &info, 96.0, 1010.0, 26, ui::DIM, ui::ALIGN_LEFT, false);
-        ui::text(p, "\u{25BC} Options", 1824.0, 1010.0, 26, ui::FAINT, ui::ALIGN_RIGHT, false);
+        // Pointer buttons: Subtitles on/off, Comments, Options.
+        let subs_on = cx.views.store.settings.subtitles;
+        let tr = crate::i18n::tr;
+        let labels = [
+            format!("CC  {}: {}", tr("Subtitles"), tr(if subs_on { "On" } else { "Off" })),
+            tr("Comments").to_string(),
+            format!("\u{25BC} {}", tr("Options")),
+        ];
+        for (i, label) in labels.iter().enumerate() {
+            let b = osd_button(i);
+            let hot = self.pointer.is_some_and(|(x, y)| b.contains(x, y));
+            let on = i == 0 && subs_on;
+            ui::fill(p, b, b.h / 2.0, if hot { [1.0, 1.0, 1.0, 0.9] } else if on { [1.0, 1.0, 1.0, 0.22] } else { [1.0, 1.0, 1.0, 0.10] });
+            let ink = if hot { [0.0, 0.0, 0.0, 1.0] } else { ui::WHITE };
+            ui::text(p, label, b.x + b.w / 2.0, b.y + 9.0, 24, ink, ui::ALIGN_CENTER, on || hot);
+        }
         if cx.views.store.settings.show_clock {
             ui::text(p, &common::clock(&cx.views), 1824.0, 28.0, 34, ui::WHITE, ui::ALIGN_RIGHT, false);
         }

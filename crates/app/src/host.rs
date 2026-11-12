@@ -261,6 +261,8 @@ enum Work {
 }
 
 pub struct AppRig {
+    /// `settings.subtitles` as last seen, to load captions when they are switched on mid-video.
+    subtitles_were: bool,
     /// `ui_language` the translations were last switched to.
     applied_language: String,
     mounter: Mount,
@@ -291,6 +293,7 @@ impl AppRig {
     pub fn new() -> Self {
         let store = Store::new(Settings::load());
         let mut rig = AppRig {
+            subtitles_were: false,
             applied_language: String::new(),
             mounter: Mount,
             store,
@@ -373,6 +376,13 @@ impl AppRig {
         }
         self.player.tick();
         self.player_view = self.player.status.lock().unwrap().clone();
+        let subs = self.store.settings.subtitles;
+        if subs && !self.subtitles_were && !self.player_view.video_id.is_empty() && self.player_view.extras.cues.is_empty() {
+            let (v, session, status) = (self.player_view.video_id.clone(), self.session.clone(), self.player.status.clone());
+            let (lang, tr) = (self.store.settings.subtitle_language.clone(), self.store.settings.subtitle_auto_translate);
+            plx_base::task::spawn("captions", move || crate::player::load_captions(&v, &session, &status, &lang, tr));
+        }
+        self.subtitles_were = subs;
         if let Some((_, until)) = &self.store.toast {
             if now_ms > *until {
                 self.store.toast = None;
