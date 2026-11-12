@@ -208,6 +208,7 @@ fn main() {
         let mut links: Vec<String> = Vec::new();
         let (mut mouse_down, mut last_wheel) = (false, 0u32);
         let mut input_echo = 0u8;
+        let mut pointer_at: Option<(f32, f32)> = None;
 
         let mut remote = remote::Remote::open();
         {
@@ -250,6 +251,7 @@ fn main() {
                     sdl::SDL_QUIT => running = false,
                     sdl::SDL_MOUSEMOTION => {
                         let (x, y) = input::pointer_xy(&ev);
+                        pointer_at = Some((x, y));
                         inputs.push(if mouse_down { input::drag(x, y, tick) } else { input::pointer(x, y, tick) });
                     }
                     sdl::SDL_MOUSEBUTTONDOWN if ev[16] == 1 => {
@@ -283,7 +285,11 @@ fn main() {
                                 continue;
                             }
                         }
-                        inputs.push(input::key_input(sym, wcode, state, tick));
+                        let k = input::key_input(sym, wcode, state, tick);
+                        if matches!(k.kind, plx_machine::machine::InputKind::PointerHidden | plx_machine::machine::InputKind::Key { .. }) {
+                            pointer_at = None; // a key (or the pointer timing out) puts the pointer away
+                        }
+                        inputs.push(k);
                     }
                     sdl::SDL_APP_WILLENTERBACKGROUND | sdl::SDL_APP_DIDENTERBACKGROUND => {
                         if foreground {
@@ -421,6 +427,29 @@ fn main() {
             }
             // Any input may have moved focus; list screens (settings, menus) don't animate, so
             // nothing else would ask for a present until the next unrelated wake.
+            // Pointer edge glide: resting at either edge of the shelf area slides the shelf under it
+            // (`InputKind::Pan`, handled by plx's Stack). Left edge: just right of the sidebar.
+            for e in &inputs {
+                use plx_machine::machine::InputKind as K;
+                match e.kind {
+                    K::Pointer { x, y, .. } | K::Drag { x, y, .. } => pointer_at = Some((x, y)),
+                    K::PointerHidden | K::Key { .. } => pointer_at = None,
+                    _ => {}
+                }
+            }
+            if let Some((x, y)) = pointer_at {
+                if !mouse_down && d.top_screen().map(|s| s.name()) == Some("browse") && y > 120.0 {
+                    let speed = 900.0 * dt;
+                    let dx = if x >= 1860.0 { speed } else if (390.0..450.0).contains(&x) { -speed } else { 0.0 };
+                    if dx != 0.0 {
+                        inputs.push(plx_machine::machine::InputEvent {
+                            at: tick,
+                            source: plx_machine::machine::Source::Sdl,
+                            kind: plx_machine::machine::InputKind::Pan { dx, x, y },
+                        });
+                    }
+                }
+            }
             let had_input = !inputs.is_empty();
             if had_input {
                 input_echo = 3;
