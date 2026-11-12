@@ -58,6 +58,68 @@ pub fn set_titles_under(on: bool) {
     plx_ui::card_row::set_label_band_extra(if on { UNDER_EXTRA } else { 0.0 });
 }
 
+thread_local! {
+    /// The focused card's caption, deferred to the end of the page draw: (card rect on screen,
+    /// title, detail).
+    static FOCUSED_CAPTION: std::cell::RefCell<Option<(Rect, String, String)>> = const { std::cell::RefCell::new(None) };
+    /// Marquee clock: (title it runs for, start).
+    static MARQUEE: std::cell::RefCell<(String, Option<std::time::Instant>)> = const { std::cell::RefCell::new((String::new(), None)) };
+}
+
+/// Forgets a deferred caption (call before a page draws its cards).
+pub fn reset_focused_caption() {
+    FOCUSED_CAPTION.with(|f| *f.borrow_mut() = None);
+}
+
+/// The selected card's caption, drawn after every card so it lies over the neighbours: the whole
+/// title on one line in a box up to ~2.2 cards wide (centred on the card, kept on screen and right
+/// of `min_x`), scrolling in a loop when even that is too narrow, and the detail line under it.
+pub fn draw_focused_caption(p: Painter, m: &dyn plx_machine::machine::Measure, min_x: f32) {
+    let Some((r, title, detail)) = FOCUSED_CAPTION.with(|f| f.borrow_mut().take()) else { return };
+    if !titles_under() {
+        return;
+    }
+    const SIZE: i32 = 26;
+    const PAD: f32 = 14.0;
+    let width = |t: &str| CString::new(t).map_or(0.0, |c| m.width(&c, SIZE, true));
+    let tw = width(&title);
+    let max_inner = (r.w * 2.2).min(1880.0 - min_x) - 2.0 * PAD;
+    let inner_w = tw.max(r.w - 2.0 * PAD).min(max_inner);
+    let bw = inner_w + 2.0 * PAD;
+    let bx = (r.x + r.w / 2.0 - bw / 2.0).clamp(min_x, (1900.0 - bw).max(min_x));
+    let by = r.y + r.h + 6.0;
+    let bh = 94.0;
+    fill(p, Rect::new(bx, by, bw, bh), 12.0, [0.10, 0.10, 0.12, 0.97]);
+    let (ix, iy) = (bx + PAD, by + 10.0);
+    if tw <= inner_w + 0.5 {
+        text(p, &title, ix, iy, SIZE, WHITE, ALIGN_LEFT, true);
+    } else {
+        // Marquee: hold, glide to the end, hold, start over.
+        const HOLD: f32 = 1.5;
+        const SPEED: f32 = 70.0;
+        let dist = tw - inner_w + 24.0;
+        let t = MARQUEE.with(|mq| {
+            let mut mq = mq.borrow_mut();
+            if mq.0 != title || mq.1.is_none() {
+                *mq = (title.clone(), Some(std::time::Instant::now()));
+            }
+            mq.1.unwrap().elapsed().as_secs_f32()
+        });
+        let cycle = 2.0 * HOLD + dist / SPEED;
+        let ph = t % cycle;
+        let off = ((ph - HOLD) * SPEED).clamp(0.0, dist);
+        {
+            let _scope = plx_ui::screen::ClipScope::open_in(p, Rect::new(ix, iy - 4.0, inner_w, 44.0));
+            text(p, &title, ix - off, iy, SIZE, WHITE, ALIGN_LEFT, true);
+        }
+        plx_machine::idle::note_motion();
+    }
+    if !detail.is_empty() {
+        let d = m.fit_line(&detail, inner_w, 22, false).to_string_lossy().into_owned();
+        text(p, &d, ix, iy + 40.0, 22, DIM, ALIGN_LEFT, false);
+    }
+}
+
 /// `s` split into at most two lines of `w` px (word wrap; the second line ellipsised).
 fn wrap2(m: &dyn plx_machine::machine::Measure, s: &str, w: f32, size: i32) -> (String, Option<String>) {
     let width = |t: &str| CString::new(t).map_or(0.0, |c| m.width(&c, size, false));
@@ -170,6 +232,12 @@ impl CardSource<YtHost> for CardsSrc<'_> {
         if titles_under() {
             // Title (two lines) and channel / views / age under every thumbnail, as SmartTube does.
             let (r, c) = (tile.rect, &self.cards[i]);
+            if tile.focused {
+                // Drawn last, over the neighbours' captions (`draw_focused_caption`).
+                let screen = p.to_screen(r).0;
+                FOCUSED_CAPTION.with(|f| *f.borrow_mut() = Some((screen, c.title.clone(), c.detail.clone())));
+                return self.badge(p, i, tile);
+            }
             let y = r.y + r.h + 12.0;
             let ink = if tile.focused { WHITE } else { [1.0, 1.0, 1.0, 0.86] };
             let (l1, l2) = wrap2(m, &c.title, r.w, 24);
@@ -184,7 +252,13 @@ impl CardSource<YtHost> for CardsSrc<'_> {
                 text(p, &d, r.x, y + dy + 2.0, 20, DIM, ALIGN_LEFT, false);
             }
         }
-        // Duration / LIVE badge in the bottom-right corner of the thumbnail.
+        self.badge(p, i, tile);
+    }
+}
+
+impl CardsSrc<'_> {
+    /// Duration / LIVE badge in the bottom-right corner of the thumbnail.
+    fn badge(&self, p: Painter, i: usize, tile: &plx_ui::cards::Tile) {
         if let Some(b) = &self.cards[i].item.badge {
             let r = tile.rect;
             let w = 14.0 * b.chars().count() as f32 + 20.0;

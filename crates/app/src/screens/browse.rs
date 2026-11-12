@@ -388,8 +388,28 @@ impl Screen<YtHost> for BrowseScreen {
     fn draw(&mut self, f: &mut DrawFrame<'_, '_, YtHost>) {
         let p = f.painter;
         let cx = f.cx;
+        // Content
+        let feed = cx.views.store.feed(&self.key());
+        ui::text(p, self.section.title(), 420.0, 56.0, 44, ui::WHITE, ui::ALIGN_LEFT, true);
+        let src = self.src(cx);
+        if self.rows_mode(cx) {
+            let mut view = self.stack.view(&self.rows);
+            ui::reset_focused_caption();
+            Part::draw(&mut view, f, Rect::new(390.0, 0.0, 1530.0, 1080.0));
+            ui::draw_focused_caption(p, f.measure, 400.0);
+            view.record_stops(f);
+        } else if src.cards.is_empty() {
+            common::empty_state(p, feed, Rect::new(420.0, 150.0, 1460.0, 800.0));
+        } else {
+            ui::reset_focused_caption();
+            self.grid.draw(f, p, &src);
+            ui::draw_focused_caption(p, f.measure, 400.0);
+            self.grid.record_stops(f, p, &src);
+        }
         // Sidebar
-        ui::fill(p, Rect::new(0.0, 0.0, 390.0, 1080.0), 0.0, [0.0, 0.0, 0.0, 0.35]);
+        // Drawn after the content and opaque: a scrolled shelf's cards slide under it.
+        let bg = plx_ui::theme::CLEAR_RGB;
+        ui::fill(p, Rect::new(0.0, 0.0, 390.0, 1080.0), 0.0, [bg.0 * 0.65, bg.1 * 0.65, bg.2 * 0.65, 1.0]);
         common::logo(p, 48.0, 52.0);
         let items = nav_items(cx);
         let rows: Vec<Row> = items
@@ -410,20 +430,6 @@ impl Screen<YtHost> for BrowseScreen {
         self.nav.draw(p, &rows, self.nav.focused(cx, items.len()));
         self.nav.stops(f, items.len());
 
-        // Content
-        let feed = cx.views.store.feed(&self.key());
-        ui::text(p, self.section.title(), 420.0, 56.0, 44, ui::WHITE, ui::ALIGN_LEFT, true);
-        let src = self.src(cx);
-        if self.rows_mode(cx) {
-            let mut view = self.stack.view(&self.rows);
-            Part::draw(&mut view, f, Rect::new(390.0, 0.0, 1530.0, 1080.0));
-            view.record_stops(f);
-        } else if src.cards.is_empty() {
-            common::empty_state(p, feed, Rect::new(420.0, 150.0, 1460.0, 800.0));
-        } else {
-            self.grid.draw(f, p, &src);
-            self.grid.record_stops(f, p, &src);
-        }
         common::toast(p, cx);
     }
     fn redraw_focused(&self, f: &mut DrawFrame<'_, '_, YtHost>, focus: Option<FocusKey<u32>>) {
