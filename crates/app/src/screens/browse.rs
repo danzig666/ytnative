@@ -61,6 +61,8 @@ impl StackPage<YtHost> for Rows {
 #[derive(Clone, Debug, PartialEq)]
 enum NavItem {
     Section(Section),
+    /// A pinned channel or playlist: (title, browse id, params).
+    Pinned(String, String, Option<String>),
     Search,
     Settings,
     Account,
@@ -92,6 +94,7 @@ fn nav_items(cx: &Cx<'_, YtHost>) -> Vec<NavItem> {
     if v.is_empty() {
         v.push(NavItem::Section(Section::Home));
     }
+    v.extend(s.pinned.iter().map(|(t, id, p)| NavItem::Pinned(t.clone(), id.clone(), p.clone())));
     v.insert(0, NavItem::Search);
     v.push(NavItem::Settings);
     v.push(NavItem::Account);
@@ -144,6 +147,7 @@ impl BrowseScreen {
                 fx.push(Fx::App(YtFx::Load(self.key())));
             }
             NavItem::Search => fx.push(Fx::Nav(NavOp::Push(YtArg::Search))),
+            NavItem::Pinned(_, id, params) => fx.push(Fx::Nav(NavOp::Push(YtArg::Feed(FeedKey::Browse { id: id.clone(), params: params.clone() })))),
             NavItem::Settings => fx.push(Fx::Nav(NavOp::Push(YtArg::Settings(crate::host::SettingsPage::Root)))),
             NavItem::Account => fx.push(Fx::Nav(NavOp::Push(if cx.views.store.signed_in { YtArg::Accounts } else { YtArg::SignIn }))),
         }
@@ -350,6 +354,7 @@ impl Screen<YtHost> for BrowseScreen {
             .map(|i| match i {
                 NavItem::Section(s) => Row::new(s.title()).active(*s == self.section),
                 NavItem::Search => Row::new("\u{1F50D}  Search"),
+                NavItem::Pinned(t, ..) => Row::new(format!("\u{2605} {}", ui::ellipsize(t, 16))),
                 NavItem::Settings => Row::new("Settings"),
                 NavItem::Account => Row::new(match (&cx.views.store.account, cx.views.store.signed_in) {
                     (Some(a), true) => ui::ellipsize(a, 18),

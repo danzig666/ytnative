@@ -81,6 +81,8 @@ pub struct Settings {
     pub blocked_channels: Vec<String>,
     // Interface
     pub sections: Vec<String>,
+    /// Channels / playlists pinned to the sidebar: (title, browse id, params).
+    pub pinned: Vec<(String, String, Option<String>)>,
     pub boot_section: String,
     pub idle_blank_secs: u32,
     pub time_24h: bool,
@@ -137,6 +139,7 @@ impl Default for Settings {
             hide_upcoming: false,
             hide_mixes: false,
             blocked_channels: Vec::new(),
+            pinned: Vec::new(),
             sections: crate::store::Section::ALL.iter().map(|s| s.key().to_string()).collect(),
             boot_section: "home".into(),
             idle_blank_secs: 120,

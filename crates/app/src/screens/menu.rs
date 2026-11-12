@@ -24,6 +24,8 @@ enum Act {
     OpenChannel(String),
     OpenPlaylist(String),
     BlockChannel(String),
+    Pin(String, String, Option<String>),
+    Unpin(String),
     SearchFor(String),
     User(UserAction),
     Comments(String),
@@ -83,11 +85,16 @@ impl MenuScreen {
             if let Some(v) = card.video_id() {
                 acts.push(("Play".to_string(), Act::Play(v.to_string())));
             }
-            if let Some(Endpoint::Browse { browse_id, .. }) = &card.item.endpoint {
+            if let Some(Endpoint::Browse { browse_id, params }) = &card.item.endpoint {
                 if browse_id.starts_with("UC") {
                     acts.push(("Open channel".into(), Act::OpenChannel(browse_id.clone())));
                 } else {
                     acts.push(("Open".into(), Act::OpenPlaylist(browse_id.clone())));
+                }
+                if cx.views.store.settings.pinned.iter().any(|p| &p.1 == browse_id) {
+                    acts.push(("Unpin from sidebar".into(), Act::Unpin(browse_id.clone())));
+                } else {
+                    acts.push(("Pin to sidebar".into(), Act::Pin(card.title.clone(), browse_id.clone(), params.clone())));
                 }
             }
             if let Some(v) = card.video_id() {
@@ -253,6 +260,18 @@ impl MenuScreen {
             Act::SearchFor(q) => {
                 fx.push(Fx::Nav(NavOp::Pop));
                 fx.push(Fx::Nav(NavOp::Push(YtArg::Feed(FeedKey::Search { query: q.clone(), params: None }))));
+            }
+            Act::Pin(t, id, p) => {
+                let (t, id, p) = (t.clone(), id.clone(), p.clone());
+                fx.push(Fx::App(YtFx::Toast(format!("Pinned {t}"))));
+                fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| s.pinned.push((t, id, p))))));
+                fx.push(Fx::Nav(NavOp::Pop));
+            }
+            Act::Unpin(id) => {
+                let id = id.clone();
+                fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| s.pinned.retain(|p| p.1 != id)))));
+                fx.push(Fx::App(YtFx::Toast("Unpinned".into())));
+                fx.push(Fx::Nav(NavOp::Pop));
             }
             Act::BlockChannel(ch) => {
                 let ch = ch.clone();
