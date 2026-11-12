@@ -3,6 +3,7 @@ pub mod auth;
 pub mod bootstrap;
 pub mod captions;
 pub mod comments;
+pub mod demux;
 pub mod ext;
 pub mod innertube;
 pub mod lounge;
