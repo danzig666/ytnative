@@ -96,6 +96,8 @@ pub enum YtFx {
     Play { video_id: String, playlist: Option<String> },
     Stop,
     TogglePause,
+    /// OK in the player: skip an offered SponsorBlock segment, else toggle pause.
+    OkInPlayer,
     SeekBy(i64),
     SeekTo(u64),
     SetSpeed(f32),
@@ -193,6 +195,9 @@ pub struct AppRig {
     signin_cancel: Arc<std::sync::atomic::AtomicBool>,
     next_req: u32,
     pub player: Player,
+    sb: yt_core::ext::sponsorblock::SkipTracker,
+    /// A segment the user may skip with OK ("Ask" action): (end_ms, label).
+    pub sb_offer: Option<(u64, String)>,
 }
 
 impl AppRig {
@@ -211,6 +216,8 @@ impl AppRig {
             signin_cancel: Default::default(),
             next_req: 0,
             player: Player::new(),
+            sb: Default::default(),
+            sb_offer: None,
         }
     }
 
@@ -242,6 +249,7 @@ impl AppRig {
                 self.store.toast = None;
             }
         }
+        self.sponsorblock(now_ms);
         let done = std::mem::take(&mut *self.done.lock().unwrap());
         let mut out = Vec::new();
         for (addr, work) in done {
@@ -276,12 +284,70 @@ impl AppRig {
         out
     }
 
+    /// SponsorBlock: act on the segment playback just entered, per the category's setting.
+    fn sponsorblock(&mut self, now_ms: u32) {
+        use crate::settings::SbAction;
+        if self.player_view.phase != Phase::Playing || !self.store.settings.sponsorblock {
+            return;
+        }
+        let ex = self.player_view.extras.clone();
+        let pos = self.player_view.position_ms;
+        if let Some((end, _)) = &self.sb_offer {
+            if pos >= *end {
+                self.sb_offer = None;
+            }
+        }
+        let Some(seg) = self.sb.check(&ex.segments, pos).cloned() else { return };
+        let label = seg.category.label().to_string();
+        match sb_action(&self.store.settings, &seg.category) {
+            SbAction::Off => {}
+            SbAction::Skip => self.player.seek_to(seg.end_ms),
+            SbAction::SkipWithToast => {
+                self.player.seek_to(seg.end_ms);
+                self.store.toast(format!("Skipped: {label}"), now_ms);
+            }
+            SbAction::Ask => {
+                self.store.toast(format!("{label} \u{2014} press OK to skip"), now_ms);
+                self.sb_offer = Some((seg.end_ms, label));
+            }
+        }
+        self.sb.mark_done(&seg);
+    }
+
+    /// OK during an "Ask" segment skips it. Returns true when it did.
+    pub fn take_sb_offer(&mut self) -> bool {
+        match self.sb_offer.take() {
+            Some((end, _)) => {
+                self.player.seek_to(end);
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn idle_blank_ms(&self) -> u32 {
         self.store.settings.idle_blank_secs.max(30) * 1000
     }
 
     pub fn playing(&self) -> bool {
         self.player_view.phase == Phase::Playing
+    }
+}
+
+/// The configured action for a SponsorBlock category.
+pub fn sb_action(s: &Settings, c: &yt_core::ext::sponsorblock::Category) -> crate::settings::SbAction {
+    use crate::settings::SbAction;
+    use yt_core::ext::sponsorblock::Category as C;
+    match c {
+        C::Sponsor => s.sb_sponsor,
+        C::Intro => s.sb_intro,
+        C::Outro => s.sb_outro,
+        C::Interaction => s.sb_interaction,
+        C::SelfPromo => s.sb_selfpromo,
+        C::MusicOfftopic => s.sb_music_offtopic,
+        C::Preview => s.sb_preview,
+        C::Filler => s.sb_filler,
+        _ => SbAction::Off,
     }
 }
 
@@ -345,10 +411,29 @@ impl Rig<YtHost> for AppRig {
                 crate::log(&format!("play {video_id} (playlist {playlist:?})"));
                 let s = &self.store.settings;
                 let prefs = yt_core::streams::Prefs { min_height: s.min_height as u64, max_height: s.max_height as u64, codec: "avc1" };
-                self.player.start(video_id, self.session.clone(), prefs);
+                let extras = crate::player::ExtrasPrefs {
+                    subtitles: s.subtitles,
+                    language: s.subtitle_language.clone(),
+                    auto_translate: s.subtitle_auto_translate,
+                    sponsorblock: s.sponsorblock,
+                    categories: yt_core::ext::sponsorblock::Category::ALL
+                        .iter()
+                        .filter(|c| sb_action(s, c) != crate::settings::SbAction::Off)
+                        .cloned()
+                        .collect(),
+                    dislikes: s.return_dislikes,
+                };
+                self.sb = yt_core::ext::sponsorblock::SkipTracker::new(!s.sb_skip_once);
+                self.sb_offer = None;
+                self.player.start(video_id, self.session.clone(), prefs, extras);
             }
             YtFx::Stop => self.player.stop(),
             YtFx::TogglePause => self.player.toggle_pause(),
+            YtFx::OkInPlayer => {
+                if !self.take_sb_offer() {
+                    self.player.toggle_pause();
+                }
+            }
             YtFx::SeekBy(ms) => self.player.seek_by(ms),
             YtFx::SeekTo(ms) => self.player.seek_to(ms),
             YtFx::SetSpeed(r) => self.player.set_rate(r),

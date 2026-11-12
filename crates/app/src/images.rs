@@ -96,7 +96,8 @@ impl Thumbs {
 fn fetch(http: &reqwest::blocking::Client, url: &str) -> Result<Decoded, PosterError> {
     let bytes = http.get(url).send().and_then(|r| r.error_for_status()).and_then(|r| r.bytes()).map_err(|_| PosterError::Fetch)?;
     let (w, h, rgba) = plx_gfx::img::img_decode_owned(&bytes).ok_or(PosterError::Decode)?;
-    let (w, h, rgba) = downscale(w, h, rgba);
+    // Storyboard sheets are frame grids: keep full resolution so each frame stays sharp.
+    let (w, h, rgba) = if url.contains("/sb/") { (w, h, rgba) } else { downscale(w, h, rgba) };
     Ok(Decoded { w: w as u16, h: h as u16, rgba: rgba.into_boxed_slice() })
 }
 

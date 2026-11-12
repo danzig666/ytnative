@@ -39,9 +39,32 @@ pub enum Phase {
     Failed(String),
 }
 
+/// What the player shows around the video, fetched after playback starts.
+#[derive(Debug, Default, Clone)]
+pub struct Extras {
+    pub watch: Option<yt_core::watch::WatchInfo>,
+    pub segments: Vec<yt_core::ext::sponsorblock::Segment>,
+    pub votes: Option<yt_core::ext::ryd::Votes>,
+    pub cues: Vec<yt_core::captions::Cue>,
+    pub caption_label: Option<String>,
+    pub levels: Vec<yt_core::storyboard::Level>,
+}
+
+/// Settings the extras fetch depends on (a snapshot, taken on the main thread).
+#[derive(Clone, Debug)]
+pub struct ExtrasPrefs {
+    pub subtitles: bool,
+    pub language: String,
+    pub auto_translate: bool,
+    pub sponsorblock: bool,
+    pub categories: Vec<yt_core::ext::sponsorblock::Category>,
+    pub dislikes: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Status {
     pub phase: Phase,
+    pub extras: Arc<Extras>,
     pub video_id: String,
     pub channel_id: String,
     pub storyboard: Option<String>,
@@ -84,7 +107,13 @@ impl Player {
     }
 
     /// Main thread. Starts playback of `video_id`; `session` resolves streams on the worker.
-    pub fn start(&mut self, video_id: String, session: Arc<Mutex<Option<yt_core::session::Session>>>, prefs: yt_core::streams::Prefs) {
+    pub fn start(
+        &mut self,
+        video_id: String,
+        session: Arc<Mutex<Option<yt_core::session::Session>>>,
+        prefs: yt_core::streams::Prefs,
+        extras: ExtrasPrefs,
+    ) {
         self.stop();
         *self.status.lock().unwrap() = Status { phase: Phase::Resolving, rate: 1.0, ..Default::default() };
         let Some(create) = sdl_sym::<CreateFn>("SDL_webOSCreateExportedWindow") else {
@@ -110,9 +139,12 @@ impl Player {
         };
         let (status, media_id) = (self.status.clone(), self.media_id.clone());
         let spawned = plx_base::task::spawn("play", move || {
-            if let Err(e) = run(luna, &video_id, &window_id, &session, &status, &media_id, prefs) {
-                crate::log(&format!("player: {e:#}"));
-                status.lock().unwrap().phase = Phase::Failed(format!("{e:#}"));
+            match run(luna, &video_id, &window_id, &session, &status, &media_id, prefs) {
+                Ok(()) => load_extras(&video_id, &session, &status, &extras),
+                Err(e) => {
+                    crate::log(&format!("player: {e:#}"));
+                    status.lock().unwrap().phase = Phase::Failed(format!("{e:#}"));
+                }
             }
             plx_machine::present::wake_from_worker();
         });
@@ -276,4 +308,84 @@ fn on_event(status: &Mutex<Status>, msg: &str) {
     }
     drop(s);
     plx_machine::present::wake_from_worker();
+}
+
+static EXT: std::sync::OnceLock<yt_core::ext::Ext> = std::sync::OnceLock::new();
+
+fn ext() -> &'static yt_core::ext::Ext {
+    EXT.get_or_init(|| {
+        let http = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(10)).build().unwrap_or_default();
+        yt_core::ext::Ext::new(http)
+    })
+}
+
+/// Worker, after playback started: watch-page info, SponsorBlock, dislikes, captions,
+/// storyboard. Each piece is published as soon as it arrives.
+fn load_extras(video_id: &str, session: &Mutex<Option<yt_core::session::Session>>, status: &Arc<Mutex<Status>>, prefs: &ExtrasPrefs) {
+    let mut ex = Extras::default();
+    let publish = |ex: &Extras| {
+        let mut s = status.lock().unwrap();
+        if s.video_id == video_id {
+            s.extras = Arc::new(ex.clone());
+        }
+        drop(s);
+        plx_machine::present::wake_from_worker();
+    };
+    let (spec, tracks) = {
+        let s = status.lock().unwrap();
+        (s.storyboard.clone(), s.captions.clone())
+    };
+    if let Some(spec) = spec {
+        ex.levels = yt_core::storyboard::parse(&spec);
+    }
+    if prefs.sponsorblock && !prefs.categories.is_empty() {
+        match ext().segments(video_id, &prefs.categories) {
+            Ok(seg) => ex.segments = seg,
+            Err(e) => crate::log(&format!("sponsorblock: {e:#}")),
+        }
+    }
+    publish(&ex);
+    match crate::host::with_session(session, |s| s.watch(video_id, None)) {
+        Ok(w) => ex.watch = Some(w),
+        Err(e) => crate::log(&format!("watch info: {e:#}")),
+    }
+    if prefs.dislikes {
+        ex.votes = ext().votes(video_id).ok().flatten();
+    }
+    publish(&ex);
+    if prefs.subtitles {
+        if let Some((track, translate)) = pick_track(&tracks, &prefs.language, prefs.auto_translate) {
+            let r = crate::host::with_session(session, |s| s.captions(&track, translate.as_deref()));
+            match r {
+                Ok(cues) => {
+                    ex.caption_label = Some(match &translate {
+                        Some(l) => format!("{} \u{2192} {l}", track.name),
+                        None => track.name.clone(),
+                    });
+                    ex.cues = cues;
+                }
+                Err(e) => crate::log(&format!("captions: {e:#}")),
+            }
+            publish(&ex);
+        }
+    }
+}
+
+/// Manual track in the wanted language, else auto-generated in it, else (if allowed) a
+/// translation of the best available track.
+fn pick_track(tracks: &[yt_core::streams::CaptionTrack], lang: &str, translate: bool) -> Option<(yt_core::streams::CaptionTrack, Option<String>)> {
+    let base = |l: &str| l.split('-').next().unwrap_or(l).to_ascii_lowercase();
+    let want = base(lang);
+    if let Some(t) = tracks.iter().find(|t| !t.auto && base(&t.language) == want) {
+        return Some((t.clone(), None));
+    }
+    if let Some(t) = tracks.iter().find(|t| base(&t.language) == want) {
+        return Some((t.clone(), None));
+    }
+    if translate {
+        if let Some(t) = tracks.iter().find(|t| t.translatable && !t.auto).or_else(|| tracks.iter().find(|t| t.translatable)) {
+            return Some((t.clone(), Some(lang.to_string())));
+        }
+    }
+    None
 }
