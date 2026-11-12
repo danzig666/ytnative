@@ -92,6 +92,8 @@ pub struct Settings {
     pub content_country: String,
     // Remote
     pub lounge_enabled: bool,
+    /// Answer DIAL discovery so the TV is in the phone's cast menu.
+    pub dial_enabled: bool,
     pub device_name: String,
     // Parental
     pub child_mode: bool,
@@ -150,6 +152,7 @@ impl Default for Settings {
             ui_language: "system".into(),
             content_country: "".into(),
             lounge_enabled: true,
+            dial_enabled: true,
             device_name: "ytnative".into(),
             child_mode: false,
             settings_pin: String::new(),

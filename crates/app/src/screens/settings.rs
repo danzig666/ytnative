@@ -190,6 +190,7 @@ fn items(page: SettingsPage) -> Vec<Item> {
         }
         SettingsPage::Remote => vec![
             Opt("Link with TV code", |s| on_off(s.lounge_enabled), |s, _| s.lounge_enabled = !s.lounge_enabled),
+            Opt("Show in the phone's cast menu (DIAL)", |s| on_off(s.dial_enabled), |s, _| s.dial_enabled = !s.dial_enabled),
             Info("TV code", |cx| match &cx.views.store.lounge_code {
                 Some(c) => c.clone(),
                 None if cx.views.store.settings.lounge_enabled => "getting a code\u{2026}".into(),

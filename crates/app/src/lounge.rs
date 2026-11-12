@@ -13,6 +13,8 @@ pub struct Lounge {
     screen: LoungeScreen,
     /// Pairing code for the settings page ("xxx xxx xxx xxx").
     pub code: Arc<Mutex<Option<String>>>,
+    /// DIAL server (phone cast menu); `None` when off or the ports are taken.
+    _dial: Option<yt_core::lounge::dial::DialServer>,
     last_report_ms: u32,
     last_phase: Phase,
     last_video: String,
@@ -29,14 +31,16 @@ pub enum Action {
 }
 
 impl Lounge {
-    pub fn start(device_name: &str) -> anyhow::Result<Lounge> {
+    pub fn start(device_name: &str, dial: bool) -> anyhow::Result<Lounge> {
         let http = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(90)).build()?;
         let screen = LoungeScreen::new(http, device_name)?;
         let (cmd_tx, commands) = channel();
         let (events, ev_rx) = channel();
         let code = Arc::new(Mutex::new(None));
         let (runner, coder, code_slot) = (screen.clone(), screen.clone(), code.clone());
+        let dial_tx = cmd_tx.clone();
         plx_base::task::spawn("lounge", move || runner.run(cmd_tx, ev_rx));
+        let dial = if dial { start_dial(&screen, device_name, dial_tx) } else { None };
         // Keep a fresh pairing code available while the app runs (codes expire after ~5 min).
         plx_base::task::spawn("lounge-code", move || loop {
             match coder.pairing_code() {
@@ -45,7 +49,7 @@ impl Lounge {
             }
             std::thread::sleep(std::time::Duration::from_secs(60));
         });
-        Ok(Lounge { commands, events, screen, code, last_report_ms: 0, last_phase: Phase::Idle, last_video: String::new() })
+        Ok(Lounge { commands, events, screen, code, _dial: dial, last_report_ms: 0, last_phase: Phase::Idle, last_video: String::new() })
     }
 
     pub fn stop(&self) {
@@ -107,5 +111,37 @@ impl Lounge {
             let _ = self.events.send(Event::NowPlaying(np));
         }
         let _ = self.events.send(Event::StateChange(st));
+    }
+}
+
+/// Starts the DIAL server so the TV shows up in the phone's cast menu. A launch carries a pairing
+/// code (registered with the lounge so the phone joins our session) and maybe a video to start.
+/// Failures (port 1900 owned by the system DIAL server, sandbox) only disable DIAL.
+fn start_dial(screen: &LoungeScreen, device_name: &str, tx: Sender<Command>) -> Option<yt_core::lounge::dial::DialServer> {
+    use yt_core::lounge::dial;
+    let mut cfg = dial::DialConfig::new(device_name, &screen.device_id());
+    cfg.screen_id = Some(screen.screen_id());
+    let screen = screen.clone();
+    let tx = Mutex::new(tx);
+    let r = dial::start(cfg.clone(), move |req| {
+        if let Some(code) = &req.pairing_code {
+            if let Err(e) = screen.register_pairing_code(code) {
+                crate::log(&format!("dial: register pairing code: {e:#}"));
+            }
+        }
+        if let Some(v) = req.video_id.filter(|v| !v.is_empty()) {
+            let _ = tx.lock().unwrap().send(Command::SetVideo { video_id: v, current_time: req.start_time });
+        }
+    });
+    match r {
+        Ok(s) => {
+            crate::log(&format!("dial: listening on :{}", s.http_port()));
+            Some(s)
+        }
+        Err(e) => {
+            crate::log(&format!("dial: not started: {e:#}"));
+            // Without SSDP the phone cannot discover us; HTTP alone is pointless.
+            None
+        }
     }
 }

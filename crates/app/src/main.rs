@@ -117,7 +117,7 @@ fn main() {
 
         let mut remote = remote::Remote::open();
         let mut lounge = if rig.store.settings.lounge_enabled {
-            match lounge::Lounge::start(&rig.store.settings.device_name) {
+            match lounge::Lounge::start(&rig.store.settings.device_name, rig.store.settings.dial_enabled) {
                 Ok(l) => Some(l),
                 Err(e) => {
                     log(&format!("lounge: not started: {e:#}"));
