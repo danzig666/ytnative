@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "ytnative"
+name = "tvplay"
 path = "src/main.rs"
 
 [dependencies]

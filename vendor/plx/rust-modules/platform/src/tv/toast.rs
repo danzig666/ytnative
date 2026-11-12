@@ -55,7 +55,7 @@ pub fn send(message: &str, identity: Identity) -> Sent {
 }
 
 /// What an absent port answers: nothing was sent, and the log says so.
-pub(super) fn deliver_without_port(_message: &str, identity: Identity) -> Sent {
+pub fn deliver_without_port(_message: &str, identity: Identity) -> Sent {
     plx_base::eventlog::log(&format!(
         "toast: no platform port — {identity:?} toast not sent"
     ));

@@ -2042,6 +2042,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ytnative-app"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "libc",
+ "plx_base",
+ "plx_gfx",
+ "plx_machine",
+ "plx_platform",
+ "plx_ui",
+]
+
+[[package]]
 name = "ytnative-tv"
 version = "0.1.0"
 dependencies = [

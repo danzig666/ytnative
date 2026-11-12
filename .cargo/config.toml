@@ -7,3 +7,8 @@ rustflags = ["-C", "target-cpu=cortex-a9", "-C", "target-feature=-neon,-soft-flo
 
 [alias]
 xtask = "run -q -p xtask --"
+
+# C code for the TV (nanosvg) is compiled by zig through the same wrapper used for linking.
+[env]
+CC_armv7_unknown_linux_gnueabi = { value = "tools/zig-cc-armv7.cmd", relative = true }
+AR_armv7_unknown_linux_gnueabi = { value = "tools/zig-ar.cmd", relative = true }

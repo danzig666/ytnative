@@ -22,7 +22,7 @@ use std::os::raw::{c_char, c_int};
 
 pub mod qr;
 pub mod anim;
-pub(crate) mod card_row;
+pub mod card_row; // ytnative: public (RowStyle, TileLabel for app screens)
 pub mod cards; // shared card sections (plan: shared-card-sections): Shelf, Grid, CardSource, and the card conformance suite
 pub mod marquee; // the focused run's looping glide: a tile's title and caption (card_row), cast name and role, menu rows (table)
 pub mod card_motion;

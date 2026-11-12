@@ -80,7 +80,7 @@ fn repo_root() -> Result<PathBuf> {
 }
 
 fn pkg_dir() -> PathBuf {
-    PathBuf::from("crates/ytnative-tv/pkg")
+    PathBuf::from("crates/app/pkg")
 }
 
 fn appinfo() -> Result<Value> {
@@ -164,7 +164,7 @@ fn luna(uri: &str, payload: &str) -> Result<String> {
 
 fn build() -> Result<()> {
     let st = Command::new("cargo")
-        .args(["build", "--release", "-p", "ytnative-tv", "--target", TARGET])
+        .args(["build", "--release", "-p", "ytnative-app", "--target", TARGET])
         .status()?;
     if !st.success() {
         bail!("cross build failed");
@@ -374,6 +374,8 @@ const SYSROOT_LIBS: &[&str] = &[
     "/usr/lib/libSDL2-2.0.so.0",
     "/usr/lib/libSDL2_ttf-2.0.so.0",
     "/usr/lib/libGLESv2.so.2",
+    // libGLESv2 on LG sets is a stub; the GL entry points live in the Mali driver.
+    "/usr/lib/libmali.so.0",
     "/usr/lib/libEGL.so.1",
     "/usr/lib/libwayland-client.so.0",
     "/usr/lib/libluna-service2.so.3",

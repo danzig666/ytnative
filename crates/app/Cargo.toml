@@ -1,0 +1,21 @@
+[package]
+name = "ytnative-app"
+description = "ytnative: native YouTube client for LG webOS (app shell on the plx-native UI core)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ytnative"
+path = "src/main.rs"
+
+[dependencies]
+libc.workspace = true
+plx_base = { path = "../../vendor/plx/rust-modules/base" }
+plx_machine = { path = "../../vendor/plx/rust-modules/machine" }
+plx_gfx = { path = "../../vendor/plx/rust-modules/gfx" }
+plx_platform = { path = "../../vendor/plx/rust-modules/platform" }
+plx_ui = { path = "../../vendor/plx/rust-modules/ui" }
+
+[build-dependencies]
+cc = "1"

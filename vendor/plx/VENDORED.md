@@ -7,3 +7,7 @@
   `ci/install-identities.json`, `src/main.c` (referenced by a test via include_str).
 - The PlxNative name and brand artwork are not used by ytnative (see upstream TRADEMARKS.md).
 - Local changes are made as separate commits so they can be diffed against upstream.
+
+## Local changes
+- `ui/src/lib.rs`: `card_row` made `pub` (apps need `RowStyle` / `TileLabel` for their card sources).
+- `platform/src/tv/toast.rs`: `deliver_without_port` made `pub` (used by our `tv::Port`).

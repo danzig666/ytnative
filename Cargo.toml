@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/yt-core", "crates/ytcli", "crates/ytnative-tv", "xtask",
+    "crates/yt-core", "crates/ytcli", "crates/ytnative-tv", "crates/app", "xtask",
     # plx-native UI core (GPL-3.0-or-later), vendored from github.com/GLinnik21/plx-native @ 31e6f24
     "vendor/plx/rust-modules/base", "vendor/plx/rust-modules/machine", "vendor/plx/rust-modules/gfx",
     "vendor/plx/rust-modules/platform", "vendor/plx/rust-modules/ui",

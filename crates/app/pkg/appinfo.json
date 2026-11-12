@@ -9,5 +9,5 @@
   "largeIcon": "largeIcon.png",
   "transparent": true,
   "nativeLifeCycleInterfaceVersion": 2,
-  "requiredMemory": 64
+  "requiredMemory": 200
 }
