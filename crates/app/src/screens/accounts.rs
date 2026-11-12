@@ -60,6 +60,9 @@ impl AccountsScreen {
 impl Machine<YtHost> for AccountsScreen {
     type Ev = ScreenEvent<YtHost>;
     fn step(&mut self, ev: &Self::Ev, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) -> Handled {
+        if let Some(a) = super::common::press_commit_as_activate(ev, cx, |_| true) {
+            return self.step(&a, cx, fx);
+        }
         let rows = rows_of(cx);
         match ev {
             ScreenEvent::Activate(e) => {
