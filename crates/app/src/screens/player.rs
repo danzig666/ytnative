@@ -249,6 +249,14 @@ impl Screen<YtHost> for PlayerScreen {
             Phase::Failed(e) => Some(format!("Can't play this video: {}", ui::ellipsize(e, 80))),
             _ => None,
         };
+        // Windows simulator: no media pipeline and no video plane; mark where the picture would be.
+        #[cfg(windows)]
+        if centre.is_none() {
+            ui::fill(p, Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, [0.06, 0.06, 0.07, 1.0]);
+            ui::text(p, "Simulator: no video", 960.0, 470.0, 36, ui::DIM, ui::ALIGN_CENTER, false);
+            let res = if st.height > 0 { format!("{}p  \u{00B7}  ", st.height) } else { String::new() };
+            ui::text(p, &format!("{res}fake clock, HUD and menus only"), 960.0, 530.0, 26, ui::DIM, ui::ALIGN_CENTER, false);
+        }
         if let Some(msg) = centre {
             ui::fill(p, Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, [0.0, 0.0, 0.0, 1.0]);
             ui::text(p, &msg, 960.0, 510.0, 36, ui::DIM, ui::ALIGN_CENTER, false);

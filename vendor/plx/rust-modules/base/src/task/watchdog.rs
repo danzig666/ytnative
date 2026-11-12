@@ -388,7 +388,10 @@ impl LoopWatch {
             // ARM Linux); fwcompat inventories export `pthread_self` and `pthread_kill` at
             // GLIBC_2.4 across all releases: libpthread on older firmware, libc after the glibc
             // pthread merge.
+            #[cfg(not(windows))]
             let main_thread = unsafe { libc::pthread_self() } as usize;
+            #[cfg(windows)]
+            let main_thread = 0usize; // ytnative local change: no pthread on the Windows simulator
             #[cfg(feature = "threadcheck")]
             let log_only = crate::devtrig::guard_log_only();
             #[cfg(feature = "threadcheck")]
@@ -571,6 +574,12 @@ pub fn set_crash_phase(phase: CrashPhase) {
 /// says which function is installed and [`handler_is_ours`] says whether it is in this binary,
 /// which is the tracer's `freeze_handler` and nothing else, so a library's handler (ACB's, loaded
 /// at playback) is never signalled. Returns whether the signal was sent.
+#[cfg(windows)]
+fn probe_main_thread(_main_thread: usize, _seq: u32) -> bool {
+    false // ytnative local change: no crash tracer / SIGUSR2 on the Windows simulator
+}
+
+#[cfg(not(windows))]
 fn probe_main_thread(main_thread: usize, seq: u32) -> bool {
     // SAFETY: `sigaction` with a null new action only reads the current disposition into `old`,
     // a zeroed plain-data struct; `pthread_kill` on a thread id captured from the loop owner,
@@ -599,6 +608,7 @@ fn probe_main_thread(main_thread: usize, seq: u32) -> bool {
 /// `freeze_handler` and not a library's that took `SIGUSR2` after the tracer was installed
 /// (ACB is `dlopen`ed at playback). A stranger's handler fired at a random moment is not a probe.
 /// An unanswerable `dladdr` reads as "not ours": no probe is better than a wrong one.
+#[cfg(not(windows))]
 fn handler_is_ours(handler: libc::sighandler_t) -> bool {
     // SAFETY: `dladdr` writes into zeroed plain-data `Dl_info` structs and only reads the
     // addresses it is given; neither is dereferenced.

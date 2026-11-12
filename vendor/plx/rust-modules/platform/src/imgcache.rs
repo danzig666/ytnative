@@ -670,6 +670,12 @@ fn byte_cap(limit: u64, free: Option<u64>, held: u64) -> Option<u64> {
 }
 
 /// Bytes an unprivileged process may still write on `path`'s filesystem, or `None` if unknown.
+#[cfg(windows)]
+fn free_bytes(_path: &Path) -> Option<u64> {
+    Some(4 << 30) // ytnative local change: no statvfs on the Windows simulator; assume 4 GiB free
+}
+
+#[cfg(not(windows))]
 fn free_bytes(path: &Path) -> Option<u64> {
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
@@ -686,6 +692,12 @@ fn free_bytes(path: &Path) -> Option<u64> {
 /// process can plant a symlink there or pre-create the directory under its own uid. So `mkdir`
 /// (never `create_dir_all`, which follows a link at the final component), then open it with
 /// `O_NOFOLLOW` and `fchmod` THAT descriptor once `fstat` says it is a directory `owner` owns.
+#[cfg(windows)]
+fn private_dir(path: &Path, _owner: u32) -> bool {
+    fs::create_dir_all(path).is_ok() // ytnative local change: per-user dirs on the Windows simulator
+}
+
+#[cfg(not(windows))]
 fn private_dir(path: &Path, owner: u32) -> bool {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
     if let Some(parent) = path.parent() {
@@ -710,7 +722,11 @@ fn private_dir(path: &Path, owner: u32) -> bool {
 
 fn probe_dir(path: &Path, private: bool) -> bool {
     let made = if private {
-        private_dir(path, unsafe { libc::geteuid() })
+        #[cfg(not(windows))]
+        let owner = unsafe { libc::geteuid() };
+        #[cfg(windows)]
+        let owner = 0;
+        private_dir(path, owner)
     } else {
         fs::create_dir_all(path).is_ok()
     };

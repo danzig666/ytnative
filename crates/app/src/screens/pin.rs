@@ -103,6 +103,9 @@ impl PinScreen {
 impl Machine<YtHost> for PinScreen {
     type Ev = ScreenEvent<YtHost>;
     fn step(&mut self, ev: &Self::Ev, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) -> Handled {
+        if let Some(a) = super::common::press_commit_as_activate(ev, cx, |_| true) {
+            return self.step(&a, cx, fx);
+        }
         match ev {
             ScreenEvent::Activate(e) => {
                 if let Some(k) = e.checked_sub(BASE).and_then(|i| KEYS.get(i as usize)) {

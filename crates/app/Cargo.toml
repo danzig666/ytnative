@@ -9,6 +9,12 @@ license.workspace = true
 name = "ytnative"
 path = "src/main.rs"
 
+[features]
+default = []
+# Desktop simulator (Windows): turns on plx-native's `hostsim` behaviour in the vendored crates
+# (desktop GL shader preamble + VAO, steerable paths, no webOS bus). Never set for the TV build.
+sim = ["plx_base/hostsim", "plx_machine/hostsim", "plx_gfx/hostsim", "plx_platform/hostsim"]
+
 [dependencies]
 libc.workspace = true
 plx_base = { path = "../../vendor/plx/rust-modules/base" }
@@ -21,6 +27,10 @@ anyhow.workspace = true
 serde_json.workspace = true
 serde.workspace = true
 reqwest.workspace = true
+
+# Windows simulator only: PNG screenshots (same crate/version the vendored gfx layer decodes with).
+[target.'cfg(windows)'.dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [build-dependencies]
 cc = "1"

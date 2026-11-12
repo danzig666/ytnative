@@ -163,3 +163,28 @@ Logs go to `/tmp/ytnative/tvplay.log`. Pipeline internals are in `/var/log/legac
   OK = pause, ←/→ = seek 10 s, BACK = stop and return to Home.
 
 Dev loop (all from Windows): `cargo xtask build | install | deploy | run | key <keys> | shot | logs`.
+
+## Windows desktop simulator (no TV needed)
+
+The same app (`crates/app`, `--features sim`) runs in a 1920x1080 window on Windows with desktop
+OpenGL, for exercising and screenshotting the UI. There is no video: the player resolves the video
+for real (title, captions, SponsorBlock, storyboard) and runs a fake clock under "Simulator: no
+video", so the HUD, seeking and menus work. Nothing is reported to watch history from it.
+
+```
+powershell -ExecutionPolicy Bypass -File tools/fetch-sim-deps.ps1   # once: SDL2 + SDL2_ttf (SHA-256 checked)
+cargo xtask sim                      # build + run (--release, --detach; -- passes args to the app)
+cargo xtask sim-key down down ok     # remote keys: up down left right ok back exit, wait:<ms>
+cargo xtask sim-shot sim-home        # -> target/shots/sim-home.png
+```
+
+- Keyboard: arrows, Enter = OK, Escape / Backspace = BACK. Close the window to quit.
+- Data (token, accounts, settings): `%LOCALAPPDATA%\ytnative`; `token.json` from the repo (or the
+  main checkout, or `YTNATIVE_SIM_TOKEN`) is copied there when no account exists yet.
+- Key channel: TCP `127.0.0.1:47800` (`YTNATIVE_SIM_PORT`); one request = tokens + newline, e.g.
+  `right ok wait:1500 shot:x` runs in order and replies when done.
+- Env: `YTNATIVE_SIM_WINDOW=1280x720` (window size, UI scaled), `YTNATIVE_SIM_HIDDEN=1`,
+  `YTNATIVE_SHOT_DIR`, `YTNATIVE_SIM_LOUNGE=1` (phone casting is off by default in the simulator).
+- GL: a 4.1 core context (plx-native's desktop GLSL preamble + VAO, as its macOS simulator), else
+  GLES 2.0, else the driver default; every GL entry point is forwarded through
+  `SDL_GL_GetProcAddress` (`crates/app/src/sim/gl.rs`).

@@ -4,11 +4,19 @@
 //! Threading: the exported window is created/destroyed on the main thread (SDL); stream
 //! resolution and every luna call run on a worker; media events update `Status`, which the
 //! player screen reads every frame.
+//!
+//! The Windows simulator has no media pipeline: its `Player` (`sim/player.rs`) resolves the video
+//! for real (title, duration, captions, extras) and then runs a fake clock.
 
+#[cfg(windows)]
+pub use crate::sim::player::Player;
+#[cfg(not(windows))]
 use crate::ls2::Luna;
+#[cfg(not(windows))]
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::sync::{Arc, Mutex};
 
+#[cfg(not(windows))]
 #[repr(C)]
 struct SdlRect {
     x: c_int,
@@ -17,10 +25,14 @@ struct SdlRect {
     h: c_int,
 }
 
+#[cfg(not(windows))]
 type CreateFn = unsafe extern "C" fn(c_int) -> *const c_char;
+#[cfg(not(windows))]
 type SetFn = unsafe extern "C" fn(*const c_char, *mut SdlRect, *mut SdlRect) -> c_int;
+#[cfg(not(windows))]
 type DestroyFn = unsafe extern "C" fn(*const c_char);
 
+#[cfg(not(windows))]
 fn sdl_sym<T>(name: &str) -> Option<T> {
     let c = CString::new(name).ok()?;
     let p = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c.as_ptr()) };
@@ -95,6 +107,7 @@ pub struct Status {
     pub fps: u32,
 }
 
+#[cfg(not(windows))]
 pub struct Player {
     pub status: Arc<Mutex<Status>>,
     window: Option<CString>,
@@ -102,6 +115,7 @@ pub struct Player {
     luna: Option<&'static Luna>,
 }
 
+#[cfg(not(windows))]
 impl Player {
     pub fn new() -> Self {
         Player { status: Default::default(), window: None, media_id: Default::default(), luna: None }
@@ -265,11 +279,13 @@ impl Player {
     }
 }
 
+#[cfg(not(windows))]
 fn json_str(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into())
 }
 
 /// Worker: resolve, write the manifest, load, subscribe, foreground, play.
+#[cfg(not(windows))]
 fn run(
     luna: &'static Luna,
     video_id: &str,
@@ -346,6 +362,7 @@ fn run(
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn on_event(status: &Mutex<Status>, msg: &str) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(msg) else { return };
     let mut s = status.lock().unwrap();
@@ -376,6 +393,7 @@ fn on_event(status: &Mutex<Status>, msg: &str) {
 
 /// Worker: reports playback to YouTube (watch history, resume position) on YouTube's own
 /// schedule until this video stops playing.
+#[cfg(not(windows))]
 fn track_history(video_id: &str, session: &Mutex<Option<yt_core::session::Session>>, status: &Arc<Mutex<Status>>) {
     let mut t = match crate::host::with_session(session, |s| s.tracking_for(video_id)) {
         Ok(t) => t,
@@ -421,7 +439,7 @@ pub fn ext() -> &'static yt_core::ext::Ext {
 
 /// Worker, after playback started: watch-page info, SponsorBlock, dislikes, captions,
 /// storyboard. Each piece is published as soon as it arrives.
-fn load_extras(video_id: &str, session: &Mutex<Option<yt_core::session::Session>>, status: &Arc<Mutex<Status>>, prefs: &ExtrasPrefs) {
+pub(crate) fn load_extras(video_id: &str, session: &Mutex<Option<yt_core::session::Session>>, status: &Arc<Mutex<Status>>, prefs: &ExtrasPrefs) {
     let mut ex = Extras::default();
     let publish = |ex: &Extras| {
         let mut s = status.lock().unwrap();

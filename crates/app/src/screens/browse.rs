@@ -178,6 +178,9 @@ impl BrowseScreen {
 impl Machine<YtHost> for BrowseScreen {
     type Ev = ScreenEvent<YtHost>;
     fn step(&mut self, ev: &Self::Ev, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) -> Handled {
+        if let Some(a) = common::press_commit_as_activate(ev, cx, |e| e >= NAV_BASE) {
+            return self.step(&a, cx, fx);
+        }
         let items = nav_items(cx);
         match ev {
             ScreenEvent::Mount => {

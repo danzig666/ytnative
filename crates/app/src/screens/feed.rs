@@ -71,6 +71,9 @@ impl FeedScreen {
 impl Machine<YtHost> for FeedScreen {
     type Ev = ScreenEvent<YtHost>;
     fn step(&mut self, ev: &Self::Ev, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) -> Handled {
+        if let Some(a) = super::common::press_commit_as_activate(ev, cx, |e| e == SUB_BTN) {
+            return self.step(&a, cx, fx);
+        }
         match ev {
             ScreenEvent::Mount => {
                 fx.push(Fx::App(YtFx::Load(self.key.clone())));

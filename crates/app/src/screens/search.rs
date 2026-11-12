@@ -121,6 +121,9 @@ impl SearchScreen {
 impl Machine<YtHost> for SearchScreen {
     type Ev = ScreenEvent<YtHost>;
     fn step(&mut self, ev: &Self::Ev, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) -> Handled {
+        if let Some(a) = super::common::press_commit_as_activate(ev, cx, |_| true) {
+            return self.step(&a, cx, fx);
+        }
         match ev {
             ScreenEvent::Activate(e) if (KEY_BASE..SUG_BASE).contains(e) => {
                 if let Some(k) = keys().get((e - KEY_BASE) as usize).copied() {

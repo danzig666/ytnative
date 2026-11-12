@@ -56,6 +56,9 @@ impl InfoScreen {
 impl Machine<YtHost> for InfoScreen {
     type Ev = ScreenEvent<YtHost>;
     fn step(&mut self, ev: &Self::Ev, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) -> Handled {
+        if let Some(a) = super::common::press_commit_as_activate(ev, cx, |_| true) {
+            return self.step(&a, cx, fx);
+        }
         match ev {
             ScreenEvent::Activate(e) => {
                 let ch = self.chapters(cx);

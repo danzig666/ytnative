@@ -238,11 +238,17 @@ pub fn is_realtek_k5lp_family(machine_name: &str) -> bool {
 /// `devjail: soc=<name> rtkmem=ok|missing|n/a`. `<name>` is the raw, trimmed file content, or
 /// empty when the file could not be read — logged honestly rather than invented, the same rule
 /// [`probe`] and [`probe_hw`] already follow for their own unreadable files.
+// ytnative local change: libc has no R_OK on Windows (the simulator); the value is the same.
+#[cfg(not(windows))]
+pub(crate) const R_OK: libc::c_int = libc::R_OK;
+#[cfg(windows)]
+pub(crate) const R_OK: libc::c_int = 4;
+
 fn probe_jail() {
     let name = read_machine_name();
     let result = if is_realtek_k5lp_family(&name) {
         let readable = std::ffi::CString::new(RTKMEM_DEVICE)
-            .map(|path| unsafe { libc::access(path.as_ptr(), libc::R_OK) } == 0)
+            .map(|path| unsafe { libc::access(path.as_ptr(), R_OK) } == 0)
             .unwrap_or(false);
         if readable {
             crate::tv::sandbox::Verdict::Ok

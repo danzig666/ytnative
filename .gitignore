@@ -34,3 +34,5 @@ mp4url.txt
 
 # firmware snapshots for `cargo xtask fwcompat` (LG binaries, never commit)
 /sysroots
+# Windows simulator third-party libraries (tools/fetch-sim-deps.ps1; never committed)
+/third_party/win/

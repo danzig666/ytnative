@@ -185,6 +185,13 @@ const LOG_MODE: u32 = 0o640;
 /// it already owned. The mode is set with `fchmod` rather than trusted to `open(2)`, so it does not
 /// depend on the umask and an append target that survived from a 0600 release is corrected on its
 /// first write.
+#[cfg(windows)]
+pub fn open_log_append(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    // ytnative local change: the Windows simulator has no O_NOFOLLOW / uid / nlink checks.
+    std::fs::OpenOptions::new().append(true).create(true).open(path)
+}
+
+#[cfg(not(windows))]
 pub fn open_log_append(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
     let open = |create: bool| {

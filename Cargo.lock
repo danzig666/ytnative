@@ -2266,6 +2266,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cc",
+ "image",
  "libc",
  "plx_base",
  "plx_gfx",

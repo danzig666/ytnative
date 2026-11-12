@@ -232,8 +232,14 @@ fn input_budget(manifest: usize, segments: impl IntoIterator<Item = usize>) -> R
 }
 
 fn bounded_read(path: &Path, remaining: usize) -> Result<Vec<u8>, RecError> {
+    #[cfg(not(windows))]
     use std::os::unix::fs::OpenOptionsExt;
-    let mut file = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+    let mut opts = fs::OpenOptions::new();
+    opts.read(true);
+    // ytnative local change: no O_NOFOLLOW etc. on the Windows simulator
+    #[cfg(not(windows))]
+    opts.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
+    let mut file = opts
         .open(path).map_err(|_| RecError::Io("cannot open recording file".into()))?;
     let metadata = file.metadata().map_err(|_| RecError::Io("cannot inspect recording file".into()))?;
     if !metadata.is_file() { return Err(RecError::Io("recording input is not a regular file".into())); }
@@ -261,7 +267,7 @@ pub fn mode_value(path: &Path) -> Result<Option<String>, RecError> {
         Err(_) => return Err(RecError::Io("cannot inspect recorder trigger".into())),
         Ok(_) => {}
     }
-    let bytes = bounded_read(path,libc::PATH_MAX as usize)?;
+    let bytes = bounded_read(path,4096)?; // PATH_MAX (ytnative local change: libc has none on Windows)
     let value = String::from_utf8(bytes).map_err(|_| malformed(0,"recorder trigger UTF-8"))?;
     Ok(Some(value.trim().to_owned()))
 }
@@ -292,15 +298,27 @@ enum CreatedIdentity {
     Known((u64,u64)),
 }
 
+#[cfg(not(windows))]
 fn file_identity(metadata: &fs::Metadata) -> (u64,u64) {
     use std::os::unix::fs::MetadataExt;
     (metadata.dev(),metadata.ino())
 }
 
+// ytnative local change: the Windows simulator has no dev/ino; length + mtime stand in.
+#[cfg(windows)]
+fn file_identity(metadata: &fs::Metadata) -> (u64,u64) {
+    let t = metadata.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
+    (metadata.len(), t.map_or(0, |d| d.as_nanos() as u64))
+}
+
 impl DirSink {
     pub fn create(dir: &Path) -> std::io::Result<Self> {
+        #[cfg(not(windows))]
         use std::os::unix::fs::DirBuilderExt;
+        #[cfg(not(windows))]
         fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        #[cfg(windows)]
+        fs::DirBuilder::new().recursive(true).create(dir)?;
         if !fs::symlink_metadata(dir)?.is_dir() {
             return Err(std::io::Error::other("recording directory must not be a symlink"));
         }
@@ -379,6 +397,12 @@ impl Sink for DirSink {
     }
 }
 
+#[cfg(windows)]
+fn private_new_file(path: &Path) -> std::io::Result<fs::File> {
+    fs::OpenOptions::new().write(true).create_new(true).open(path) // ytnative local change
+}
+
+#[cfg(not(windows))]
 fn private_new_file(path: &Path) -> std::io::Result<fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     fs::OpenOptions::new().write(true).create_new(true).mode(0o600)

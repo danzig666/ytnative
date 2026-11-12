@@ -3,6 +3,7 @@
 pub mod failure;
 #[path = "activation.rs"]
 #[allow(dead_code)] // Client activation and helper startup share this host-testable file protocol.
+#[cfg(not(windows))] // ytnative local change: Unix fd/uid file protocol, not on the Windows simulator
 pub mod activation;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

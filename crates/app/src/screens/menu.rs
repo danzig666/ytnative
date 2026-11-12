@@ -397,6 +397,9 @@ impl MenuScreen {
 impl Machine<YtHost> for MenuScreen {
     type Ev = ScreenEvent<YtHost>;
     fn step(&mut self, ev: &Self::Ev, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) -> Handled {
+        if let Some(a) = super::common::press_commit_as_activate(ev, cx, |_| true) {
+            return self.step(&a, cx, fx);
+        }
         if let (Some(v), ScreenEvent::Async(..)) = (&self.picker_for, ev) {
             let fresh = Self::playlists(self.list.entry, v.clone(), String::new(), cx);
             // keep the title used for "New playlist"

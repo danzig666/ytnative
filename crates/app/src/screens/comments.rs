@@ -77,6 +77,9 @@ impl CommentsScreen {
 impl Machine<YtHost> for CommentsScreen {
     type Ev = ScreenEvent<YtHost>;
     fn step(&mut self, ev: &Self::Ev, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) -> Handled {
+        if let Some(a) = super::common::press_commit_as_activate(ev, cx, |_| true) {
+            return self.step(&a, cx, fx);
+        }
         match ev {
             ScreenEvent::Mount => {
                 let continuation = self.replies_to.as_ref().map(|_| self.video_id.clone());
