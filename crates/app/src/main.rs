@@ -11,6 +11,10 @@ mod player;
 mod remote;
 mod screens;
 mod sdl;
+mod settings;
+mod signin;
+mod store;
+mod ui;
 mod wl;
 
 use host::{AppRig, YtArg, YtHost};
@@ -108,7 +112,7 @@ fn main() {
 
         let mut rig = AppRig::new();
         let mut d = Dispatcher::<YtHost>::with_transition(Box::new(PageDip::new()));
-        d.request(MachineId::Nav, NavOp::Root(YtArg::Home));
+        d.request(MachineId::Nav, NavOp::Root(YtArg::Browse));
 
         let mut remote = remote::Remote::open();
         let mut ev = [0u8; 128];
@@ -116,7 +120,6 @@ fn main() {
         let mut running = true;
         // OLED protection: blank the screen after IDLE_BLANK_MS without input unless a video is
         // playing. Any key wakes it and is swallowed.
-        const IDLE_BLANK_MS: u32 = 120_000;
         let mut last_input = sdl::SDL_GetTicks();
         let mut blanked = false;
         let mut foreground = true;
@@ -170,11 +173,11 @@ fn main() {
                     log("idle: wake");
                 }
             }
-            let playing = rig.player.status.lock().unwrap().phase == player::Phase::Playing;
+            let playing = rig.playing();
             if playing {
                 last_input = now;
             }
-            if !blanked && now.wrapping_sub(last_input) > IDLE_BLANK_MS {
+            if !blanked && now.wrapping_sub(last_input) > rig.idle_blank_ms() {
                 blanked = true;
                 log("idle: blank screen (no input, nothing playing)");
                 plx_gfx::gfx::frame_clear(0.0, 0.0, 0.0);
@@ -183,7 +186,7 @@ fn main() {
 
             plx_machine::idle::frame_begin(dt);
             images::THUMBS.deliver();
-            let results = rig.drain();
+            let results = rig.drain(now);
             let r = d.frame_with(&mut rig, tick, inputs, results, &mut NoTap, false);
             d.prune(&r.unmounted);
             plx_ui::tex::note_queued(&mut d.budget);
@@ -193,7 +196,9 @@ fn main() {
                 plx_gfx::text::begin_frame();
                 let (x, y, w, h) = plx_base::surface::viewport();
                 sdl::glViewport(x, y, w, h);
-                let video = d.top_screen().map(|s| s.render()) == Some(plx_ui::screen::RenderStrategy::VideoPlane);
+                // Keep the video plane visible under the player's own overlays and menus.
+                let video = rig.player.active()
+                    || d.top_screen().map(|s| s.render()) == Some(plx_ui::screen::RenderStrategy::VideoPlane);
                 if video {
                     // Alpha 0: the compositor shows the hardware video plane through the UI plane.
                     plx_gfx::gfx::frame_clear_through();

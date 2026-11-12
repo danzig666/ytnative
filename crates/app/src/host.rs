@@ -1,7 +1,10 @@
-//! The app's `machine::Host`: argument, effect, message and view types, plus the `Rig` the
-//! dispatcher drives (screens mounting, worker effects, per-frame preparation).
+//! The app's `machine::Host`: screen arguments, effects, messages and views, plus the `Rig` the
+//! dispatcher drives (mounting screens, running effects on workers, per-frame preparation).
 
+use crate::player::{Phase, Player, Status};
 use crate::screens;
+use crate::settings::Settings;
+use crate::store::{FeedKey, Store};
 use plx_machine::machine::{
     Addr, Canon, Chrome, Cx, Effects, EntryId, Handled, Host, InputOwner, InstanceId, LogicalState, MachineId, RequestId,
     ScreenId, TimerId,
@@ -14,11 +17,32 @@ use std::sync::{Arc, Mutex};
 
 pub struct YtHost;
 
+/// Settings pages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsPage {
+    Root,
+    Playback,
+    Subtitles,
+    SponsorBlock,
+    Content,
+    Interface,
+    Remote,
+    About,
+}
+
 /// What a navigation entry shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum YtArg {
-    Home,
-    Video(u32),
+    Browse,
+    Feed(FeedKey),
+    Search,
+    Player { video_id: String, playlist: Option<String> },
+    Settings(SettingsPage),
+    SignIn,
+    /// Context menu for a card (by elem).
+    Menu(u32),
+    /// Player options panel.
+    PlayerMenu,
 }
 
 impl ScreenArg for YtArg {
@@ -27,8 +51,14 @@ impl ScreenArg for YtArg {
     }
     fn id(&self) -> ScreenId {
         ScreenId(match self {
-            YtArg::Home => 1,
-            YtArg::Video(_) => 2,
+            YtArg::Browse => 1,
+            YtArg::Feed(_) => 2,
+            YtArg::Search => 3,
+            YtArg::Player { .. } => 4,
+            YtArg::Settings(_) => 5,
+            YtArg::SignIn => 6,
+            YtArg::Menu(_) => 7,
+            YtArg::PlayerMenu => 8,
         })
     }
     fn title(&self) -> Option<&str> {
@@ -41,55 +71,58 @@ impl ScreenArg for YtArg {
 
 impl LogicalState for YtArg {
     fn write(&self, c: &mut Canon) {
-        match self {
-            YtArg::Home => {
-                c.u32(0);
-            }
-            YtArg::Video(i) => {
-                c.u32(1).u32(*i);
-            }
-        }
+        c.u32(self.id().0);
+        c.str(&format!("{self:?}"));
     }
     fn probe(&self, out: &mut String) {
         out.push_str(&format!("{self:?}"));
     }
 }
 
-/// Content feeds a screen can ask for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Feed {
-    Home,
-    Subscriptions,
-    History,
+/// Sign-in progress, shown by the sign-in screen.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum SignIn {
+    #[default]
+    Idle,
+    Starting,
+    Code { user_code: String, url: String },
+    Done(String),
+    Failed(String),
 }
 
 pub enum YtFx {
-    Load(Feed),
-    Play(String),
+    Load(FeedKey),
+    More(FeedKey),
+    Play { video_id: String, playlist: Option<String> },
     Stop,
     TogglePause,
     SeekBy(i64),
+    SeekTo(u64),
+    SetSpeed(f32),
+    Suggest(String),
+    EditSettings(Box<dyn FnOnce(&mut Settings) + Send>),
+    SignInStart,
+    SignInCancel,
+    SignOut,
+    Toast(String),
 }
 
 pub enum YtMsg {
-    /// The feed is now in the views.
-    Loaded(Feed),
-    Failed(Feed, String),
+    Loaded(FeedKey),
+    Failed(FeedKey, String),
+    Suggestions,
+    SignIn,
 }
 
-/// One card's data as the screens read it.
-#[derive(Clone, Debug, Default)]
-pub struct Card {
-    pub elem: u32,
-    pub video_id: String,
-    pub title: String,
-    pub detail: String,
-    pub thumb: String,
-}
+/// Snapshot of playback state for the screens, refreshed once per frame.
+pub type PlayerView = Status;
 
 #[derive(Clone, Copy)]
 pub struct Views<'a> {
-    pub home: &'a [Card],
+    pub store: &'a Store,
+    pub player: &'a PlayerView,
+    pub signin: &'a SignIn,
+    pub now_ms: u32,
 }
 
 #[derive(Default)]
@@ -125,37 +158,59 @@ impl Mounter<YtHost> for Mount {
             _ => EntryId(0),
         };
         match arg {
-            YtArg::Home => Box::new(screens::home::HomeScreen::new(entry)),
-            YtArg::Video(i) => {
-                let id = cx.views.home.iter().find(|c| c.elem == *i).map(|c| c.video_id.clone()).unwrap_or_default();
-                Box::new(screens::player::PlayerScreen::new(entry, id))
+            YtArg::Browse => Box::new(screens::browse::BrowseScreen::new(entry, cx)),
+            YtArg::Feed(k) => Box::new(screens::feed::FeedScreen::new(entry, k.clone())),
+            YtArg::Search => Box::new(screens::search::SearchScreen::new(entry)),
+            YtArg::Player { video_id, playlist } => {
+                Box::new(screens::player::PlayerScreen::new(entry, video_id.clone(), playlist.clone()))
             }
+            YtArg::Settings(page) => Box::new(screens::settings::SettingsScreen::new(entry, *page)),
+            YtArg::SignIn => Box::new(screens::signin::SignInScreen::new(entry)),
+            YtArg::Menu(elem) => Box::new(screens::menu::MenuScreen::card(entry, *elem, cx)),
+            YtArg::PlayerMenu => Box::new(screens::menu::MenuScreen::player(entry, cx)),
         }
     }
 }
 
-type Done = (Addr, Feed, Result<yt_core::model::Page, String>);
+type Done = (Addr, Work);
+
+/// Results workers post back to the main thread.
+enum Work {
+    Page { key: FeedKey, page: yt_core::model::Page, append: bool, failed: Option<String> },
+    Suggestions(Vec<String>),
+    SignIn(SignIn),
+}
 
 pub struct AppRig {
     mounter: Mount,
-    pub home: Vec<Card>,
+    pub store: Store,
+    pub player_view: PlayerView,
+    pub signin: SignIn,
+    pub now_ms: u32,
     measure: plx_gfx::text::TtfMeasure,
-    session: Arc<Mutex<Option<yt_core::session::Session>>>,
+    pub session: Arc<Mutex<Option<yt_core::session::Session>>>,
     done: Arc<Mutex<Vec<Done>>>,
+    signin_cancel: Arc<std::sync::atomic::AtomicBool>,
     next_req: u32,
-    pub player: crate::player::Player,
+    pub player: Player,
 }
 
 impl AppRig {
     pub fn new() -> Self {
+        let mut store = Store::new(Settings::load());
+        store.signed_in = yt_core::paths::data_file("token.json").exists();
         AppRig {
             mounter: Mount,
-            home: Vec::new(),
+            store,
+            player_view: PlayerView::default(),
+            signin: SignIn::Idle,
+            now_ms: 0,
             measure: plx_gfx::text::TtfMeasure,
             session: Default::default(),
             done: Default::default(),
+            signin_cancel: Default::default(),
             next_req: 0,
-            player: crate::player::Player::new(),
+            player: Player::new(),
         }
     }
 
@@ -164,50 +219,105 @@ impl AppRig {
         Addr { to, req: RequestId(self.next_req) }
     }
 
-    /// Main thread, once per frame: moves finished worker results into the views and returns the
-    /// notifications for the screens that asked.
-    pub fn drain(&mut self) -> Vec<(Addr, YtMsg)> {
+    fn spawn(&mut self, from: MachineId, name: &'static str, job: impl FnOnce(&Mutex<Option<yt_core::session::Session>>) -> Work + Send + 'static) {
+        let addr = self.next_addr(from);
+        let (session, done) = (self.session.clone(), self.done.clone());
+        let spawned = plx_base::task::spawn(name, move || {
+            let r = job(&session);
+            done.lock().unwrap().push((addr, r));
+            plx_machine::present::wake_from_worker();
+        });
+        if spawned.is_none() {
+            crate::log(&format!("{name}: could not start worker thread"));
+        }
+    }
+
+    /// Main thread, once per frame: snapshot the player, move finished worker results into the
+    /// store, and return the notifications for the screens that asked.
+    pub fn drain(&mut self, now_ms: u32) -> Vec<(Addr, YtMsg)> {
+        self.now_ms = now_ms;
+        self.player_view = self.player.status.lock().unwrap().clone();
+        if let Some((_, until)) = &self.store.toast {
+            if now_ms > *until {
+                self.store.toast = None;
+            }
+        }
         let done = std::mem::take(&mut *self.done.lock().unwrap());
-        done.into_iter()
-            .map(|(addr, feed, r)| match r {
-                Ok(page) => {
-                    let cards = cards_of(&page);
-                    crate::log(&format!("feed {feed:?}: {} cards", cards.len()));
-                    self.home = cards;
-                    (addr, YtMsg::Loaded(feed))
+        let mut out = Vec::new();
+        for (addr, work) in done {
+            match work {
+                Work::Page { key, page, append, failed } => {
+                    if let Some(e) = failed {
+                        crate::log(&format!("feed {key:?} failed: {e}"));
+                        self.store.fail(&key, e.clone());
+                        out.push((addr, YtMsg::Failed(key, e)));
+                    } else {
+                        self.store.apply(&key, page, append);
+                        crate::log(&format!("feed {key:?}: {} cards", self.store.cards(&key).len()));
+                        out.push((addr, YtMsg::Loaded(key)));
+                    }
                 }
-                Err(e) => {
-                    crate::log(&format!("feed {feed:?} failed: {e}"));
-                    (addr, YtMsg::Failed(feed, e))
+                Work::Suggestions(s) => {
+                    self.store.suggestions = s;
+                    out.push((addr, YtMsg::Suggestions));
                 }
-            })
-            .collect()
+                Work::SignIn(s) => {
+                    if let SignIn::Done(name) = &s {
+                        self.store.signed_in = true;
+                        self.store.account = Some(name.clone());
+                        self.store.feeds.clear();
+                        *self.session.lock().unwrap() = None;
+                    }
+                    self.signin = s;
+                    out.push((addr, YtMsg::SignIn));
+                }
+            }
+        }
+        out
+    }
+
+    pub fn idle_blank_ms(&self) -> u32 {
+        self.store.settings.idle_blank_secs.max(30) * 1000
+    }
+
+    pub fn playing(&self) -> bool {
+        self.player_view.phase == Phase::Playing
     }
 }
 
-fn cards_of(page: &yt_core::model::Page) -> Vec<Card> {
-    let mut seen = std::collections::HashSet::new();
-    page.shelves
-        .iter()
-        .flat_map(|s| s.items.iter())
-        .filter(|it| seen.insert(it.id.clone()))
-        .enumerate()
-        .map(|(i, it)| Card {
-            elem: i as u32 + 1,
-            video_id: match &it.endpoint {
-                Some(yt_core::model::Endpoint::Watch { video_id, .. }) if !video_id.is_empty() => video_id.clone(),
-                _ => String::new(),
-            },
-            title: it.title.clone(),
-            detail: it.lines.join(" \u{2022} "),
-            thumb: it.thumbnail.clone().unwrap_or_default(),
-        })
-        .collect()
+/// Worker: the shared signed-in session, created on first use.
+pub fn with_session<T>(
+    session: &Mutex<Option<yt_core::session::Session>>,
+    f: impl FnOnce(&mut yt_core::session::Session) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let mut g = session.lock().unwrap();
+    if g.is_none() {
+        *g = Some(yt_core::session::Session::new()?);
+    }
+    f(g.as_mut().unwrap())
+}
+
+fn load_page(session: &Mutex<Option<yt_core::session::Session>>, key: &FeedKey, continuation: Option<String>) -> Work {
+    let r = with_session(session, |s| match (&continuation, key) {
+        (Some(c), k) => s.more(k.endpoint(), c),
+        (None, FeedKey::Section(sec)) => s.browse(sec.browse_id(), None),
+        (None, FeedKey::Browse { id, params }) => s.browse(id, params.as_deref()),
+        (None, FeedKey::Search { query, params }) => s.search(query, params.as_deref()),
+        (None, FeedKey::Related(_)) => Ok(Default::default()),
+    });
+    match r {
+        Ok(page) => Work::Page { key: key.clone(), page, append: continuation.is_some(), failed: None },
+        Err(e) => Work::Page { key: key.clone(), page: Default::default(), append: false, failed: Some(format!("{e:#}")) },
+    }
 }
 
 impl Rig<YtHost> for AppRig {
     fn split(&mut self) -> Split<'_, YtHost> {
-        Split { mounter: &mut self.mounter, views: Views { home: &self.home }, measure: &self.measure }
+        Split {
+            mounter: &mut self.mounter,
+            views: Views { store: &self.store, player: &self.player_view, signin: &self.signin, now_ms: self.now_ms },
+            measure: &self.measure,
+        }
     }
     fn deliver(&mut self, _to: MachineId, _msg: &YtMsg, _p: &CxParts<u32>, _fx: &mut Effects<'_, YtHost>) -> Handled {
         Handled::No
@@ -215,25 +325,66 @@ impl Rig<YtHost> for AppRig {
     fn timer(&mut self, _o: MachineId, _id: TimerId, _p: &CxParts<u32>, _fx: &mut Effects<'_, YtHost>) {}
     fn app_fx(&mut self, from: MachineId, fx: YtFx, _p: &CxParts<u32>, _out: &mut Effects<'_, YtHost>) {
         match fx {
-            YtFx::Load(feed) => {
-                let addr = self.next_addr(from);
-                let (session, done) = (self.session.clone(), self.done.clone());
-                let spawned = plx_base::task::spawn("feed", move || {
-                    let r = load(&session, feed).map_err(|e| format!("{e:#}"));
-                    done.lock().unwrap().push((addr, feed, r));
-                    plx_machine::present::wake_from_worker();
-                });
-                if spawned.is_none() {
-                    crate::log("feed: could not start worker thread");
+            YtFx::Load(key) => {
+                if self.store.feed(&key).is_some_and(|f| f.loading) {
+                    return;
                 }
+                self.store.mark_loading(&key);
+                self.spawn(from, "feed", move |s| load_page(s, &key, None));
             }
-            YtFx::Play(id) => {
-                crate::log(&format!("play {id}"));
-                self.player.start(id, self.session.clone());
+            YtFx::More(key) => {
+                let Some(f) = self.store.feed(&key) else { return };
+                if f.loading {
+                    return;
+                }
+                let Some(c) = f.continuation.clone() else { return };
+                self.store.mark_loading(&key);
+                self.spawn(from, "more", move |s| load_page(s, &key, Some(c)));
+            }
+            YtFx::Play { video_id, playlist } => {
+                crate::log(&format!("play {video_id} (playlist {playlist:?})"));
+                let s = &self.store.settings;
+                let prefs = yt_core::streams::Prefs { min_height: s.min_height as u64, max_height: s.max_height as u64, codec: "avc1" };
+                self.player.start(video_id, self.session.clone(), prefs);
             }
             YtFx::Stop => self.player.stop(),
             YtFx::TogglePause => self.player.toggle_pause(),
             YtFx::SeekBy(ms) => self.player.seek_by(ms),
+            YtFx::SeekTo(ms) => self.player.seek_to(ms),
+            YtFx::SetSpeed(r) => self.player.set_rate(r),
+            YtFx::Suggest(prefix) => {
+                self.spawn(from, "suggest", move |s| Work::Suggestions(with_session(s, |s| s.suggestions(&prefix)).unwrap_or_default()));
+            }
+            YtFx::EditSettings(f) => {
+                f(&mut self.store.settings);
+                self.store.settings.save();
+            }
+            YtFx::SignInStart => {
+                self.signin = SignIn::Starting;
+                self.signin_cancel.store(false, std::sync::atomic::Ordering::SeqCst);
+                let cancel = self.signin_cancel.clone();
+                let done = self.done.clone();
+                let addr = self.next_addr(from);
+                let _ = plx_base::task::spawn("signin", move || {
+                    let post = |state: SignIn| {
+                        done.lock().unwrap().push((addr, Work::SignIn(state)));
+                        plx_machine::present::wake_from_worker();
+                    };
+                    if let Err(e) = crate::signin::run(&cancel, &post) {
+                        post(SignIn::Failed(format!("{e:#}")));
+                    }
+                });
+            }
+            YtFx::SignInCancel => self.signin_cancel.store(true, std::sync::atomic::Ordering::SeqCst),
+            YtFx::SignOut => {
+                let _ = std::fs::remove_file(yt_core::paths::data_file("token.json"));
+                self.store.signed_in = false;
+                self.store.account = None;
+                self.store.feeds.clear();
+                *self.session.lock().unwrap() = None;
+                self.signin = SignIn::Idle;
+            }
+            YtFx::Toast(m) => self.store.toast(m, self.now_ms),
         }
     }
     fn log(&mut self, line: &str) {
@@ -254,19 +405,5 @@ impl Rig<YtHost> for AppRig {
     }
     fn back_at_root(&mut self) {
         plx_platform::tv::home::go_home()
-    }
-}
-
-/// Worker thread: one shared signed-in session, created on first use.
-fn load(session: &Mutex<Option<yt_core::session::Session>>, feed: Feed) -> anyhow::Result<yt_core::model::Page> {
-    let mut guard = session.lock().unwrap();
-    if guard.is_none() {
-        *guard = Some(yt_core::session::Session::new()?);
-    }
-    let s = guard.as_mut().unwrap();
-    match feed {
-        Feed::Home => s.home(),
-        Feed::Subscriptions => s.subscriptions(),
-        Feed::History => s.history(),
     }
 }

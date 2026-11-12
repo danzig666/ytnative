@@ -1,0 +1,176 @@
+//! User settings (SmartTube's options that make sense on webOS), persisted as JSON in the app's
+//! data directory. Unknown/missing fields fall back to defaults so old files keep loading.
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Codec {
+    Avc,
+    Vp9,
+    Av1,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Repeat {
+    /// Play the next suggestion when a video ends.
+    Autoplay,
+    /// Stop at the end.
+    Off,
+    /// Repeat the current video.
+    One,
+    /// Repeat the current playlist / queue.
+    List,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SbAction {
+    Off,
+    Skip,
+    SkipWithToast,
+    Ask,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    // Playback
+    pub max_height: u32,
+    pub min_height: u32,
+    pub codec: Codec,
+    pub speed: f32,
+    pub remember_speed_per_channel: bool,
+    pub seek_step_secs: u32,
+    pub repeat: Repeat,
+    pub resume_playback: bool,
+    pub hud_timeout_secs: u32,
+    pub show_clock: bool,
+    pub show_ending_time: bool,
+    // Subtitles
+    pub subtitles: bool,
+    pub subtitle_language: String,
+    pub subtitle_auto_translate: bool,
+    pub subtitle_size: u32,
+    pub subtitle_bottom_offset: u32,
+    // SponsorBlock / DeArrow / RYD
+    pub sponsorblock: bool,
+    pub sb_sponsor: SbAction,
+    pub sb_intro: SbAction,
+    pub sb_outro: SbAction,
+    pub sb_interaction: SbAction,
+    pub sb_selfpromo: SbAction,
+    pub sb_music_offtopic: SbAction,
+    pub sb_preview: SbAction,
+    pub sb_filler: SbAction,
+    pub sb_skip_once: bool,
+    pub sb_markers: bool,
+    pub dearrow_titles: bool,
+    pub dearrow_thumbnails: bool,
+    pub return_dislikes: bool,
+    // Content filters
+    pub hide_shorts_home: bool,
+    pub hide_shorts_subscriptions: bool,
+    pub hide_shorts_search: bool,
+    pub hide_watched: bool,
+    pub hide_upcoming: bool,
+    pub hide_mixes: bool,
+    pub blocked_channels: Vec<String>,
+    // Interface
+    pub sections: Vec<String>,
+    pub boot_section: String,
+    pub idle_blank_secs: u32,
+    pub time_24h: bool,
+    pub ui_language: String,
+    pub content_country: String,
+    // Remote
+    pub lounge_enabled: bool,
+    pub device_name: String,
+    // Parental
+    pub child_mode: bool,
+    pub settings_pin: String,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            max_height: 1080,
+            min_height: 720,
+            codec: Codec::Avc,
+            speed: 1.0,
+            remember_speed_per_channel: false,
+            seek_step_secs: 10,
+            repeat: Repeat::Autoplay,
+            resume_playback: true,
+            hud_timeout_secs: 4,
+            show_clock: true,
+            show_ending_time: true,
+            subtitles: false,
+            subtitle_language: "en".into(),
+            subtitle_auto_translate: false,
+            subtitle_size: 44,
+            subtitle_bottom_offset: 90,
+            sponsorblock: true,
+            sb_sponsor: SbAction::SkipWithToast,
+            sb_intro: SbAction::Off,
+            sb_outro: SbAction::Off,
+            sb_interaction: SbAction::Off,
+            sb_selfpromo: SbAction::SkipWithToast,
+            sb_music_offtopic: SbAction::Off,
+            sb_preview: SbAction::Off,
+            sb_filler: SbAction::Off,
+            sb_skip_once: true,
+            sb_markers: true,
+            dearrow_titles: false,
+            dearrow_thumbnails: false,
+            return_dislikes: true,
+            hide_shorts_home: false,
+            hide_shorts_subscriptions: false,
+            hide_shorts_search: false,
+            hide_watched: false,
+            hide_upcoming: false,
+            hide_mixes: false,
+            blocked_channels: Vec::new(),
+            sections: crate::store::Section::ALL.iter().map(|s| s.key().to_string()).collect(),
+            boot_section: "home".into(),
+            idle_blank_secs: 120,
+            time_24h: true,
+            ui_language: "system".into(),
+            content_country: "".into(),
+            lounge_enabled: true,
+            device_name: "ytnative".into(),
+            child_mode: false,
+            settings_pin: String::new(),
+        }
+    }
+}
+
+impl Settings {
+    fn path() -> std::path::PathBuf {
+        yt_core::paths::data_file("settings.json")
+    }
+
+    pub fn load() -> Settings {
+        std::fs::read_to_string(Self::path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+    }
+
+    pub fn save(&self) {
+        if let Ok(s) = serde_json::to_string_pretty(self) {
+            let tmp = Self::path().with_extension("json.tmp");
+            if std::fs::write(&tmp, s).is_ok() {
+                let _ = std::fs::rename(&tmp, Self::path());
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_fields_take_defaults() {
+        let s: Settings = serde_json::from_str(r#"{"max_height": 2160}"#).unwrap();
+        assert_eq!(s.max_height, 2160);
+        assert_eq!(s.seek_step_secs, 10);
+        assert!(s.sponsorblock);
+    }
+}

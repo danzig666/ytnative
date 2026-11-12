@@ -19,6 +19,7 @@ plx_ui = { path = "../../vendor/plx/rust-modules/ui" }
 yt-core = { path = "../yt-core" }
 anyhow.workspace = true
 serde_json.workspace = true
+serde.workspace = true
 reqwest.workspace = true
 
 [build-dependencies]

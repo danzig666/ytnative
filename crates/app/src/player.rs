@@ -42,6 +42,11 @@ pub enum Phase {
 #[derive(Clone, Debug, Default)]
 pub struct Status {
     pub phase: Phase,
+    pub video_id: String,
+    pub channel_id: String,
+    pub storyboard: Option<String>,
+    pub captions: Vec<yt_core::streams::CaptionTrack>,
+    pub rate: f32,
     pub title: String,
     pub author: String,
     pub position_ms: u64,
@@ -63,6 +68,11 @@ impl Player {
         Player { status: Default::default(), window: None, media_id: Default::default(), luna: None }
     }
 
+    /// A playback session (and its video window) exists.
+    pub fn active(&self) -> bool {
+        self.window.is_some()
+    }
+
     fn bus(&mut self) -> Option<&'static Luna> {
         if self.luna.is_none() {
             match Luna::connect(plx_base::paths::app_id()) {
@@ -74,9 +84,9 @@ impl Player {
     }
 
     /// Main thread. Starts playback of `video_id`; `session` resolves streams on the worker.
-    pub fn start(&mut self, video_id: String, session: Arc<Mutex<Option<yt_core::session::Session>>>) {
+    pub fn start(&mut self, video_id: String, session: Arc<Mutex<Option<yt_core::session::Session>>>, prefs: yt_core::streams::Prefs) {
         self.stop();
-        *self.status.lock().unwrap() = Status { phase: Phase::Resolving, ..Default::default() };
+        *self.status.lock().unwrap() = Status { phase: Phase::Resolving, rate: 1.0, ..Default::default() };
         let Some(create) = sdl_sym::<CreateFn>("SDL_webOSCreateExportedWindow") else {
             self.fail("no SDL exported-window support on this TV");
             return;
@@ -100,7 +110,7 @@ impl Player {
         };
         let (status, media_id) = (self.status.clone(), self.media_id.clone());
         let spawned = plx_base::task::spawn("play", move || {
-            if let Err(e) = run(luna, &video_id, &window_id, &session, &status, &media_id) {
+            if let Err(e) = run(luna, &video_id, &window_id, &session, &status, &media_id, prefs) {
                 crate::log(&format!("player: {e:#}"));
                 status.lock().unwrap().phase = Phase::Failed(format!("{e:#}"));
             }
@@ -127,12 +137,32 @@ impl Player {
         });
     }
 
+    pub fn seek_to(&mut self, to_ms: u64) {
+        let pos = self.status.lock().unwrap().position_ms as i64;
+        self.seek_by(to_ms as i64 - pos);
+    }
+
+    /// Playback speed (0.25..2.0) through uMediaServer's setPlayRate.
+    pub fn set_rate(&mut self, rate: f32) {
+        let Some(luna) = self.luna else { return };
+        let Some(mid) = self.media_id.lock().unwrap().clone() else { return };
+        self.status.lock().unwrap().rate = rate;
+        let payload = format!(r#"{{"mediaId":{},"playRate":{rate},"audioOutput":true}}"#, json_str(&mid));
+        let _ = plx_base::task::spawn("media", move || {
+            let r = luna.call("luna://com.webos.media/setPlayRate", &payload);
+            crate::log(&format!("player: setPlayRate -> {r}"));
+        });
+    }
+
     pub fn seek_by(&mut self, delta_ms: i64) {
         let Some(luna) = self.luna else { return };
         let Some(mid) = self.media_id.lock().unwrap().clone() else { return };
         let (pos, dur) = {
-            let s = self.status.lock().unwrap();
-            (s.position_ms as i64, s.duration_ms as i64)
+            let mut s = self.status.lock().unwrap();
+            let to = (s.position_ms as i64 + delta_ms).clamp(0, (s.duration_ms as i64 - 1000).max(0));
+            let before = s.position_ms as i64;
+            s.position_ms = to as u64; // show the target immediately; events correct it
+            (before, s.duration_ms as i64)
         };
         let to = (pos + delta_ms).clamp(0, (dur - 1000).max(0));
         let payload = format!(r#"{{"mediaId":{},"position":{to}}}"#, json_str(&mid));
@@ -170,6 +200,7 @@ fn run(
     session: &Mutex<Option<yt_core::session::Session>>,
     status: &Arc<Mutex<Status>>,
     media_id: &Arc<Mutex<Option<String>>>,
+    prefs: yt_core::streams::Prefs,
 ) -> anyhow::Result<()> {
     let resolved = {
         let mut g = session.lock().unwrap();
@@ -185,7 +216,14 @@ fn run(
         s.duration_ms = resolved.length_secs * 1000;
         s.phase = Phase::Loading;
     }
-    let mpd = resolved.mpd(Default::default()).ok_or_else(|| anyhow::anyhow!("no H.264 streams for this video"))?;
+    {
+        let mut s = status.lock().unwrap();
+        s.video_id = video_id.to_string();
+        s.channel_id = resolved.channel_id.clone();
+        s.storyboard = resolved.storyboard_spec.clone();
+        s.captions = resolved.captions.clone();
+    }
+    let mpd = resolved.mpd(prefs).ok_or_else(|| anyhow::anyhow!("no H.264 streams for this video"))?;
     let path = "/tmp/ytnative/play.mpd";
     std::fs::create_dir_all("/tmp/ytnative")?;
     std::fs::write(path, mpd)?;
