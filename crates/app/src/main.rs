@@ -62,7 +62,9 @@ fn main() {
             let (k, v) = (CString::new(k).unwrap(), CString::new(v).unwrap());
             sdl::SDL_SetHint(k.as_ptr(), v.as_ptr());
         };
-        hint("SDL_VIDEO_ALLOW_SCREENSAVER", "0");
+        // Let the TV's own screensaver run outside playback (OLED burn-in protection); the
+        // media pipeline keeps the panel awake while a video actually plays.
+        hint("SDL_VIDEO_ALLOW_SCREENSAVER", "1");
         if sdl::SDL_Init(sdl::SDL_INIT_VIDEO) != 0 {
             log(&format!("SDL_Init failed: {}", sdl::error()));
             std::process::exit(1);
@@ -112,6 +114,11 @@ fn main() {
         let mut ev = [0u8; 128];
         let mut prev = 0u32;
         let mut running = true;
+        // OLED protection: blank the screen after IDLE_BLANK_MS without input unless a video is
+        // playing. Any key wakes it and is swallowed.
+        const IDLE_BLANK_MS: u32 = 120_000;
+        let mut last_input = sdl::SDL_GetTicks();
+        let mut blanked = false;
         let mut foreground = true;
         while running {
             let now = sdl::SDL_GetTicks();
@@ -154,6 +161,26 @@ fn main() {
                 }
             }
 
+            if !inputs.is_empty() {
+                last_input = now;
+                if blanked {
+                    blanked = false;
+                    inputs.clear(); // the waking key does nothing else
+                    plx_machine::idle::invalidate();
+                    log("idle: wake");
+                }
+            }
+            let playing = rig.player.status.lock().unwrap().phase == player::Phase::Playing;
+            if playing {
+                last_input = now;
+            }
+            if !blanked && now.wrapping_sub(last_input) > IDLE_BLANK_MS {
+                blanked = true;
+                log("idle: blank screen (no input, nothing playing)");
+                plx_gfx::gfx::frame_clear(0.0, 0.0, 0.0);
+                sdl::SDL_GL_SwapWindow(win);
+            }
+
             plx_machine::idle::frame_begin(dt);
             images::THUMBS.deliver();
             let results = rig.drain();
@@ -161,7 +188,7 @@ fn main() {
             d.prune(&r.unmounted);
             plx_ui::tex::note_queued(&mut d.budget);
 
-            let present = foreground && (r.presented || plx_machine::idle::should_present(now) || plx_ui::tex::has_pending());
+            let present = foreground && !blanked && (r.presented || plx_machine::idle::should_present(now) || plx_ui::tex::has_pending());
             if present {
                 plx_gfx::text::begin_frame();
                 let (x, y, w, h) = plx_base::surface::viewport();
