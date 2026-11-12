@@ -29,6 +29,7 @@ cargo xtask <command>
   logs [n]              show the app's log on the TV
   uninstall             remove the app from the TV
   ssh <cmd...>          run a command on the TV
+  shot [file] [method]  screenshot the TV (DISPLAY = video+UI, VIDEO, GRAPHIC) to target/shots/
   pull-sysroot          copy the TV's shared libraries we link/check against into sysroot/
   symcheck              verify every dynamic symbol the TV binary imports exists on the TV
 ";
@@ -54,6 +55,7 @@ fn run() -> Result<()> {
         Some("logs") => logs(args.get(1).and_then(|s| s.parse().ok()).unwrap_or(80)),
         Some("uninstall") => uninstall(),
         Some("ssh") => tv_ssh_print(&args[1..].join(" ")),
+        Some("shot") => shot(args.get(1).map(String::as_str), args.get(2).map(String::as_str).unwrap_or("DISPLAY")),
         Some("pull-sysroot") => pull_sysroot(),
         Some("symcheck") => symcheck(),
         _ => {
@@ -333,6 +335,28 @@ fn uninstall() -> Result<()> {
     let id = app_field("id")?;
     let r = luna("luna://com.webos.appInstallService/dev/remove", &format!(r#"{{"id":"{id}"}}"#))?;
     println!("remove: {}", r.trim());
+    Ok(())
+}
+
+/// Screen capture through the TV's own capture service, which taps the final panel output
+/// (method DISPLAY composites the video plane and the UI plane, as plx-native found).
+fn shot(file: Option<&str>, method: &str) -> Result<()> {
+    std::fs::create_dir_all("target/shots")?;
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+    let local = file.map(PathBuf::from).unwrap_or_else(|| PathBuf::from(format!("target/shots/tv-{stamp}.jpg")));
+    let fmt = if local.extension().is_some_and(|e| e == "png") { "PNG" } else { "JPEG" };
+    let remote = format!("{TV_TMP}/shot.{}", fmt.to_lowercase().replace("jpeg", "jpg"));
+    let payload = format!(r#"{{"path":"{remote}","method":"{method}","width":1920,"height":1080,"format":"{fmt}"}}"#);
+    let r = tv_ssh(&format!("mkdir -p {TV_TMP}; luna-send -w 15000 -n 1 luna://com.webos.service.capture/executeOneShot '{payload}'"))?;
+    if !r.contains("\"returnValue\": true") && !r.contains("\"returnValue\":true") {
+        bail!("capture failed: {}", r.trim());
+    }
+    let st = Command::new("scp").args(ssh_base()?).arg("-q").arg(format!("root@{}:{remote}", tv_host()?)).arg(&local).status()?;
+    if !st.success() {
+        bail!("could not copy the capture");
+    }
+    tv_ssh(&format!("rm -f {remote}"))?;
+    println!("{}", local.display());
     Ok(())
 }
 

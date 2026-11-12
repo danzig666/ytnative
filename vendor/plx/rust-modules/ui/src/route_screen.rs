@@ -1,0 +1,2484 @@
+//! Shared full-screen route geometry used by Settings and its children.
+//!
+//! A route screen is a two-column composition, not a bag of coordinates: a narrative column on
+//! the left, a content column on the right, and one bottom action row. Screens supply words and
+//! state; this module owns every spatial relationship between them.
+//!
+//! # Where BACK goes is the CRUMB, never a hint in the action band
+//!
+//! A route in this family that was arrived at from somewhere says so on one caption line above
+//! its title: a left-pointing chevron and the name of the place BACK returns to (see
+//! [`RouteLayout::draw_narrative`]). That line replaced the `Press [BACK] to return` hint this
+//! family used to draw in the bottom action row, and the trade is the point rather than a tidy-up
+//! — the hint spent a whole 60px band restating a key the remote already has, and it could not
+//! say where the key WENT, which on a three-deep push (Settings → Legal notices → a document) is
+//! the only part anybody needs. Freeing the band is what lets first-run consent put its two
+//! answers there ([`RouteLayout::action_pair`]) instead of hiding them among the readable rows of
+//! its list.
+//!
+//! **The rule for `None` is "BACK does not go anywhere inside the app", not "the Settings root".**
+//! Three routes qualify today and a hard count here would be the fourth transcription of a number
+//! this project keeps letting rot — take the census by CALL SITE: a screen composed through
+//! `table_screen.rs` names its crumb in `Header::new(layout, None, …)` and the literal
+//! `Header::paint` calls `draw_narrative_pending`; `draw_narrative` wraps it for callers without loading copy, so
+//! `git grep -nE 'draw_narrative(_pending)?\(|Header::new\(' -- 'rust-modules/ui/src/*.rs' 'rust-modules/screens/src/*.rs'`
+//! with the `None` crumbs read off each site is the census — a call-site grep rather than a
+//! transcribed count exactly so a file move cannot make it stale silently, which already happened
+//! once: phase 5b moved every real screen of this family out of `ui/` and into `screens/`, and a
+//! pathspec of `'rust-modules/ui/src/*.rs'` alone now matches neither of the family's `Header::new`
+//! sites at all (grepping the method alone, even over both directories, now finds only ONE of the
+//! three — `ui/login.rs`'s QR sign-in, the one screen here that never joined the family's
+//! `Header`/`TableScreen` — because 5b moved the FIRST first-run consent stage's `None` crumb
+//! behind `Header::new` too, beside the Settings root's since 5a). They are the Settings modal
+//! (BACK leaves the family), the FIRST first-run consent question (sign-in is behind it and
+//! cannot be undone) and the QR sign-in itself (there is no app behind it yet).
+//!
+//! # ONE focus model for the whole family
+//!
+//! Every screen here is the same two regions: the **content column** on the right (a table of
+//! rows, or a document), and the **action band** at the bottom of the left column (0, 1 or 2
+//! controls). [`RouteFocus`] holds where focus is and [`RouteShape`] is what a screen tells it
+//! about itself this frame; the rules below are pure, live here, and every screen in the family
+//! obeys all of them. They exist because the family had drifted into five different answers —
+//! Legal entered on RIGHT and left on LEFT while the Settings root ignored both; the Home editor
+//! reached its Done pill only with LEFT; Privacy & data jumped focus onto Done after a toggle and
+//! then had no way back; and first-run consent's two answers could not be left rightward at all.
+//!
+//! 1. **UP/DOWN walk the content column.** A table moves its selection; a document scrolls.
+//! 2. **DOWN off the LAST row enters the band**, on the control the band's cursor last rested on.
+//! 3. **UP leaves the band for the content column**, on the row it left from — so 2 and 3 are an
+//!    exact round trip.
+//! 4. **DOWN on the band is the floor.** The band is the bottom of the screen; there is nothing
+//!    under it.
+//! 5. **LEFT from the content column enters the band**, on the same remembered control as rule 2.
+//!    (The band sits in the LEFT column, so this is the spatial move, not a shortcut.)
+//! 6. **LEFT inside the band steps to the control on its left.**
+//! 7. **RIGHT inside the band steps to the control on its right; from the trailing control it
+//!    returns to the content column** — the inverse of rule 5.
+//! 8. **RIGHT on a row that opens nested content (a chevron row) enters it**, exactly as OK does.
+//!    RIGHT on any other row does nothing.
+//! 9. **LEFT is BACK once there is nothing further to its left, UNLESS the screen is holding an
+//!    uncommitted edit** ([`RouteShape::uncommitted`]). This is what makes the crumb literal — it
+//!    is drawn as a left-pointing chevron naming where BACK goes, and LEFT follows it. The
+//!    exception is the one thing a directional key must never do: BACK on these screens DISCARDS
+//!    (Privacy & data drops its draft, the Home editor drops its — nothing was written), and
+//!    overshooting the band's leading control by one press is not consent to lose an edit.
+//!    **`uncommitted` is stated by the screen and is NOT "the screen has a band".** That inference
+//!    was this rule's first justification and it is false in both directions: the Home editor's
+//!    `Try again` is a band with no edit behind it, and first run's two answers are a band whose
+//!    BACK records nothing. So Settings-mode Retry and first-run consent both let LEFT follow
+//!    their crumb, while a dirty draft does not.
+//! 10. **Focus can never rest on nothing.** [`RouteFocus::settle`] runs after every rebuild: a band
+//!    that has gone away hands focus back to the content column, and a content column with no rows
+//!    hands it to the band. Privacy & data used to lose focus entirely by toggling a value back —
+//!    it parked focus on a Done that the same edit had just removed.
+//! 11. **The pointer PARKS focus and nothing else.** Hover moves focus to the row or band control
+//!    under the pointer on every screen in the family ([`ActionRow::hit`] +
+//!    [`crate::table::TableView::hit_row`]); a click activates whatever is parked; a click that
+//!    parks nothing does nothing.
+
+//! **Long translated action labels reflow as a column.** In that shape UP/DOWN move between
+//! the two answers, RIGHT reaches the content column, and UP above the first action leaves the
+//! band. First-run consent uses contextual answer labels in one row and a measured reading
+//! column. Exceptional overflow scrolls on UP/DOWN while the selected answer retains focus.
+//! The paragraph is never shortened to make translated actions fit.
+
+use crate::consts::SAFE;
+use crate::containers::modal::SURFACE_TEXT_HOLD_MAX_MS;
+use crate::hstack::{Align as StackAlign, HStack, Item as HItem};
+use crate::icons::{self, Icon};
+use crate::vstack::{Anchor, VSpan, VStack};
+use plx_machine::machine::Measure;
+use crate::text_view::TextView;
+use crate::underlay::{FrameLatch, Grade, Role, UnderlayField};
+use crate::widgets::ControlPalette;
+use crate::{theme, Painter, Rect, Spring};
+
+/// The route family shares a reading column independent of full-bleed hero artwork.
+const NARRATIVE_W: f32 = theme::layout::ROUTE_COPY_W;
+/// Two visually separate columns need a region gap, not a row gap.  Expressed entirely on the
+/// spacing ladder so a retune of that ladder moves every route together.
+const COLUMN_GAP: f32 = theme::space::XL * 2.0 + theme::space::LG + theme::space::SM;
+const TOP_INSET: f32 = theme::space::XL + theme::space::MD;
+const ACTION_H: f32 = crate::widgets::StatusOverlay::CTRL_H;
+/// The crumb's mark, drawn at the smallest rung a mark is worn at anywhere in the product. It is
+/// a return affordance rather than a heading, so it may not outweigh the caption beside it.
+const CRUMB_MARK: f32 = theme::size::MICRO as f32;
+/// The crumb LINE's height — the mark's, because the mark is the taller of the two things on it
+/// (a `CAPTION` cap band is a few px shorter) and both are centred in it.
+///
+/// A constant rather than a measured cap height, and that is not a shortcut: `text::cap_h` opens
+/// the font through SDL2_ttf, which the host suite cannot LINK, so a measured band would make
+/// every route's vertical flow ungradeable off-device — the boundary `ui/CLAUDE.md` records as
+/// stopping the whole suite linking rather than skipping one test.
+pub const CRUMB_BAND: f32 = CRUMB_MARK;
+/// How far above a title's top a crumb's band starts: the band and one [`theme::space::SM`] of air
+/// (the "tight" rung, a caption over the line it belongs to). The narrative flow spends it
+/// ([`RouteLayout::narrative_top`]), and a page whose heading is its own big title but which is not
+/// laid out by [`RouteLayout`] (the Collection screen) reserves the same rise above its title.
+pub const CRUMB_RISE: f32 = CRUMB_BAND + theme::space::SM;
+
+/// Where the crumb's word starts so that its CAP BAND is centred on the mark's centre `cy`.
+///
+/// `TextView` pins line 0's cap band to the frame's top, and the mark is centred in the band, so
+/// handing the word the band's top put its cap centre a few px ABOVE the chevron's — the word read
+/// as riding high off the line on every route that wears a crumb. The mark's ink is symmetric
+/// about its box (`chevron-left.svg` spans y=6..18 of 24), so its centre is the box centre and
+/// the two meet on `cy`. Takes the cap height as a PARAMETER for the reason `CRUMB_BAND` is a
+/// constant: measuring it opens the font through SDL2_ttf, which the host suite cannot link.
+fn crumb_label_top(cy: f32, cap_h: f32) -> f32 {
+    cy - cap_h * 0.5
+}
+
+/// **The one back-crumb painter** — a left chevron and the name of the place BACK returns to, in the
+/// caption rung and the tertiary ink, centred on `band`'s middle (`band.h` is [`CRUMB_BAND`]) and
+/// clipped to `band.w`. [`RouteLayout::draw_narrative`] draws every Settings-family route's crumb
+/// through it, and so does any other page whose heading is its own big title (the Collection
+/// screen): the mark, the offsets and the type live here and nowhere else, so a page cannot carry a
+/// crumb of its own that drifts from the family's.
+pub fn draw_back_crumb(p: Painter, band: Rect, back_to: &str, measure: &dyn Measure) {
+    let cy = band.y + band.h * 0.5;
+    // The mark by its INK, then the word `XS` off it. The mark's box stands on `band.x` (the stack
+    // starts at the ink, a margin in), so the ink-less margin never moves the crumb.
+    let (ink_l, _) = icons::ink_x(Icon::ChevronLeft);
+    let items = [HItem::glyph(Icon::ChevronLeft, CRUMB_MARK), HItem::new(0.0)];
+    let stack = HStack::new(&items, theme::space::XS, StackAlign::Leading(band.x + ink_l * CRUMB_MARK));
+    let mut spans = stack.placed();
+    let (mark, word) = (spans.next().expect("two items"), spans.next().expect("two items"));
+    icons::draw(
+        p,
+        Icon::ChevronLeft,
+        Rect::new(mark.box_x, cy - CRUMB_MARK * 0.5, CRUMB_MARK, CRUMB_MARK),
+        theme::TEXT_TERTIARY,
+    );
+    let x = word.x;
+    let ty = crumb_label_top(cy, measure.cap_h(theme::size::CAPTION));
+    TextView::new(back_to, theme::size::CAPTION, theme::TEXT_TERTIARY)
+        .max_lines(1)
+        .draw(p, Rect::new(x, ty, band.x + band.w - x, band.h));
+}
+
+const PUSH_K: f32 = 200.0;
+/// The narrative column's cross-fade runs on the appear token (`popover::K_APPEAR`, 300): a fade is
+/// not a journey, and it settles before the list that travels (design note m2/sv2-n7).
+const FADE_K: f32 = crate::popover::K_APPEAR;
+const PARENT_TRAVEL: f32 = 0.35;
+const CHILD_LEAD: f32 = 0.22;
+
+/// The fixed ground under a Settings-family route.
+///
+/// **PR2 stage B (2026-09-19):** it holds an [`UnderlayField`] rather than its own four-corner
+/// [`AmbientWash`](crate::widgets::AmbientWash) envelope, so it owns a GL texture and is no
+/// longer `Copy` — every owner already held it by field (a screen struct, exactly as before), so
+/// nothing but this type's own derive had to change. [`UnderlayField::latch_from_corners`] grades a
+/// four-corner source through the SAME `AmbientWash::keyed_one` a wash used to, so a route drawn
+/// from a seed or from the authored fallback reads the same colour it always did — the migration is
+/// a change of SHAPE, not of palette (see `ui::underlay`'s module doc). [`Self::draw_host`] is the
+/// one path that gets MORE than a corner envelope now: it latches from the rendered frame itself
+/// (120 cells, spatially faithful — title glyphs, faces and poster edges still cannot survive the
+/// reduction, exactly as a four-corner wash's wider blur could not, but the light that does is no
+/// longer four degrees of freedom) and only falls back to a corner envelope when the frame is not a
+/// readable source this frame. Once latched a ground never samples again; nested push/back
+/// transitions therefore move content over one stationary ground.
+pub struct RouteGround {
+    field: UnderlayField,
+}
+
+/// **The narrative title's line pitch.** `--size-hero`/**1.05**, which is the design system's own
+/// number (`components/panels/RouteScreen.jsx`: `font: var(--font-weight-bold) var(--size-hero)/1.05`)
+/// and NOT [`TextView`]'s derived default of `sz * 1.32`.
+///
+/// The default is a READING pitch — it is right for the copy under this title and for a synopsis,
+/// and wrong for one 72px line of display type, where 1.32 puts 95px of box under a 52px cap. On a
+/// one-line title every pixel of that surplus becomes air between the title and the copy, because
+/// [`RouteLayout::draw_narrative`] stacks the copy at `title_h + space::MD`: the family's stated
+/// 24px gap was arriving as ~43 (owner report on the Filmography route, 2026-09-06, which is simply
+/// where it was noticed — every route in this family drew it). On a WRAPPED title it is also the
+/// pitch between the two lines, and the same argument applies there: display type sets tight.
+const TITLE_LEADING: f32 = theme::size::HERO as f32 * 1.05;
+
+/// The picture slot's top (the board: y 440): a one-line title, [`crate::follow_copy::FOLLOW_LINES`]
+/// lines of sentence under it, and the air a picture wants.
+pub const PICTURE_TOP: f32 = 440.0;
+
+/// **The Settings page title rung** (Settings v2, `Sv2-6-Spec`: "48 bold on every Settings page"):
+/// the design system's `--size-display`. Read by [`TitleStyle::Page`] only, which the pages moved
+/// to the v2 board use ([`RouteLayout::settings_page`]); every other route keeps
+/// [`TitleStyle::Hero`] until its stage (first-run consent, the Privacy & data documents' readers).
+pub const PAGE_TITLE_SIZE: std::os::raw::c_int = theme::size::DISPLAY;
+const PAGE_TITLE_LEADING: f32 = PAGE_TITLE_SIZE as f32 * 1.05;
+/// The Page title's letter-spacing, the board's `-.02em`.
+const PAGE_TITLE_TRACKING_EM: f32 = -0.02;
+
+/// **How a route's narrative title sets**, chosen once on the [`RouteLayout`] so tabs, rows,
+/// focus and paint all read the same flow.
+///
+/// * [`Hero`](Self::Hero) is every route's own title: `--size-hero` (72), with a crumb PUSHING
+///   the title down by its band (first-run consent, sign-in, filmography, Legal, the library
+///   editors).
+/// * [`Page`](Self::Page) is the Settings pages moved to the v2 board so far (see
+///   [`RouteLayout::settings_page`]): `--size-display` (48), the title on the column's guide with
+///   the crumb hanging ABOVE it, so a nested page's title is at the root's y.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TitleStyle {
+    #[default]
+    Hero,
+    Page,
+}
+
+impl TitleStyle {
+    /// The title's rung.
+    pub const fn size(self) -> std::os::raw::c_int {
+        match self {
+            Self::Hero => theme::size::HERO,
+            Self::Page => PAGE_TITLE_SIZE,
+        }
+    }
+
+    /// The title's line pitch: 1.05 of its rung, the design system's number for display type.
+    pub const fn leading(self) -> f32 {
+        match self {
+            Self::Hero => TITLE_LEADING,
+            Self::Page => PAGE_TITLE_LEADING,
+        }
+    }
+
+    /// The title's letter-spacing in px: the Page title's board tracking (`-.02em`), none for Hero.
+    pub const fn tracking(self) -> f32 {
+        match self {
+            Self::Hero => 0.0,
+            Self::Page => PAGE_TITLE_TRACKING_EM * PAGE_TITLE_SIZE as f32,
+        }
+    }
+}
+
+impl RouteGround {
+    pub const fn new() -> Self {
+        Self {
+            field: UnderlayField::new(),
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.field.reset();
+    }
+
+    /// `theme::ROUTE_GROUND_FALLBACK`, dropping its alpha column — the corners every authored
+    /// atmosphere below reaches for when it has no artwork to key from: the pre-Home fallback
+    /// ([`Self::authored`], [`Self::draw_default`]) and, since PR2 stage B,
+    /// [`Self::draw_host`]'s own answer when the live frame is not a readable source this frame.
+    fn fallback_corners() -> [[f32; 3]; 4] {
+        theme::ROUTE_GROUND_FALLBACK.map(|c| [c[0], c[1], c[2]])
+    }
+
+    /// A pre-content page's ground: the authored default ambient, latched at construction.
+    /// Neither construction nor drawing this UI value reads a catalog or session file.
+    ///
+    /// It is deliberately NOT keyed from any artwork — not a hero's `UltraBlur` corners, not a
+    /// remembered one. The first-run pages (favourite libraries, the consent question) open before
+    /// Home has anything to show, and keying them from whatever hero the server happened to list
+    /// painted a saturated rainbow wherever the art's corners were. The authored fallback is not
+    /// artwork, it IS the finished colour ([`Grade::Dim`], the identity grade) — see
+    /// `theme::ROUTE_GROUND_FALLBACK`'s own doc for why grading it again would be wrong.
+    pub fn authored() -> Self {
+        let mut ground = Self::new();
+        ground.field.latch_from_corners(Self::fallback_corners(), Grade::Dim);
+        ground
+    }
+
+    /// Freeze the page that was already drawn this frame. Its one caller is the Settings modal,
+    /// which opens over Home; first-run consent takes [`Self::draw_home`] instead, because since
+    /// the consent question moved ahead of the profile picker it usually has no rendered host to
+    /// sample at all.
+    ///
+    /// `latch_from_frame` refuses on `gfx::field_kick`'s list (§9's video-plane door among them —
+    /// see [`plx_gfx::gfx::field_kick`]'s doc): whenever it answers [`FrameLatch::Refused`] this falls
+    /// back to the same authored atmosphere [`Self::draw_default`] uses when it has no host at all,
+    /// graded [`Grade::Ground`] because it is standing in for a live sample rather than being drawn
+    /// as itself.
+    ///
+    /// Split from the draw call below (`latch_host` / `draw_host`) so a host test can prove the
+    /// live-frame-fails-so-fall-back-to-corners decision without ever reaching `field.draw`'s real
+    /// GL: a host test binary links `OpenGL.framework` but never creates a context, so any draw that
+    /// is not gated behind a `PROG == 0`/`tex == 0` check (`field.draw`'s `Role::Ground` arm is not,
+    /// once latched, is not either — see [`UnderlayField::draw`]) is an immediate SIGSEGV.
+    ///
+    /// The read never stalls the frame ([`UnderlayField::latch_from_frame`]): it lands a frame or
+    /// two into the Settings fade, and until it does the ground draws the flat app surface an
+    /// unlatched field falls back to, at the bottom of the appear ramp. Read synchronously it was
+    /// the 50 ms `surf` span of the Settings open frame on the television (2026-09-19), and 21 ms of
+    /// the frame after once deferred only while invisible. A pending read is not a refusal: the
+    /// corner fallback is for a frame with no honest source, and it latches for the life of the
+    /// ground.
+    fn latch_host(&mut self) {
+        // The host snapshot is the undimmed page when there is one (Settings caches its host), and
+        // it saves the chain its own full-screen copy; a route with no snapshot reads the frame.
+        let src = crate::popover::host::page_tex();
+        if self.field.latch_from_frame(Grade::Ground, src) == FrameLatch::Refused {
+            self.field.latch_from_corners(Self::fallback_corners(), Grade::Ground);
+        }
+    }
+
+    pub fn draw_host(&mut self, p: Painter) {
+        // `ModalStack::draw_scrims_on`'s rule, for its reason — see [`ground_reads_host`].
+        // Recording a layout must neither sample the framebuffer nor change its host latch.
+        if !p.is_recording() && ground_reads_host(p.opacity(), plx_gfx::gfx::snapshot_captured_this_frame()) {
+            self.latch_host();
+        }
+        self.field.draw(p, Rect::FULL, Role::Ground, 1.0);
+    }
+
+    /// Draw the pre-Home atmosphere captured at construction. Ordinary Settings samples its
+    /// rendered host through draw_host instead. No application reads or writes happen in draw.
+    pub fn draw_home(&mut self, p: Painter) {
+        self.draw_default(p);
+    }
+
+    /// The latch half of [`Self::draw_default`] — see [`Self::latch_host`] for why this is split
+    /// out from the draw call rather than inlined.
+    fn latch_default(&mut self) {
+        if !self.field.is_latched() {
+            self.field.latch_from_corners(Self::fallback_corners(), Grade::Dim);
+        }
+    }
+
+    /// Draw a pre-content route on the product's authored fallback atmosphere.
+    ///
+    /// Login and the profile ceremony have no Home frame and no media item to sample.  They still
+    /// belong to the same route family, so they take the same broad graphite/amber envelope as an
+    /// artwork-less first-run screen instead of inventing another flat background locally.
+    pub fn draw_default(&mut self, p: Painter) {
+        self.latch_default();
+        self.field.draw(p, Rect::FULL, Role::Ground, 1.0);
+    }
+
+    /// **The ground's own colour at one screen point.** Every `draw_*` above paints the field over
+    /// [`Rect::FULL`], so that is the rect the sample is taken against.
+    ///
+    /// It exists for an EDGE FADE. A route that scissor-clips a scrolling strip cuts it at a hard
+    /// line; laying this colour over the cut at a falling alpha dissolves it instead. The constant
+    /// a caller would otherwise guess cannot work here — the ground is keyed to the host page's
+    /// artwork, so it is a different colour on every person's page. Before the first latch this is
+    /// `theme::SURFACE_APP` everywhere, the same flat answer an unlatched field's own [`Role::Ground`]
+    /// draw falls back to — [`UnderlayField::sample`] has no such guard of its own (an unlatched
+    /// field's cells are zero, not the surface), so it belongs here rather than being forwarded raw.
+    pub fn sample(&self, x: f32, y: f32) -> [f32; 3] {
+        if self.field.is_latched() {
+            self.field.sample(x, y)
+        } else {
+            SURFACE_APP_RGB
+        }
+    }
+
+    pub fn palette(&self) -> ControlPalette {
+        ControlPalette::ambient(if self.field.is_latched() {
+            self.field.key()
+        } else {
+            SURFACE_APP_RGB
+        })
+    }
+
+    pub fn is_latched(&self) -> bool {
+        self.field.is_latched()
+    }
+}
+
+const SURFACE_APP_RGB: [f32; 3] = [
+    theme::SURFACE_APP[0],
+    theme::SURFACE_APP[1],
+    theme::SURFACE_APP[2],
+];
+
+/// The one nested-route transition of the Settings family: the surface's page push
+/// (`screens::settings::RouteSurface`) drives this for every Settings drill-down, the preference
+/// pickers included (`SettingsPage::Picker`), so every Settings submenu slides the same.
+///
+/// Only content moves: the host ground is drawn outside these painters and therefore remains
+/// fixed. The parent exits left while fading; the child leads from the right while appearing.
+/// Reversing `open` produces the exact inverse spring, so BACK never invents a second motion.
+pub struct RoutePush {
+    progress: Spring,
+    /// The narrative column's cross-fade, toward the same endpoint as `progress` but on
+    /// [`FADE_K`]. It moves nothing: a page that holds its narrative column
+    /// ([`PushFrame::narrative`]) fades its content with this and keeps its frame still.
+    fade: Spring,
+    /// A push waiting at its start for the destination's text ([`RoutePush::begin_warm`]).
+    warm: Option<Warm>,
+}
+
+/// **A push's pre-roll**: the springs wait at 0 while the incoming page's strings are rasterised
+/// off-screen, so the push's first drawn frame finds them resident.
+///
+/// A push commits at once: the destination is mounted and owns input before the spring moves, so
+/// its strings were first rasterised in the first frame the page was drawn. On the television a
+/// cold page (Video & playback, Language) cost that one frame 28-30 ms (`textx33:18.2`). The route
+/// dip never had the problem: its OUT half walks the staged destination through the text recorder
+/// and drains the queue under a budget (`Transition::prewarms_text`). This is the same walk for the
+/// surface's own spring.
+///
+/// The wait costs a warm page nothing. The frame the push is requested on is the probe: it draws
+/// the parent alone while the surface walks the destination ([`Screen::draw_warm`]), and the springs
+/// step on the next frame with the probe's `dt` added, so the push is exactly where it would have
+/// been without the wait. If that walk queued strings, the springs hold until the iteration's
+/// latched readiness ([`plx_gfx::text::surface_text_pending`]) says they are resident, for at most
+/// [`SURFACE_TEXT_HOLD_MAX_MS`], and then start from rest.
+#[derive(Clone, Copy, Debug)]
+struct Warm {
+    /// The destination has been walked at least once since the wait began.
+    walked: bool,
+    /// Frame time spent waiting, against the bound.
+    waited_ms: f32,
+    /// The probe frame's own `dt`, repaid to the springs when the wait ends the frame after it.
+    owed_us: u32,
+}
+
+/// **Which end of a push a page is on.**
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PushRole {
+    /// The page being left (a push) or returned to (a pop): exits left while fading.
+    Parent,
+    /// The page being entered (a push) or retired (a pop): leads in from the right while appearing.
+    Child,
+}
+
+/// **What a page is told about the push it is drawn under** (`DrawFrame::push`).
+///
+/// A page that does NOT hold its narrative column is drawn whole through [`RoutePush::parent`] /
+/// [`RoutePush::child`]'s painter, as it always was, and its frame carries no `PushFrame`. A page
+/// that does (the Settings v2 anatomy: title, crumb, sentence, picture and action band on the
+/// left, the table on the right) is drawn at the plain entrance painter with this frame, and its
+/// two columns take it separately:
+///
+/// - [`list`](Self::list) — the table: the child leads in from `.22 x screen-w`, the parent travels
+///   `.35 x screen-w` left, both fading, on the push spring (`PUSH_K`);
+/// - [`narrative`](Self::narrative) — the narrative column: its FRAME never moves, its content
+///   cross-fades (parent out, child in) on the appear token.
+///
+/// Pure arithmetic over the two spring positions, so every frame of a push is testable without a
+/// GL context.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct PushFrame {
+    pub role: PushRole,
+    /// The push spring's position, `0..=1`.
+    pub list: f32,
+    /// The narrative cross-fade's position, `0..=1`.
+    pub fade: f32,
+}
+
+impl PushFrame {
+    /// The table's painter: translate and alpha, from the push spring.
+    pub fn list(self, p: Painter) -> Painter {
+        let t = self.list.clamp(0.0, 1.0);
+        match self.role {
+            PushRole::Parent => p.alpha(1.0 - t).translate(-PARENT_TRAVEL * Rect::FULL.w * t, 0.0),
+            PushRole::Child => p.alpha(t).translate(CHILD_LEAD * Rect::FULL.w * (1.0 - t), 0.0),
+        }
+    }
+
+    /// The narrative column's painter: alpha only, from the fade spring. The column is where it
+    /// was before the push and where it will be after it.
+    pub fn narrative(self, p: Painter) -> Painter {
+        p.alpha(self.narrative_alpha())
+    }
+
+    /// The narrative content's alpha: `1 - fade` for the page leaving, `fade` for the page entering.
+    pub fn narrative_alpha(self) -> f32 {
+        let f = self.fade.clamp(0.0, 1.0);
+        match self.role {
+            PushRole::Parent => 1.0 - f,
+            PushRole::Child => f,
+        }
+    }
+}
+
+impl RoutePush {
+    pub const fn new() -> Self {
+        Self {
+            progress: Spring::at(0.0),
+            fade: Spring::at(0.0),
+            warm: None,
+        }
+    }
+
+    /// A push parked mid-flight at `t` — for tests that grade one frame of the slide.
+    #[cfg(any(test, feature = "test-support"))]
+    pub const fn at(t: f32) -> Self {
+        Self {
+            progress: Spring::at(t),
+            fade: Spring::at(t),
+            warm: None,
+        }
+    }
+
+    pub fn jump(&mut self, open: bool) {
+        let to = if open { 1.0 } else { 0.0 };
+        self.progress.jump(to);
+        self.fade.jump(to);
+        // a jump names a new journey: a wait for the old one's destination ends with it
+        self.warm = None;
+    }
+
+    /// **Hold a push at its start until the incoming page's text is resident** (see [`Warm`]).
+    /// Called after [`jump`](Self::jump)`(false)` on a push; a pop never waits, since the page it
+    /// returns to has been drawn. The surface answers [`warming`](Self::warming) by walking the
+    /// destination and says so with [`walked`](Self::walked).
+    pub fn begin_warm(&mut self) {
+        self.warm = Some(Warm { walked: false, waited_ms: 0.0, owed_us: 0 });
+    }
+
+    /// Is the push waiting for its destination's text? Then the surface walks the incoming page
+    /// through the recorder this frame ([`Screen::draw_warm`]).
+    pub fn warming(&self) -> bool {
+        self.warm.is_some()
+    }
+
+    /// The surface walked the destination this frame. The wait ends no earlier than the next one,
+    /// when the iteration's latch has seen what the walk queued.
+    pub fn walked(&mut self) {
+        if let Some(w) = self.warm.as_mut() {
+            w.walked = true;
+        }
+    }
+
+    pub fn update(&mut self, open: bool, dt: f32) {
+        let to = if open { 1.0 } else { 0.0 };
+        self.progress.step(to, PUSH_K, dt);
+        self.fade.step(to, FADE_K, dt);
+    }
+
+    pub fn amount(&self) -> f32 {
+        self.progress.pos.clamp(0.0, 1.0)
+    }
+
+    /// The narrative cross-fade's position (see [`PushFrame::fade`]).
+    pub fn fade_amount(&self) -> f32 {
+        self.fade.pos.clamp(0.0, 1.0)
+    }
+
+    /// **At rest at `open`'s endpoint** — position AND velocity of both springs, the integrator's
+    /// own stop rule. Stricter than [`settled`](Self::settled), which is the pointer's positional guard.
+    pub fn resting(&self, open: bool) -> bool {
+        let target = if open { 1.0 } else { 0.0 };
+        let at = |s: &Spring| (s.pos - target).abs() < 0.001 && s.vel.abs() < 0.02;
+        at(&self.progress) && at(&self.fade)
+    }
+
+    /// Advance toward `open` on the frame clock, reporting motion to the present gate, and snap
+    /// exactly onto the endpoint once [`resting`](Self::resting) there. A no-op at rest.
+    pub fn tick(
+        &mut self,
+        open: bool,
+        t: plx_machine::machine::Tick,
+        present: &mut plx_machine::machine::PresentHandle<'_>,
+    ) {
+        if self.resting(open) {
+            return;
+        }
+        let Some(t) = self.wait_for_text(t, present) else { return };
+        let target = if open { 1.0 } else { 0.0 };
+        plx_machine::motion::spring(
+            &mut self.progress.pos,
+            &mut self.progress.vel,
+            target,
+            PUSH_K,
+            t,
+            present,
+        );
+        plx_machine::motion::spring(
+            &mut self.fade.pos,
+            &mut self.fade.vel,
+            target,
+            FADE_K,
+            t,
+            present,
+        );
+        if self.resting(open) {
+            self.progress.pos = target;
+            self.progress.vel = 0.0;
+            self.fade.pos = target;
+            self.fade.vel = 0.0;
+        }
+    }
+
+    /// One frame of the pre-roll ([`Warm`]). `None`: still waiting, the springs stay put and the
+    /// next frame is requested. `Some(t)`: step the springs with `t`, which carries the probe
+    /// frame's `dt` when the wait lasted only that frame (and was not spent).
+    fn wait_for_text(
+        &mut self,
+        t: plx_machine::machine::Tick,
+        present: &mut plx_machine::machine::PresentHandle<'_>,
+    ) -> Option<plx_machine::machine::Tick> {
+        let Some(w) = self.warm.as_mut() else { return Some(t) };
+        w.waited_ms += t.dt() * 1000.0;
+        let spent = w.waited_ms >= SURFACE_TEXT_HOLD_MAX_MS;
+        if !spent && !w.walked {
+            // the probe: nothing has been walked yet, so nothing is known to be pending
+            w.owed_us = w.owed_us.saturating_add(t.dt_us);
+        } else if !spent && plx_gfx::text::surface_text_pending() {
+            // still rasterising: the wait is dead time, not part of the motion
+            w.owed_us = 0;
+        } else {
+            let owed = if spent { 0 } else { w.owed_us };
+            self.warm = None;
+            return Some(plx_machine::machine::Tick { ms: t.ms, dt_us: t.dt_us.saturating_add(owed) });
+        }
+        present.note(plx_machine::present::PresentEvent::Motion);
+        None
+    }
+
+    /// Seed this push's springs — position AND velocity, not just [`amount`](Self::amount)'s
+    /// clamped read-out — from ANOTHER push's current state. For a screen that gets its OWN
+    /// dedicated `RoutePush` split out of a shared one so a sibling's fade cannot bleed into it
+    /// (`settings::HOME_PUSH` off `settings::CHILD`, 2026-09-04), a caller that starts the new
+    /// push cold at rest whenever it starts driving it is right in the ordinary case — both begin
+    /// at 0 together — but wrong the moment the shared push is NOT at rest, because a sibling
+    /// (Privacy/Legal) was open a moment ago and is still reversing out of it: the shared root
+    /// would resume mid-fade while the freshly-opened child painted itself from a cold zero,
+    /// which is two supposedly-complementary halves of one crossfade disagreeing about how far it
+    /// has travelled (Codex review, 2026-09-04). Call this once, on the RISING EDGE of the new
+    /// push starting to drive toward open — detected from that flag's own transition, never from
+    /// `self.amount() == 0.0`: this type's spring only APPROACHES its target (see [`amount`]'s
+    /// own doc), so a settled-closed push sits at some tiny positive residual, not exactly zero,
+    /// and an equality guard reads as "already synced" forever after the first open (Codex review,
+    /// 2026-09-04, round 3 — the first version of this call site's guard made exactly that
+    /// mistake). Unconditional on the edge is deliberately simpler than gating on `other` being
+    /// away from rest: when `other` already IS at rest the copy is a harmless no-op.
+    pub fn sync_to(&mut self, other: &RoutePush) {
+        self.progress = other.progress;
+        self.fade = other.fade;
+    }
+
+    /// **Is the push parked at the endpoint `open` names?** Rule 11's timing guard.
+    ///
+    /// A key press acts on the LOGICAL state and is right to: `DOCUMENT_OPEN` goes false the
+    /// instant BACK is pressed, and the next UP belongs to the list underneath whatever the
+    /// animation is still showing. A pointer hit cannot borrow that reasoning, because it is
+    /// POSITIONAL — it means "the thing I can see at these coordinates", and mid-push the thing at
+    /// those coordinates is somewhere else, half-transparent, or both. The rects an `ActionRow`
+    /// records and the frame a `TableView` is hit-tested against are both FINAL-position, so every
+    /// pointer path in this family refuses until the layer it belongs to has arrived.
+    pub fn settled(&self, open: bool) -> bool {
+        let t = self.amount();
+        if open {
+            t > 0.999
+        } else {
+            t < 0.001
+        }
+    }
+
+    /// This frame's [`PushFrame`] for `role`.
+    pub fn frame(&self, role: PushRole) -> PushFrame {
+        PushFrame { role, list: self.amount(), fade: self.fade_amount() }
+    }
+
+    /// The whole page in the parent role (a page that does not hold its narrative column).
+    pub fn parent(&self, p: Painter) -> Painter {
+        self.frame(PushRole::Parent).list(p)
+    }
+
+    /// The whole page in the child role (a page that does not hold its narrative column).
+    pub fn child(&self, p: Painter) -> Painter {
+        self.frame(PushRole::Child).list(p)
+    }
+}
+
+/// **Where a press came from**, which decides what may cancel it.
+///
+/// `ui::press` holds ONE press at a time and assumes focus cannot move while it is in flight. The
+/// nav keys pay that by cancelling; the pointer has to pay it differently, and the difference is
+/// this enum. A press that began under the POINTER is bound to the coordinates it began on — the
+/// pointer leaving that control, dead space included, is the person taking the click back. A press
+/// that began on the OK KEY is bound to the focus stop instead: hover that moves the ring off it
+/// cancels, but hover across dead space is not a retraction of a key the user is still holding.
+/// Conflating them cancelled every key press the moment the cursor twitched over nothing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PressFrom {
+    Key,
+    Pointer,
+}
+
+/// A focus stop on a route screen — see the module doc's rule list.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Stop {
+    /// The content column: a row of the table, or the document reader.
+    Content,
+    /// Control `i` of the bottom action band, counted from its leading (left) edge.
+    Band(usize),
+}
+
+/// What a screen must DO once a shared rule has decided. The [`RouteFocus`] has already moved by
+/// the time one of these comes back; everything else is the screen's own to perform, because only
+/// it knows whether its content column is a table or a document and what its rows open.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RouteStep {
+    /// A wall: nothing moved and nothing happens.
+    Wall,
+    /// Focus moved. Repaint; there is nothing else to do.
+    Moved,
+    /// The content column takes this vertical delta — a table moves its selection, a document
+    /// scrolls.
+    Scroll(i32),
+    /// Activate the focused row: enter the nested content behind it, exactly as OK does.
+    Enter,
+    /// Leave this screen, exactly as BACK does.
+    Back,
+}
+
+/// What the shared rules need to know about a route screen at the moment a key arrives. A screen
+/// answers it from live state every time rather than caching it, so a list that fills in on a
+/// worker (the Home editor's roster) or a band that appears with the first edit (Privacy & data's
+/// Done) cannot leave the rules reasoning about a shape that is no longer on screen.
+#[derive(Clone, Copy, Debug)]
+pub struct RouteShape {
+    /// How many controls the bottom action band is drawing. `0` = this screen has no band.
+    pub band: usize,
+    /// Whether the content column has a focusable row. `false` for a document reader, and for a
+    /// table whose rows have not landed yet.
+    pub rows: bool,
+    /// Whether the table's selection is on its LAST focusable row (rule 2).
+    pub at_last_row: bool,
+    /// Whether the focused row opens nested content — a chevron row (rule 8).
+    pub opens: bool,
+    /// **Is leaving on LEFT UNPROVEN to be lossless?** Rule 9's only guard, and it is answered by
+    /// the screen rather than inferred from the band, because the two are not the same question:
+    /// the Home editor's `Try again` band commits nothing, and first run's two answers record
+    /// nothing until OK. A screen that answers `true` never leaves on LEFT.
+    ///
+    /// **The negative framing is deliberate and it is not the same as "an edit exists."** A screen
+    /// can also be unable to TELL — the Home editor's baseline is captured once and its roster
+    /// lands on a worker, so an editor opened before discovery answered cannot say whether a row
+    /// that arrived afterwards has been touched. `true` there is a refusal to trust an answer, not
+    /// a claim about an edit; erring toward the wall costs one press of BACK, and erring the other
+    /// way loses the edit silently. Read it as "BACK is not proven lossless" (Codex review,
+    /// 2026-09-04).
+    pub uncommitted: bool,
+}
+
+impl RouteShape {
+    /// The shape of a document route: no band, no rows, nothing to enter. Named because three
+    /// screens push the same reader and none of them should be spelling four fields out.
+    pub const fn document() -> Self {
+        Self {
+            band: 0,
+            rows: false,
+            at_last_row: false,
+            opens: false,
+            // A document is a READ. There is nothing in it to lose, on any of the three routes
+            // that push one, so LEFT always walks back out of it.
+            uncommitted: false,
+        }
+    }
+}
+
+/// **Where focus is on a route screen, and the whole of how it moves.** The module doc's eleven
+/// rules are implemented here and nowhere else; a screen owns the words, the geometry and what its
+/// rows DO, and delegates every "which stop is focused now" question to this.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RouteFocus {
+    on_band: bool,
+    /// The band control the ring returns to. Remembered while focus is in the content column, so
+    /// rules 2 and 5 both land back where the band was left rather than snapping to its leading
+    /// control.
+    cursor: usize,
+}
+
+impl RouteFocus {
+    /// Open in the content column — a Settings child arrives on its list.
+    pub const fn content() -> Self {
+        Self {
+            on_band: false,
+            cursor: 0,
+        }
+    }
+    /// Open on the band's leading control — first run arrives on its answer, because the defaults
+    /// are already an answer and the screen opens on the way out of itself.
+    pub const fn band() -> Self {
+        Self {
+            on_band: true,
+            cursor: 0,
+        }
+    }
+
+    pub fn stop(self) -> Stop {
+        if self.on_band {
+            Stop::Band(self.cursor)
+        } else {
+            Stop::Content
+        }
+    }
+    pub fn on_content(self) -> bool {
+        !self.on_band
+    }
+    /// The band control holding focus, or `None` when focus is in the content column. This is the
+    /// value an [`ActionRow::step`] wants, and the one `focus_is_ctl` is built on.
+    pub fn band_index(self) -> Option<usize> {
+        self.on_band.then_some(self.cursor)
+    }
+    /// The band control the ring would RETURN to, focused or not — what a draw uses to decide
+    /// which of two answers wears the ring.
+    pub fn cursor(self) -> usize {
+        self.cursor
+    }
+
+    pub fn to_content(&mut self) {
+        self.on_band = false;
+    }
+    pub fn to_band(&mut self, i: usize) {
+        self.on_band = true;
+        self.cursor = i;
+    }
+
+    /// **Rule 10: focus may never rest on nothing.** Run after any rebuild and before any rule, so
+    /// a band that has just gone away hands focus back to the list and a list with no rows yet
+    /// hands it to the band. Reports whether it had to move anything, which is what a caller
+    /// invalidates on.
+    pub fn settle(&mut self, s: RouteShape) -> bool {
+        let before = *self;
+        if self.on_band {
+            if s.band == 0 {
+                // The control focus was on is gone. The content column is the honest home even
+                // when it has no rows either: that state is a list still loading, and the next
+                // settle puts focus back on the band if one appears first.
+                self.on_band = false;
+            } else if self.cursor >= s.band {
+                self.cursor = s.band - 1;
+            }
+        } else if !s.rows && s.band > 0 {
+            self.to_band(self.cursor.min(s.band - 1));
+        }
+        *self != before
+    }
+
+    /// Rules 1–4.
+    pub fn updown(&mut self, s: RouteShape, delta: i32) -> RouteStep {
+        self.settle(s);
+        if self.on_band {
+            if delta < 0 && s.rows {
+                self.to_content();
+                RouteStep::Moved
+            } else {
+                RouteStep::Wall
+            }
+        } else if s.rows && delta > 0 && s.band > 0 && s.at_last_row {
+            self.to_band(self.cursor.min(s.band - 1));
+            RouteStep::Moved
+        } else {
+            RouteStep::Scroll(delta)
+        }
+    }
+
+    /// Rules 5, 6 and 9.
+    pub fn left(&mut self, s: RouteShape) -> RouteStep {
+        self.settle(s);
+        if self.on_band {
+            if self.cursor > 0 {
+                self.to_band(self.cursor - 1);
+                RouteStep::Moved
+            } else {
+                // Off the band's leading edge there is nothing further left INSIDE the screen, so
+                // rule 9's one guard decides: leave, unless leaving would discard an edit.
+                self.out(s)
+            }
+        } else if s.band > 0 {
+            self.to_band(self.cursor.min(s.band - 1));
+            RouteStep::Moved
+        } else {
+            self.out(s)
+        }
+    }
+
+    /// Rule 9's guard alone: LEFT off the left-most stop is BACK unless the screen says it is
+    /// holding an edit that BACK would throw away.
+    fn out(&self, s: RouteShape) -> RouteStep {
+        if s.uncommitted {
+            RouteStep::Wall
+        } else {
+            RouteStep::Back
+        }
+    }
+
+    /// Rules 7 and 8.
+    pub fn right(&mut self, s: RouteShape) -> RouteStep {
+        self.settle(s);
+        if self.on_band {
+            if self.cursor + 1 < s.band {
+                self.to_band(self.cursor + 1);
+                RouteStep::Moved
+            } else if s.rows {
+                self.to_content();
+                RouteStep::Moved
+            } else {
+                RouteStep::Wall
+            }
+        } else if s.opens {
+            RouteStep::Enter
+        } else {
+            RouteStep::Wall
+        }
+    }
+}
+
+/// **The shared PRESS SURFACE for a route's bottom action row** — every control
+/// [`RouteLayout::action_pair`] (or a single-control action band) lays out owns one of these,
+/// rather than a private [`widgets::CtlPop`] field of its own.
+///
+/// It exists because a control face is not a table row: focus arriving on it must grow a real
+/// [`widgets::CtlPop`] pop, and a click must dip and ring back exactly like every other control
+/// face in the app (`ui/press.rs`'s `begin_ctl`/`take_commit`, folded into [`Self::scale`] for
+/// free — `CtlPop::scale` already applies `press::scale()` to whichever index is focused). Before
+/// this existed, `consent.rs`'s two answers drew through `Button::focused()` alone — no pop, no
+/// dip — while `onboard.rs`'s single action pill built its own private `CtlPop<1>` to get both.
+/// One name for the thing every action row needs is what makes the second screen a two-line
+/// change instead of a second hand-rolled spring.
+///
+/// `N` is the row's own control count — `2` for consent's Share/Don't-share, `1` for a lone Done
+/// or Start-watching pill. Nothing here draws a button: a caller still builds its own
+/// [`widgets::Button`]/[`widgets::CircleButton`] at its own rect and label, and passes
+/// [`Self::scale`] to it — the geometry and the words stay the screen's, only the press machinery
+/// is shared.
+pub struct ActionRow<const N: usize> {
+    pop: crate::widgets::CtlPop<N>,
+    /// Each control's drawn frame, recorded at draw for the pointer — the `TOOL_RECTS` idiom.
+    /// Parked OFF the panel rather than at the origin, because [`Rect::contains`] is inclusive and
+    /// a zero-size rect at (0,0) would "contain" a click at exactly (0,0).
+    rects: [Rect; N],
+}
+
+/// Where a control's frame sits while it is not drawn — see [`ActionRow::rects`].
+const OFF_PANEL: Rect = Rect::new(-1.0, -1.0, 0.0, 0.0);
+
+impl<const N: usize> ActionRow<N> {
+    pub const fn new() -> Self {
+        Self {
+            pop: crate::widgets::CtlPop::new(),
+            rects: [OFF_PANEL; N],
+        }
+    }
+
+    /// Record control `i`'s drawn frame, from the same place the button itself is drawn. Rule 11:
+    /// this is the whole of what makes an action band hoverable and clickable, and doing it at
+    /// draw is what keeps the hit rect and the painted pill the same object.
+    pub fn place(&mut self, i: usize, r: Rect) {
+        if let Some(slot) = self.rects.get_mut(i) {
+            *slot = r;
+        }
+    }
+
+    /// Forget every frame — call this on the branch that does NOT draw the band, so a control that
+    /// is not on screen is not hit-testable either. (Settings' Done exists only while the draft
+    /// differs from the stored answer; a stale rect would leave a live click target where it used
+    /// to be.)
+    pub fn clear(&mut self) {
+        self.rects = [OFF_PANEL; N];
+    }
+
+    /// Which control is under the pointer, or `None` for dead space.
+    pub fn hit(&self, mx: f32, my: f32) -> Option<usize> {
+        self.rects
+            .iter()
+            .position(|r| r.w > 0.0 && r.h > 0.0 && r.contains(mx, my))
+    }
+
+    /// Advance every control's pop toward its target for this frame. `focused` is the index of the
+    /// control CURRENTLY holding focus in this row, or `None` when nothing in it does — the row is
+    /// hidden, or the route's focus is elsewhere (the list, a different band).
+    pub fn step(&mut self, focused: Option<usize>, dt: f32) {
+        self.pop.step(focused, dt);
+    }
+
+    /// Control `i`'s drawn scale this frame — the focus pop, and, once focused and only once the
+    /// caller has armed [`crate::press::begin_ctl`] on its OK-down, the tvOS press dip/ring on
+    /// top of it (`CtlPop::scale`'s own fold). Pass straight to `Button::scale`; never draw an
+    /// action-row control without it, or it arrives at focus with no pop and clicks with no dip.
+    pub fn scale(&self, i: usize) -> f32 {
+        self.pop.scale(i)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct RouteLayout {
+    pub narrative: Rect,
+    pub content: Rect,
+    pub action: Rect,
+    /// How the narrative title sets ([`TitleStyle`]); [`Self::screen`] and its siblings return
+    /// [`TitleStyle::Hero`], [`Self::settings_page`] / [`Self::page_titled`] opt in to the Page.
+    pub title_style: TitleStyle,
+}
+
+impl RouteLayout {
+    pub fn screen() -> Self {
+        Self::screen_with_copy_w(NARRATIVE_W)
+    }
+
+    /// The same two columns with the narrative one at a **stated measure** — `--route-copy-w`, the
+    /// one number in this layout the design system lets a route retune.
+    ///
+    /// The default is the route family's editorial measure (660), which is right for a screen whose
+    /// COPY is the screen: Settings' narrative column carries the sentence that explains the list
+    /// beside it. A route whose LIST is the screen can prefer a narrower measure: Filmography
+    /// starts at 480, then `screen_for_title` accommodates its translated title, reclaiming space (`Person Screen.dc.html`, 2026-09-06:
+    /// "titles were truncating while half the frame held a static heading").
+    ///
+    /// **The REGION GAP does not move with it.** `COLUMN_GAP` is what makes the two columns read as
+    /// related rather than as two screens side by side, and it is the one number here that belongs
+    /// to every route — so a retune of the copy column slides the content column and resizes it,
+    /// and changes nothing else.
+    pub fn screen_with_copy_w(copy_w: f32) -> Self {
+        let top = SAFE.y + TOP_INSET;
+        let bottom = SAFE.y + SAFE.h;
+        let narrative = Rect::new(SAFE.x, top, copy_w, bottom - top);
+        let content_x = narrative.x + narrative.w + COLUMN_GAP;
+        let content = Rect::new(content_x, top, SAFE.x + SAFE.w - content_x, bottom - top);
+        let action = Rect::new(narrative.x, bottom - ACTION_H, narrative.w, ACTION_H);
+        Self {
+            narrative,
+            content,
+            action,
+            title_style: TitleStyle::Hero,
+        }
+    }
+
+    /// The same columns with the narrative title set as a Settings page's ([`TitleStyle::Page`]):
+    /// 48 bold on the guide, a crumb hanging above it. The one switch; a Settings-family route
+    /// builds its layout with [`Self::settings_page`].
+    pub fn page_titled(self) -> Self {
+        Self { title_style: TitleStyle::Page, ..self }
+    }
+
+    /// The layout of the Settings pages moved to the v2 board so far: [`Self::screen`] with
+    /// [`TitleStyle::Page`] (the root, Language, the preferences and pickers, Under posters,
+    /// Diagnostics, Privacy & data, the Legal index and its documents, About, HUD settings). The
+    /// Favorite libraries onboarding, first-run consent, the Privacy & data document readers and
+    /// the Language page's Contribute page still use [`Self::screen`] (Hero).
+    pub fn settings_page() -> Self {
+        Self::screen().page_titled()
+    }
+
+    /// Allocate enough narrative width for an unbreakable title word at HERO size, while
+    /// preserving the caller's minimum content width. Short titles keep the preferred measure.
+    /// This is shared layout: tabs, rows, focus and paint must all consume the returned columns.
+    pub fn screen_for_title(
+        preferred_copy_w: f32,
+        min_content_w: f32,
+        title: &str,
+        measure: &dyn Measure,
+    ) -> Self {
+        let longest_word = title
+            .split(|c: char| c.is_whitespace() && c != '\u{a0}')
+            .map(|word| measure.width_str(word, theme::size::HERO, true))
+            .fold(0.0f32, f32::max);
+        let max_copy_w = (SAFE.w - COLUMN_GAP - min_content_w).max(0.0);
+        // Keep a short feature name on one line when possible, including expansion markers.
+        // Longer multiword titles use the bounded column and the shared title's wrapping policy.
+        let title_width = measure.width_str(title, theme::size::HERO, true);
+        Self::screen_with_copy_w(preferred_copy_w.max(longest_word).max(title_width).ceil().min(max_copy_w))
+    }
+
+    /// Keep a complete disclosure above its peer actions, reclaiming unused narrative width
+    /// before requiring scrolling. The other column keeps its measured minimum width. `fits`
+    /// uses the same title/body flow as drawing; the returned columns serve focus and paint.
+    pub fn screen_for_reading(
+        min_action_w: f32,
+        min_content_w: f32,
+        fits: impl Fn(Self) -> bool,
+    ) -> Self {
+        let max_copy_w = (SAFE.w - COLUMN_GAP - min_content_w).max(NARRATIVE_W);
+        let mut width = NARRATIVE_W.max(min_action_w).min(max_copy_w);
+        loop {
+            let mut layout = Self::screen_with_copy_w(width);
+            // The answer row can use the inter-column whitespace without narrowing either
+            // reading column. Keep one control gap before the related-link column.
+            let action_limit = layout.content.x - layout.action.x - crate::widgets::CONTROL_GAP;
+            layout.action.w = layout.action.w.max(min_action_w.min(action_limit));
+            if fits(layout) || width >= max_copy_w { return layout; }
+            width = (width + theme::space::MD).min(max_copy_w);
+        }
+    }
+
+    /// Frame for a table whose first section has a label.
+    ///
+    /// [`TableView`](crate::table::TableView) owns internal breathing room above that label.
+    /// The route owns the external alignment contract: the label's cap-top sits on the same anchor
+    /// as the narrative title.  Expanding the frame upward by the table-owned inset joins those
+    /// two facts without either component copying the other's padding.
+    pub fn sectioned_table(self) -> Rect {
+        let inset = crate::table::FIRST_HEADER_CAP_OFFSET;
+        Rect::new(
+            self.content.x,
+            self.content.y - inset,
+            self.content.w,
+            self.content.h + inset,
+        )
+    }
+
+    /// Frame for a content column that is PLAIN TEXT rather than a table.
+    ///
+    /// **A document hangs from the TITLE's anchor, not from the crumb's**, and that is the whole
+    /// of the fix for "on Settings screens that contain plain text rather than a table, the title
+    /// appears too high and is aligned roughly with the Back navigation control". A table's frame
+    /// is lifted by [`Self::sectioned_table`] so its first section LABEL lands on the shared top
+    /// guide — the guide the crumb also sits on — and the first thing that reads as content, the
+    /// first row's own label, therefore lands well below it, beside the narrative title. A
+    /// document has no section label to spend that band on, so drawn at the bare `content` rect
+    /// its first line — which on every document here is a bold all-caps heading, i.e. exactly what
+    /// a reader takes for the screen's title — landed ON the crumb's line, a whole title block
+    /// above the title it belongs to.
+    ///
+    /// So: one geometry rule in the layout, not an offset per screen. Both anchors are now used by
+    /// both columns — the guide carries the crumb and a table's first label, the title anchor
+    /// carries the narrative title and a document's first line.
+    ///
+    /// `has_crumb` for the same reason [`Self::narrative_top`] takes it: the title anchor moves by
+    /// exactly the crumb's band, and a document on a crumbless route must follow it up rather than
+    /// leaving a gap nothing explains. On a [`TitleStyle::Page`] layout the crumb hangs ABOVE the
+    /// title, so the two anchors are one y and `has_crumb` changes nothing.
+    pub fn document(self, has_crumb: bool) -> Rect {
+        let top = self.narrative_top(has_crumb);
+        Rect::new(
+            self.content.x,
+            top,
+            self.content.w,
+            (self.content.y + self.content.h - top).max(0.0),
+        )
+    }
+
+    /// Place two peer controls in a row when they fit, otherwise in a bottom-anchored column.
+    ///
+    /// Their relationship belongs here: the leading one starts on the shared margin, the trailing
+    /// one follows by [`widgets::CONTROL_GAP`]. When the pair needs a column, that same gap
+    /// separates them vertically and the trailing control retains the bottom anchor. Both retain
+    /// the normal control height. A screen supplies measured widths, never private coordinates.
+    ///
+    /// **Its one caller is first-run consent's two answers, and they are EQUALS** — no primary,
+    /// no secondary, no danger face. This doc used to describe a primary beside a BACK
+    /// affordance (`Start watching` + `Press [BACK] to return`), which is the pairing the crumb
+    /// deleted from this family; there is no BACK affordance in an action band any more. The gap
+    /// followed that change: it was `space::LG` 40, the REGION rung for a primary standing beside
+    /// a separate hint, and two peer answers at that distance read as two unrelated controls
+    /// sharing a row rather than one question's two faces.
+    pub fn action_pair(self, leading_w: f32, trailing_w: f32) -> (Rect, Rect) {
+        let pair = Self::pair_items(leading_w, trailing_w);
+        let row = Self::pair_row(&pair, self.action.x);
+        if row.width() <= self.action.w {
+            let mut spans = row.placed();
+            let (leading, trailing) = (spans.next().expect("two items"), spans.next().expect("two items"));
+            let (leading, trailing) = (Rect::new(leading.x, self.action.y, leading.w, self.action.h),
+                Rect::new(trailing.x, self.action.y, trailing.w, self.action.h));
+            (leading, trailing)
+        } else {
+            // Preserve label size and equal treatment. The final control retains the bottom
+            // anchor; the first moves up and the narrative reserves the resulting full extent.
+            let heights = [HItem::new(self.action.h), HItem::new(self.action.h)];
+            let column = VStack::new(&heights, crate::widgets::CONTROL_GAP, Anchor::Bottom(self.action.y + self.action.h));
+            let mut spans = column.placed();
+            let (top, bottom) = (spans.next().expect("two items"), spans.next().expect("two items"));
+            let leading = Rect::new(self.action.x, top.y, leading_w, top.h);
+            let trailing = Rect::new(self.action.x, bottom.y, trailing_w, bottom.h);
+            (leading, trailing)
+        }
+    }
+
+    /// How wide [`Self::action_pair`]'s row is for these control widths: the SAME stack
+    /// (`pair_row`) that places it, so a caller that asks whether the pair fits one line reads the
+    /// width the layout uses and keeps no `a + CONTROL_GAP + b` of its own.
+    pub fn action_pair_w(leading_w: f32, trailing_w: f32) -> f32 {
+        Self::pair_row(&Self::pair_items(leading_w, trailing_w), 0.0).width()
+    }
+
+    fn pair_items(leading_w: f32, trailing_w: f32) -> [HItem; 2] {
+        [HItem::new(leading_w), HItem::new(trailing_w)]
+    }
+
+    /// The action pair as one row on `x`, [`widgets::CONTROL_GAP`] apart.
+    fn pair_row(pair: &[HItem; 2], x: f32) -> HStack<'_> {
+        HStack::new(pair, crate::widgets::CONTROL_GAP, StackAlign::Leading(x))
+    }
+
+    /// Draw the return crumb — `‹ <where BACK goes>` — in the band whose top is at `top`.
+    ///
+    /// The gap between mark and word is measured to the chevron's INK, not to its box: the asset
+    /// carries about a third of its width as bearing, so a box-to-text gap on a spacing rung comes
+    /// out visibly loose and the pair stops reading as one object. Same rule the player HUD's
+    /// transport slot uses, and [`icons::ink_x`] is where the numbers live.
+    /// The y the TITLE starts at, given whether a crumb precedes it.
+    ///
+    /// Pure and separate from [`Self::draw_narrative`] because it is the whole of the crumb's
+    /// layout cost, and a test that cannot call the draw (it measures through SDL2_ttf) can still
+    /// grade it. The first version of this test compared `RouteLayout::screen().content.y` with
+    /// its own `l.content.y` — a value against itself, which cannot fail.
+    pub fn narrative_top(self, has_crumb: bool) -> f32 {
+        self.narrative_flow(has_crumb, 0.0).title.y
+    }
+
+    /// **The narrative column's vertical flow, stated once**: the crumb band ([`CRUMB_BAND`], absent
+    /// without a crumb), the title [`theme::space::SM`] under it (so the title stands
+    /// [`CRUMB_RISE`] below the column's top), and the copy [`theme::space::MD`] under the title.
+    /// `title_h` is the title's measured height (the title's own top does not depend on it).
+    /// [`Self::draw_narrative`] and [`Self::narrative_copy_frame`] both read these spans.
+    ///
+    /// A [`TitleStyle::Page`] layout stands the title on the column's guide whether or not a crumb
+    /// precedes it and hangs the crumb ABOVE the guide ([`CRUMB_RISE`] over it), so a nested
+    /// Settings page's title is at the root's y.
+    fn narrative_flow(self, has_crumb: bool, title_h: f32) -> NarrativeFlow {
+        if self.title_style == TitleStyle::Page {
+            let items = [HItem::new(title_h), HItem::new(0.0)];
+            let stack = VStack::new(&items, theme::space::MD, Anchor::Top(self.narrative.y));
+            let mut spans = stack.placed();
+            let (Some(title), Some(copy)) = (spans.next(), spans.next()) else {
+                unreachable!("the title and the copy anchor are always present")
+            };
+            let crumb_y = self.narrative.y - CRUMB_RISE;
+            let crumb = has_crumb.then_some(VSpan { i: 0, y: crumb_y, h: CRUMB_BAND, box_y: crumb_y });
+            return NarrativeFlow { crumb, title, copy_top: copy.y };
+        }
+        let items = [
+            if has_crumb { HItem::new(CRUMB_BAND) } else { HItem::absent() },
+            HItem::new(title_h).before(theme::space::SM),
+            HItem::new(0.0),
+        ];
+        let stack = VStack::new(&items, theme::space::MD, Anchor::Top(self.narrative.y));
+        let mut spans = stack.placed();
+        let crumb = if has_crumb { spans.next() } else { None };
+        let (Some(title), Some(copy)) = (spans.next(), spans.next()) else {
+            unreachable!("the title and the copy anchor are always present")
+        };
+        NarrativeFlow { crumb, title, copy_top: copy.y }
+    }
+
+    /// The available prose region after the complete title and before the actual action group.
+    /// A scrolling disclosure uses exactly the same title flow as an ordinary route header.
+    pub fn narrative_copy_frame(self, has_crumb: bool, title: &str,
+        actions_top: f32, measure: &dyn Measure) -> Rect {
+        let title_h = self.title_view(title).with_measure(measure).measure_h(self.narrative.w);
+        let top = self.narrative_flow(has_crumb, title_h).copy_top;
+        Rect::new(self.narrative.x, top, self.narrative.w,
+            (actions_top - theme::space::MD - top).max(0.0))
+    }
+
+    /// **The picture slot** (Settings v2): the narrative column's display-only picture, 660 wide
+    /// at [`PICTURE_TOP`] and as tall as the safe area leaves (the board's 586). It does not move
+    /// with the title or the sentence: a followed sentence takes at most
+    /// [`crate::follow_copy::FOLLOW_LINES`] lines and ends above it.
+    pub fn picture_slot(self) -> Rect {
+        let top = PICTURE_TOP.max(self.narrative.y);
+        Rect::new(self.narrative.x, top, self.narrative.w, (self.narrative.y + self.narrative.h - top).max(0.0))
+    }
+
+    fn draw_crumb(self, p: Painter, top: f32, back_to: &str, measure: &dyn Measure) {
+        draw_back_crumb(p, Rect::new(self.narrative.x, top, self.narrative.w, CRUMB_BAND), back_to, measure);
+    }
+
+    /// **The HERO narrative title** — its rung, its weight, its wrap and its [`TITLE_LEADING`]
+    /// line pitch, in one place a host test can call. It is the layout-free view first-run consent
+    /// grades; a LAYOUT draws [`Self::title_view`], which follows its [`TitleStyle`].
+    ///
+    /// It is split out for exactly that reason and the reason is a lesson: the first test for the
+    /// leading correction asserted `TITLE_LEADING == HERO * 1.05` and nothing else, so deleting
+    /// `.leading(TITLE_LEADING)` from the builder below — reverting the whole fix, putting the copy
+    /// 19.4px back down on all eight callers of this function — left it green. A test that grades a
+    /// constant grades the constant. Building the view here lets it grade the thing that is drawn.
+    /// App-owned titles and questions wrap completely; following content uses their measured height.
+    pub fn narrative_title(title: &str) -> TextView<'_> {
+        Self::styled_title(title, TitleStyle::Hero)
+    }
+
+    /// [`Self::narrative_title`] for THIS layout's [`TitleStyle`]: what [`Self::draw_narrative`]
+    /// and [`Self::narrative_copy_frame`] draw and measure.
+    pub fn title_view(self, title: &str) -> TextView<'_> {
+        Self::styled_title(title, self.title_style)
+    }
+
+    fn styled_title(title: &str, style: TitleStyle) -> TextView<'_> {
+        TextView::new(title, style.size(), theme::TEXT_HEADING)
+            .bold()
+            .break_long_words()
+            .leading(style.leading())
+            .tracking(style.tracking())
+    }
+
+    /// **Where a Page layout sets its title's glyphs inside the title's box.** `TextView` anchors
+    /// the CAP TOP on the y it is given; a Settings board specifies the title as a CSS box (`top`
+    /// 142, `line-height` 1.05), which sets the cap top the half-leading plus the ascent above it
+    /// below the box top ([`plx_gfx::text::css_cap_drop`], 7 px at 48/1.05). Hero titles are
+    /// cap-anchored, as they always were: no drop.
+    pub fn title_cap_drop(self, measure: &dyn Measure) -> f32 {
+        self.cap_drop(self.title_style.size(), self.title_style.leading(), measure)
+    }
+
+    /// The same for the copy under the title (`size`, [`theme::space::XS`] over it as the pitch,
+    /// the board's `26/34`): a Page layout's sentence sits where the board's CSS box puts it.
+    pub fn copy_cap_drop(self, size: std::os::raw::c_int, measure: &dyn Measure) -> f32 {
+        self.cap_drop(size, size as f32 + theme::space::XS, measure)
+    }
+
+    fn cap_drop(self, size: std::os::raw::c_int, leading: f32, measure: &dyn Measure) -> f32 {
+        match self.title_style {
+            TitleStyle::Hero => 0.0,
+            TitleStyle::Page => plx_gfx::text::css_cap_drop(size, leading, measure.cap_h(size)),
+        }
+    }
+
+    /// Draw a measured crumb→title→copy flow.  Each block begins after the previous one's actual
+    /// wrapped height, never after a screen-specific y offset, and the copy stops before the
+    /// shared action slot.
+    ///
+    /// `back_to` is `None` exactly when BACK does not go anywhere inside the app — see the module
+    /// doc for which routes those are and how to census them.  Passing it here rather than letting
+    /// screens draw their own line is what makes that a contract instead of a convention: a new
+    /// route cannot forget to answer without deleting an argument.
+    ///
+    /// Returns the y the copy's last line ends at, so a caller can stack one more block (the
+    /// Language page's restart [`KeyHint`](crate::widgets::KeyHint)) after its measured height.
+    pub fn draw_narrative(
+        self,
+        p: Painter,
+        back_to: Option<&str>,
+        title: &str,
+        copy: &str,
+        copy_size: std::os::raw::c_int,
+        measure: &dyn Measure,
+    ) -> f32 {
+        self.draw_narrative_pending(p, back_to, title, copy, copy_size, measure, None)
+    }
+
+    /// The same narrative with a loading copy, counted and sentinel-painted separately from its title.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_narrative_pending(self, p: Painter, back_to: Option<&str>, title: &str, copy: &str,
+        copy_size: std::os::raw::c_int, measure: &dyn Measure, pending: Option<&str>) -> f32 {
+        let title = self.title_view(title);
+        let title_h = title.measure_h(self.narrative.w);
+        let flow = self.narrative_flow(back_to.is_some(), title_h);
+        if let (Some(back_to), Some(crumb)) = (back_to, flow.crumb) {
+            self.draw_crumb(p, crumb.y, back_to, measure);
+        }
+        title.draw(p, Rect::new(self.narrative.x, flow.title.y + self.title_cap_drop(measure), self.narrative.w, flow.title.h));
+
+        let copy_top = flow.copy_top + self.copy_cap_drop(copy_size, measure);
+        let copy_bottom = self.action.y - theme::space::XL;
+        let (copy_p, copy_ink) = pending.map_or((p, theme::TEXT_READING), |key|
+            crate::placeholder::ink(p, crate::placeholder::Reason::WorkingReadout, key, theme::TEXT_READING));
+        let copy_h = TextView::new(copy, copy_size, copy_ink)
+            .leading(copy_size as f32 + theme::space::XS)
+            .max_lines(12)
+            .draw(
+                copy_p,
+                Rect::new(
+                    self.narrative.x,
+                    copy_top,
+                    self.narrative.w,
+                    (copy_bottom - copy_top).max(0.0),
+                ),
+            );
+        copy_top + copy_h
+    }
+}
+
+/// Where [`RouteLayout::narrative_flow`] stands the narrative column's blocks.
+#[derive(Clone, Copy)]
+struct NarrativeFlow {
+    crumb: Option<VSpan>,
+    title: VSpan,
+    copy_top: f32,
+}
+
+/// **When a route ground reads its host**: on the frame that captured the host (nothing presents
+/// after it until its GPU work is done, `gfx::snapshot_frame_begin`, so the reduction queued with
+/// it costs no presented frame), or else on the first frame the ground is seen. A held, invisible
+/// frame that captured nothing reads nothing — nothing is drawn through the field at opacity 0.
+fn ground_reads_host(opacity: f32, captured: bool) -> bool {
+    opacity > 0.0 || captured
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_recorded_host_ground_neither_captures_nor_latches() {
+        let mut ground = super::RouteGround::new();
+        ground.draw_host(crate::Painter::recording());
+        assert!(!ground.is_latched());
+        crate::record_walk(|| ground.draw_host(crate::Painter::root()));
+        assert!(!ground.is_latched(), "nested root painters obey the recording walk too");
+    }
+
+    /// `ModalStack::draw_scrims_on`'s rule, for a route ground: the host is read on the frame that
+    /// captured it (whose GPU work is waited out before anything presents) or once the ground is
+    /// seen — never on a held, invisible frame that captured nothing.
+    #[test]
+    fn a_route_ground_reads_its_host_on_the_capture_frame_or_once_seen() {
+        use super::ground_reads_host;
+        assert!(ground_reads_host(0.0, true), "the capture frame");
+        assert!(ground_reads_host(0.4, false), "seen");
+        assert!(!ground_reads_host(0.0, false), "held and nothing captured");
+    }
+
+    #[test]
+    fn a_pre_home_ground_is_the_authored_fallback_latched_before_drawing() {
+        let ground = super::RouteGround::authored();
+        assert!(ground.is_latched());
+        // The reference is a fresh field latched the way the authored fallback is documented to be
+        // (`Grade::Dim`, the identity grade), not a re-typed formula.
+        let mut want = super::UnderlayField::new();
+        want.latch_from_corners(super::RouteGround::fallback_corners(), super::Grade::Dim);
+        assert_eq!(ground.palette(), super::ControlPalette::ambient(want.key()));
+    }
+
+    use super::*;
+    use crate::consts::inside_safe;
+
+    #[test]
+    fn every_required_route_region_is_inside_the_safe_area() {
+        let l = RouteLayout::screen();
+        assert!(inside_safe(l.narrative));
+        assert!(inside_safe(l.content));
+        assert!(inside_safe(l.action));
+    }
+
+    #[test]
+    fn columns_are_related_objects_not_overlapping_coordinates() {
+        let l = RouteLayout::screen();
+        assert!(l.narrative.x + l.narrative.w < l.content.x);
+        assert_eq!(l.narrative.y, l.content.y);
+        assert_eq!(l.narrative.y + l.narrative.h, l.content.y + l.content.h);
+        assert_eq!(l.action.x, l.narrative.x);
+        assert_eq!(l.action.y + l.action.h, SAFE.y + SAFE.h);
+    }
+
+    #[test]
+    fn first_table_section_and_narrative_share_one_top_anchor() {
+        let l = RouteLayout::screen();
+        let table = l.sectioned_table();
+        assert_eq!(
+            table.y + crate::table::FIRST_HEADER_CAP_OFFSET,
+            l.narrative.y
+        );
+        assert_eq!(table.y + table.h, l.content.y + l.content.h);
+    }
+
+    /// **The title sets at the design system's pitch, not at `TextView`'s reading default.**
+    ///
+    /// `RouteScreen.jsx` states `var(--size-hero)/1.05`; `TextView` derives `sz * 1.32` when no
+    /// leading is given, which is a pitch for PROSE. The difference is 19.4px, and on a one-line
+    /// title all of it lands between the title and the copy — `draw_narrative` stacks the copy at
+    /// `title_h + space::MD`, so the family's stated 24px gap was drawing as ~43. This is the whole
+    /// of that correction as arithmetic, and it is here rather than in `filmography.rs` because the
+    /// route that noticed it is not the only one that drew it.
+    #[test]
+    fn translated_route_titles_grow_without_taking_the_content_minimum() {
+        struct TitleMeasure;
+        impl Measure for TitleMeasure {
+            fn width(&self, text: &std::ffi::CStr, size: i32, _bold: bool) -> f32 {
+                text.to_string_lossy().chars().count() as f32 * size as f32 * 0.6
+            }
+            fn cap_h(&self, size: i32) -> f32 { size as f32 * 0.7 }
+            fn line_h(&self, size: i32) -> f32 { size as f32 * 1.2 }
+        }
+        let measure = TitleMeasure;
+        let min_content = RouteLayout::screen().content.w;
+        for preference in plx_platform::i18n::SHIPPED {
+            let locale = plx_platform::i18n::LocaleContext::resolve(preference, None, None, None, None);
+            let title = plx_platform::i18n::msg::browse_person_filmography_in(&locale);
+            let layout = RouteLayout::screen_for_title(480.0, min_content, title, &measure);
+            let full_width = measure.width_str(title, theme::size::HERO, true);
+            assert!(layout.narrative.w >= full_width, "route label must fit in full: {title}");
+            assert!(layout.content.w >= min_content);
+            assert!(inside_safe(layout.content));
+            assert!(inside_safe(layout.narrative));
+            if preference == plx_platform::i18n::Preference::Be {
+                assert!(layout.narrative.w > 480.0, "exercise the clipped screenshot's narrow column");
+            }
+        }
+        // Expansion beyond available width must wrap, never steal the content column.
+        let title = "ФільмаграфіяФільмаграфія";
+        let layout = RouteLayout::screen_for_title(480.0, min_content, title, &measure);
+        assert_eq!(layout.content.w, min_content);
+        let view = RouteLayout::narrative_title(title).with_measure(&measure);
+        assert!(view.measure_h(layout.narrative.w) > TITLE_LEADING);
+        assert!(!view.truncates(layout.narrative.w));
+    }
+
+    #[test]
+    fn the_narrative_title_sets_at_the_design_systems_own_line_height() {
+        assert!(
+            (TITLE_LEADING - theme::size::HERO as f32 * 1.05).abs() < 0.01,
+            "the mock's own ratio, not a rounded pixel"
+        );
+        // …and, the half that actually guards the fix: the view `draw_narrative` DRAWS carries it.
+        // Asserting the constant alone is a tautology — deleting `.leading(TITLE_LEADING)` from the
+        // builder reverts the entire correction and leaves that assertion green.
+        assert!(
+            (RouteLayout::narrative_title("Filmography").line_h() - TITLE_LEADING).abs() < 0.01,
+            "the drawn title must set at TITLE_LEADING, not at TextView's derived reading pitch"
+        );
+        // …and the default it replaces, named so the size of the bug stays legible.
+        let reading_default = theme::size::HERO as f32 * 1.32;
+        assert!(
+            reading_default - TITLE_LEADING > 19.0,
+            "the correction has to be worth making: {reading_default} against {TITLE_LEADING}"
+        );
+        // The box still contains the ink it was tightened around: a 72px cap plus its descender.
+        assert!(
+            TITLE_LEADING > theme::size::HERO as f32,
+            "a pitch under the em box would clip a descender between two wrapped title lines"
+        );
+    }
+
+    /// Real consent questions need a third HERO line in Spanish and Belarusian. The shared
+    /// title must keep the whole question and move the disclosure region by that same height.
+    #[test]
+    fn translated_consent_questions_keep_their_complete_titles() {
+        struct QuestionMeasure;
+        impl plx_machine::machine::Measure for QuestionMeasure {
+            fn width(&self, text: &std::ffi::CStr, size: i32, _bold: bool) -> f32 {
+                text.to_string_lossy().chars().count() as f32 * size as f32 * 0.6
+            }
+            fn cap_h(&self, size: i32) -> f32 { size as f32 * 0.7 }
+            fn line_h(&self, size: i32) -> f32 { size as f32 * 1.2 }
+        }
+        let measure = QuestionMeasure;
+        let layout = RouteLayout::screen();
+        for preference in plx_platform::i18n::SHIPPED {
+            let locale = plx_platform::i18n::LocaleContext::resolve(preference, None, None, None, None);
+            for question in [plx_platform::i18n::msg::settings_consent_crash_title_in(&locale),
+                plx_platform::i18n::msg::settings_consent_product_title_in(&locale)] {
+                let title = RouteLayout::narrative_title(question).with_measure(&measure);
+                assert!(!title.truncates(layout.narrative.w), "question was elided: {question}");
+                let height = title.measure_h(layout.narrative.w);
+                let copy = layout.narrative_copy_frame(false, question, layout.action.y, &measure);
+                assert_eq!(copy.y, layout.narrative_top(false) + height + theme::space::MD);
+                assert!(copy.h > theme::size::BODY as f32 * 6.0, "disclosure keeps a readable viewport");
+            }
+        }
+    }
+
+    #[test]
+    fn simultaneous_actions_flow_in_one_shared_bottom_row() {
+        let l = RouteLayout::screen();
+        let (leading, trailing) = l.action_pair(280.0, 240.0);
+        assert_eq!(leading.x, l.action.x);
+        assert_eq!(leading.y, trailing.y);
+        assert_eq!(leading.h, trailing.h);
+        assert_eq!(
+            trailing.x - (leading.x + leading.w),
+            crate::widgets::CONTROL_GAP,
+            "two peer answers are one control GROUP, not two blocks on a spacing rung"
+        );
+        assert!(
+            crate::widgets::CONTROL_GAP < theme::space::MD,
+            "and a control-group gap is tighter than any rung of the block ladder"
+        );
+        assert!(inside_safe(trailing));
+    }
+
+    /// The pair's width is the row's: `action_pair_w` reads the stack `action_pair` places, and a
+    /// pair wider than the band stacks bottom-anchored one `CONTROL_GAP` apart, the trailing
+    /// control on the band's bottom edge.
+    #[test]
+    fn the_action_pair_width_and_its_column_read_one_gap() {
+        let l = RouteLayout::screen();
+        let gap = crate::widgets::CONTROL_GAP;
+        assert_eq!(RouteLayout::action_pair_w(280.0, 240.0), 280.0 + gap + 240.0);
+        let wide = l.action.w;
+        assert!(RouteLayout::action_pair_w(wide, wide) > l.action.w);
+        let (lead, trail) = l.action_pair(wide, wide);
+        assert_eq!((lead.x, trail.x), (l.action.x, l.action.x));
+        assert_eq!(trail.y, l.action.y);
+        assert_eq!(lead.y, l.action.y - l.action.h - gap);
+        assert_eq!((lead.w, trail.w, lead.h, trail.h), (wide, wide, l.action.h, l.action.h));
+    }
+
+    /// The crumb's word stands one `XS` past the chevron's ink, whose box is on the band's x.
+    #[test]
+    fn the_crumb_word_stands_xs_past_the_marks_ink() {
+        let items = [HItem::glyph(Icon::ChevronLeft, CRUMB_MARK), HItem::new(0.0)];
+        let (_, ink_r) = icons::ink_x(Icon::ChevronLeft);
+        let (ink_l, _) = icons::ink_x(Icon::ChevronLeft);
+        let x0 = 100.0;
+        let stack = HStack::new(&items, theme::space::XS, StackAlign::Leading(x0 + ink_l * CRUMB_MARK));
+        let spans: Vec<_> = stack.placed().collect();
+        assert_eq!(spans[0].box_x, x0);
+        assert!((spans[1].x - (x0 + CRUMB_MARK * ink_r + theme::space::XS)).abs() < 1e-4);
+    }
+
+    /// **The crumb costs the TITLE its own height and nothing else pays.** The content column is
+    /// anchored at `--route-top` whether or not the narrative carries a crumb — a crumb that
+    /// pushed nothing would overprint the title, and one that moved the CONTENT would break the
+    /// alignment contract `sectioned_table`'s lift exists to hold.
+    #[test]
+    fn a_crumb_costs_the_title_its_own_height_and_moves_nothing_else() {
+        let l = RouteLayout::screen();
+        assert_eq!(l.narrative_top(false), l.narrative.y, "no crumb, no cost");
+        assert_eq!(
+            l.narrative_top(true) - l.narrative_top(false),
+            CRUMB_BAND + theme::space::SM,
+            "a crumb pushes the title down by exactly its own band plus one rung"
+        );
+        // Its neighbours are anchored independently of it, so both columns still hang from the one
+        // top guide however the narrative begins.
+        assert_eq!(l.content.y, l.narrative.y);
+        assert_eq!(
+            l.sectioned_table().y + crate::table::FIRST_HEADER_CAP_OFFSET,
+            l.narrative.y
+        );
+        assert_eq!(l.action.y + l.action.h, SAFE.y + SAFE.h);
+        // And a crumbed narrative still has room for a two-line title and copy above the band.
+        assert!(l.narrative_top(true) + theme::size::HERO as f32 * 2.0 + theme::space::MD
+            < l.action.y - theme::space::XL);
+    }
+
+    /// The crumb's word sits ON the mark's line: its cap band is centred where the chevron is,
+    /// not pinned to the band's top. The cap height is a stand-in (a CAPTION cap band measures
+    /// ~17 px on the shipped face; measuring it here would link SDL2_ttf into the host suite).
+    #[test]
+    fn the_crumbs_word_centres_its_cap_band_on_the_mark() {
+        let l = RouteLayout::screen();
+        let top = l.narrative.y;
+        let cy = top + CRUMB_BAND * 0.5;
+        let cap = 17.0;
+        let ty = crumb_label_top(cy, cap);
+        assert!((ty + cap * 0.5 - cy).abs() < 0.01, "cap centre {} vs mark centre {}", ty + cap * 0.5, cy);
+        assert!(ty > top, "a CAPTION cap band is shorter than the mark's box, so it starts inside the band");
+        assert!(ty + cap < top + CRUMB_BAND, "…and ends inside it");
+    }
+
+    /// The crumb's mark and its word are ONE object, so the gap between them is measured to the
+    /// chevron's ink rather than to its box — the asset is a third bearing, and a box-to-text gap
+    /// on a spacing rung reads as two separate things.
+    #[test]
+    fn the_crumb_measures_its_gap_to_the_marks_ink() {
+        let (_, ink_r) = crate::icons::ink_x(Icon::ChevronLeft);
+        assert!(ink_r < 1.0, "the chevron carries a right bearing to absorb");
+        let l = RouteLayout::screen();
+        let label_x = l.narrative.x + CRUMB_MARK * ink_r + theme::space::XS;
+        assert!(
+            label_x < l.narrative.x + CRUMB_MARK + theme::space::XS,
+            "measuring to ink puts the word CLOSER than a box-to-text gap would"
+        );
+        assert!(label_x > l.narrative.x + CRUMB_MARK * 0.5, "…but not over it");
+    }
+
+    /// **The whole reason `ActionRow` exists**: a control holding row focus pops, an unfocused
+    /// sibling in the same row does not, and both reach a settled rest — the same shape
+    /// `CtlPop`'s own doc promises, pinned again here because this is the type every action-row
+    /// caller is meant to reach for instead of a private field.
+    #[test]
+    fn action_row_pops_the_focused_control_and_leaves_its_sibling_at_rest() {
+        // `CtlPop::scale` reads the crate-global `press` machine for whichever index is focused —
+        // see `[[test-suite-global-pollution]]` — so this holds the same lock every `press.rs`
+        // test does for its own body.
+        let _g = plx_base::testlock::serial();
+        let mut row: ActionRow<2> = ActionRow::new();
+        for _ in 0..300 {
+            row.step(Some(0), 1.0 / 60.0);
+        }
+        assert!(
+            row.scale(0) > 1.0,
+            "the focused control must be visibly popped, got {}",
+            row.scale(0)
+        );
+        assert!(
+            (row.scale(1) - 1.0).abs() < 0.001,
+            "the unfocused sibling must not move, got {}",
+            row.scale(1)
+        );
+        for _ in 0..300 {
+            row.step(None, 1.0 / 60.0);
+        }
+        assert!(
+            (row.scale(0) - 1.0).abs() < 0.001,
+            "focus leaving the row must settle every control back to rest"
+        );
+    }
+
+    // ---- the shared focus model ---------------------------------------------------------------
+    //
+    // Eleven rules, graded here as pure state transitions with no screen, no font and no GL. The
+    // per-screen tests (`consent`, `onboard`, `legal`) grade that each screen ROUTES its keys
+    // through these; this block grades that the rules themselves say what the module doc says.
+
+    /// A table with a `band`-control band, holding nothing uncommitted.
+    fn table_shape(band: usize, at_last_row: bool) -> RouteShape {
+        RouteShape {
+            band,
+            rows: true,
+            at_last_row,
+            opens: false,
+            uncommitted: false,
+        }
+    }
+
+    /// **Rules 2 and 3: the band and the last row are one vertical walk, and it round-trips.**
+    #[test]
+    fn down_off_the_last_row_enters_the_band_and_up_comes_straight_back() {
+        let mut f = RouteFocus::content();
+        assert_eq!(
+            f.updown(table_shape(1, false), 1),
+            RouteStep::Scroll(1),
+            "a middle row just moves the selection"
+        );
+        assert!(f.on_content());
+        assert_eq!(f.updown(table_shape(1, true), 1), RouteStep::Moved);
+        assert_eq!(f.stop(), Stop::Band(0), "DOWN off the last row enters the band");
+        assert_eq!(f.updown(table_shape(1, true), -1), RouteStep::Moved);
+        assert_eq!(f.stop(), Stop::Content, "…and UP comes straight back");
+    }
+
+    /// **Rule 4: the band is the floor**, and **rule 2 does not fire without a band** — a screen
+    /// with none must keep handing DOWN to its list rather than inventing a stop.
+    #[test]
+    fn the_band_is_the_floor_and_a_bandless_screen_has_no_band_to_fall_into() {
+        let mut f = RouteFocus::band();
+        assert_eq!(f.updown(table_shape(1, true), 1), RouteStep::Wall);
+        assert_eq!(f.stop(), Stop::Band(0));
+        let mut g = RouteFocus::content();
+        assert_eq!(g.updown(table_shape(0, true), 1), RouteStep::Scroll(1));
+        assert!(g.on_content());
+    }
+
+    /// **Rules 5, 6 and 7: LEFT and RIGHT are one horizontal walk across the whole screen.** Two
+    /// peer answers plus a list is three stops, and every step is reversible — which is exactly
+    /// what first-run consent lacked (RIGHT off the trailing answer went nowhere) and what
+    /// Privacy & data lacked in both directions.
+    #[test]
+    fn left_and_right_walk_the_band_and_the_list_as_one_row_of_stops() {
+        // Two peer answers over a screen that is holding an edit, so the leading control is a wall
+        // (rule 9's guard) and the walk's own ends are visible. The guard itself is graded by
+        // `left_leaves_unless_the_screen_is_holding_an_edit_that_back_would_discard`.
+        let s = RouteShape {
+            uncommitted: true,
+            ..table_shape(2, false)
+        };
+        let mut f = RouteFocus::content();
+        assert_eq!(f.left(s), RouteStep::Moved);
+        assert_eq!(f.stop(), Stop::Band(0), "LEFT from the list enters the band");
+        assert_eq!(f.left(s), RouteStep::Wall, "…and stops at its leading control");
+        assert_eq!(f.right(s), RouteStep::Moved);
+        assert_eq!(f.stop(), Stop::Band(1));
+        assert_eq!(f.right(s), RouteStep::Moved);
+        assert_eq!(f.stop(), Stop::Content, "RIGHT off the trailing control returns to the list");
+        // …and coming back in lands on the control it left, not on the band's first.
+        assert_eq!(f.left(s), RouteStep::Moved);
+        assert_eq!(f.stop(), Stop::Band(1));
+    }
+
+    /// **Rule 9, and its one guard.** LEFT off the left-most stop leaves the screen — unless the
+    /// screen says it is holding an uncommitted edit, which BACK would discard.
+    ///
+    /// The guard is `uncommitted`, NOT "the screen has a band", and this test exists because the
+    /// rule's first justification made exactly that inference and it is false in both directions:
+    /// the Home editor's `Try again` is a band with nothing behind it, and first run's two answers
+    /// record nothing until OK. So a band is not a wall on its own — a DRAFT is.
+    #[test]
+    fn left_leaves_unless_the_screen_is_holding_an_edit_that_back_would_discard() {
+        let mut bandless = RouteFocus::content();
+        assert_eq!(bandless.left(table_shape(0, false)), RouteStep::Back);
+        assert_eq!(
+            bandless.left(RouteShape::document()),
+            RouteStep::Back,
+            "a document is a read: nothing to its left and nothing to lose"
+        );
+
+        // A band with nothing behind it is NOT a wall — this is the Home editor's `Try again`, and
+        // first run's two answers, both of which record nothing until OK.
+        let mut clean_band = RouteFocus::band();
+        assert_eq!(clean_band.left(table_shape(1, false)), RouteStep::Back);
+
+        // A draft IS. Overshooting Done by one press must not throw an edit away.
+        let dirty = RouteShape {
+            uncommitted: true,
+            ..table_shape(1, false)
+        };
+        let mut on_done = RouteFocus::band();
+        assert_eq!(on_done.left(dirty), RouteStep::Wall);
+        assert_eq!(on_done.stop(), Stop::Band(0), "…and focus does not wander either");
+        // …and the guard reaches the bandless case too: a screen holding an edit with no band to
+        // step into still may not be left by a directional key.
+        let mut on_list = RouteFocus::content();
+        assert_eq!(
+            on_list.left(RouteShape {
+                uncommitted: true,
+                ..table_shape(0, false)
+            }),
+            RouteStep::Wall
+        );
+    }
+
+    /// **Rule 11's timing guard.** A key acts on the LOGICAL state; a positional hit cannot, so
+    /// every pointer path in the family refuses until its layer has arrived at an endpoint.
+    #[test]
+    fn a_push_is_settled_only_at_the_endpoint_its_state_names() {
+        let mut push = RoutePush::new();
+        assert!(push.settled(false), "at rest, closed");
+        assert!(!push.settled(true));
+        push.update(true, 1.0 / 60.0);
+        assert!(
+            !push.settled(true) && !push.settled(false),
+            "mid-flight is settled for NEITHER state — which is the whole point"
+        );
+        for _ in 0..600 {
+            push.update(true, 1.0 / 60.0);
+        }
+        assert!(push.settled(true) && !push.settled(false));
+    }
+
+    /// **Rule 8: RIGHT enters a chevron row and nothing else.** A toggle row changes a value in
+    /// place, so there is nothing to its right to go to.
+    #[test]
+    fn right_enters_only_a_row_that_opens_something() {
+        let mut f = RouteFocus::content();
+        let opens = RouteShape {
+            opens: true,
+            ..table_shape(0, false)
+        };
+        assert_eq!(f.right(opens), RouteStep::Enter);
+        assert!(f.on_content(), "entering is the SCREEN's job; focus stays put");
+        assert_eq!(f.right(table_shape(0, false)), RouteStep::Wall);
+    }
+
+    /// **Rule 1: a document scrolls.** It has no rows, so no vertical press may be interpreted as
+    /// falling off the end of a list.
+    #[test]
+    fn a_document_scrolls_on_up_and_down_however_far_it_is_driven() {
+        let mut f = RouteFocus::content();
+        for _ in 0..5 {
+            assert_eq!(f.updown(RouteShape::document(), 1), RouteStep::Scroll(1));
+        }
+        assert_eq!(f.updown(RouteShape::document(), -1), RouteStep::Scroll(-1));
+        assert!(f.on_content());
+    }
+
+    /// **Rule 10: focus may never rest on nothing** — the reported "toggling the value back can
+    /// cause focus to disappear completely", as a pure transition. A band that goes away hands
+    /// focus back to the list; a list with no rows yet hands it to the band; and a cursor left
+    /// past the end of a shrunken band is pulled back inside it.
+    #[test]
+    fn a_shape_that_removes_the_focused_stop_re_seats_focus_rather_than_losing_it() {
+        let mut on_done = RouteFocus::band();
+        assert!(
+            on_done.settle(table_shape(0, false)),
+            "removing the band has to move focus"
+        );
+        assert_eq!(on_done.stop(), Stop::Content);
+
+        let mut on_empty_list = RouteFocus::content();
+        assert!(on_empty_list.settle(RouteShape {
+            band: 1,
+            rows: false,
+            at_last_row: false,
+            opens: false,
+            uncommitted: false,
+        }));
+        assert_eq!(
+            on_empty_list.stop(),
+            Stop::Band(0),
+            "a list that has not landed yet cannot hold the ring"
+        );
+
+        let mut past_the_end = RouteFocus::band();
+        past_the_end.to_band(1);
+        assert!(past_the_end.settle(table_shape(1, false)));
+        assert_eq!(past_the_end.stop(), Stop::Band(0));
+
+        let mut settled = RouteFocus::content();
+        assert!(
+            !settled.settle(table_shape(1, false)),
+            "a shape that still holds the focused stop reports no move"
+        );
+    }
+
+    /// Every rule re-settles before it runs, so a key that arrives on the frame a rebuild removed
+    /// the focused stop cannot act on a stop that is no longer there.
+    #[test]
+    fn every_rule_settles_before_it_decides() {
+        for step in [
+            RouteFocus::band().updown(table_shape(0, true), -1),
+            RouteFocus::band().left(table_shape(0, false)),
+            RouteFocus::band().right(table_shape(0, false)),
+        ] {
+            assert!(
+                !matches!(step, RouteStep::Moved),
+                "a band that is gone must not answer as though focus were still on it: {step:?}"
+            );
+        }
+        // …and the LEFT case is the one that matters most: settled onto the list of a bandless
+        // screen, LEFT is the way out of it rather than a step to a control that is not drawn.
+        assert_eq!(
+            RouteFocus::band().left(table_shape(0, false)),
+            RouteStep::Back
+        );
+    }
+
+    /// **Rule 11's geometry half**: only a control DRAWN this frame is hit-testable, and dead
+    /// space parks nothing. `clear` is what retires a Done that an undo has just removed — without
+    /// it the band leaves a live click target where it used to be.
+    #[test]
+    fn only_a_placed_action_control_can_be_hit_and_dead_space_hits_nothing() {
+        let mut row: ActionRow<2> = ActionRow::new();
+        assert_eq!(row.hit(0.0, 0.0), None, "an unplaced row has no target anywhere");
+        row.place(0, Rect::new(100.0, 900.0, 200.0, 60.0));
+        row.place(1, Rect::new(320.0, 900.0, 180.0, 60.0));
+        assert_eq!(row.hit(150.0, 930.0), Some(0));
+        assert_eq!(row.hit(400.0, 930.0), Some(1));
+        assert_eq!(row.hit(310.0, 930.0), None, "the gap between them is dead space");
+        assert_eq!(row.hit(150.0, 400.0), None, "and so is the rest of the screen");
+        row.clear();
+        assert_eq!(row.hit(150.0, 930.0), None, "a band that is not drawn is not clickable");
+    }
+
+    /// **Issue 2's geometry rule.** A text-only content column hangs from the TITLE's anchor, not
+    /// from the crumb's — so its first line is level with the title beside it instead of sitting up
+    /// on the return chevron's line. Written against the two anchors rather than against a number,
+    /// because the number is `narrative_top`'s and must not be transcribed twice.
+    #[test]
+    fn a_text_only_column_starts_on_the_title_line_not_on_the_crumbs() {
+        let l = RouteLayout::screen();
+        for crumbed in [true, false] {
+            let doc = l.document(crumbed);
+            assert_eq!(
+                doc.y,
+                l.narrative_top(crumbed),
+                "a document's first line shares the narrative title's cap-top anchor"
+            );
+            assert_eq!(doc.x, l.content.x, "…in the content column, unmoved sideways");
+            assert_eq!(doc.w, l.content.w);
+            assert_eq!(
+                doc.y + doc.h,
+                l.content.y + l.content.h,
+                "…and it still ends where every other content column does"
+            );
+            assert!(inside_safe(doc));
+        }
+        assert!(
+            l.document(true).y > l.sectioned_table().y,
+            "a table is LIFTED so its first section label lands on the guide; a document, which \
+             has no such label, must not be"
+        );
+        assert!(
+            l.document(true).y > l.narrative.y,
+            "…and specifically it must not start on the crumb's own line"
+        );
+    }
+
+    #[test]
+    fn nested_route_uses_one_reversible_spring() {
+        let mut push = RoutePush::new();
+        push.update(true, 1.0 / 60.0);
+        assert!(push.amount() > 0.0 && push.amount() < 1.0);
+        for _ in 0..600 {
+            push.update(true, 1.0 / 60.0);
+        }
+        assert!((push.amount() - 1.0).abs() < 0.001);
+        for _ in 0..600 {
+            push.update(false, 1.0 / 60.0);
+        }
+        assert!(push.amount() < 0.001);
+    }
+
+    /// **A latched RouteGround does not re-latch.** `draw_default` runs its own `if
+    /// !self.field.is_latched()` guard every frame it is called, exactly as `draw_host`/`draw_home`
+    /// do; two calls with two different fallbacks in force between them must still land on whichever
+    /// atmosphere the FIRST call saw, or nested push/back transitions would repaint their ground out
+    /// from under the content moving over it.
+    ///
+    /// Exercises `latch_default` rather than `draw_default` itself — see [`RouteGround::latch_host`]'s
+    /// doc for why these latch assertions avoid a visible GL draw.
+    #[test]
+    fn a_latched_route_ground_does_not_re_latch() {
+        let mut ground = RouteGround::new();
+        ground.latch_default();
+        assert!(ground.is_latched());
+        let palette = ground.palette();
+
+        ground.latch_default();
+        assert_eq!(
+            ground.palette(),
+            palette,
+            "a second latch must not move an already-latched ground"
+        );
+    }
+
+    /// **A route whose live-frame latch fails still gets an atmosphere.** `draw_host` cannot force
+    /// `gfx::field_kick` to answer — a video-plane frame, a blur source pass, a frozen
+    /// page and a drawable the exact-2x chain cannot be built for are all real "no honest frame this
+    /// time" answers this route does not get to pick between — so it has to fall back, once, to the
+    /// same authored corners `draw_default` uses when it has no host at all. The video-plane refusal
+    /// is the one member of that list a host test can DRIVE (`gfx::set_video_plane_frame`, thread-
+    /// local — see its own doc — so this cannot leak into another test): the other three would need
+    /// a live GL context this binary never creates.
+    ///
+    /// Exercises `latch_host` rather than `draw_host` itself — see [`RouteGround::latch_host`]'s doc
+    /// for why these latch assertions avoid a visible GL draw.
+    #[test]
+    fn a_route_ground_whose_frame_latch_fails_falls_back_to_corners() {
+        // A refusal is not a pending read, and the deferred read must not turn one into a frame of
+        // no atmosphere.
+        {
+            let was = plx_gfx::gfx::set_video_plane_frame(true);
+            let mut ground = RouteGround::new();
+            ground.latch_host();
+            plx_gfx::gfx::set_video_plane_frame(was);
+
+            assert!(
+                ground.is_latched(),
+                "a refused live frame must still leave the ground with an atmosphere"
+            );
+            let mut want = UnderlayField::new();
+            want.latch_from_corners(RouteGround::fallback_corners(), Grade::Ground);
+            assert_eq!(
+                ground.palette(),
+                ControlPalette::ambient(want.key()),
+                "the fallback must be the SAME corners, graded the SAME way draw_host would grade a \
+                 live sample"
+            );
+        }
+    }
+
+    /// **THE POINT OF STAGE B, seen through `RouteGround` itself**: `sample()` is spatially
+    /// faithful, not a four-corner bilinear wearing a new implementation. Green in the bottom-left
+    /// corner must read greener there than in the top-right, which a wash of only four degrees of
+    /// freedom could also manage — the case that actually discriminates is `underlay_tests.rs`'s
+    /// `the_field_samples_greener_where_the_green_is`; this one exists to prove `RouteGround::sample`
+    /// is wired to the field's OWN sample rather than to some remaining four-corner shortcut.
+    #[test]
+    fn route_ground_sample_is_spatially_faithful() {
+        let dark = [0.05, 0.05, 0.05];
+        let red = [0.9, 0.05, 0.05];
+        let green = [0.05, 0.9, 0.05];
+        // Painter corner order: top-left, top-right, bottom-right, bottom-left.
+        let mut ground = RouteGround::new();
+        ground
+            .field
+            .latch_from_corners([dark, red, dark, green], Grade::Dim);
+
+        let bl = ground.sample(
+            crate::consts::SCR_W * 0.08,
+            crate::consts::SCR_H * 0.92,
+        );
+        let tr = ground.sample(
+            crate::consts::SCR_W * 0.92,
+            crate::consts::SCR_H * 0.08,
+        );
+        assert!(
+            bl[1] - bl[0] > 0.2,
+            "the bottom-left corner must read GREEN, got {bl:?}"
+        );
+        assert!(
+            tr[0] - tr[1] > 0.2,
+            "the top-right corner must read RED, got {tr:?}"
+        );
+    }
+
+    #[test]
+    fn pre_home_fallback_is_an_envelope_not_a_flat_grey() {
+        let c = theme::ROUTE_GROUND_FALLBACK;
+        assert!(c.windows(2).any(|pair| pair[0] != pair[1]));
+        assert!(c.iter().any(|corner| {
+            (corner[0] - corner[1]).abs() > 0.001 || (corner[1] - corner[2]).abs() > 0.001
+        }));
+    }
+
+    /// WCAG relative luminance and contrast, duplicated in miniature from `widgets.rs`'s private
+    /// `rel_luma`/`contrast` — this module cannot see those (`widgets`' are not `pub`) and a
+    /// third home for the two formulas is worse than one small, obviously-correct copy that a host
+    /// test can run with no font or GL loaded.
+    fn linearize(c: f32) -> f32 {
+        if c <= 0.03928 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    fn rel_luma(c: [f32; 4]) -> f32 {
+        0.2126 * linearize(c[0]) + 0.7152 * linearize(c[1]) + 0.0722 * linearize(c[2])
+    }
+    fn contrast(a: [f32; 4], b: [f32; 4]) -> f32 {
+        let (x, y) = (rel_luma(a), rel_luma(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    /// **The regression this fallback shipped with**: a device capture of first-run consent read as
+    /// "no ambient light" because three of the four authored stops sat within ~15 8-bit codes of
+    /// `theme::SURFACE_APP` in both hue and luminance — a wash with almost no wash in it. A real
+    /// keyed hero ground gets its contrast from an actual photograph; this one has to author its
+    /// own, so it is pinned directly: the brightest and darkest corners must differ by a real
+    /// multiple (not `AmbientWash`'s own ~1.8x floor, which a near-uniform fallback could still
+    /// clear), and every corner must still hold the same legibility floors
+    /// `a_ground_never_outshines_the_fine_print_that_sits_on_it` holds a real keyed hero to, since
+    /// the crumb caption and the copy paragraph both read in `TEXT_TERTIARY`/`TEXT_READING` over
+    /// this exact ground with no further dimming.
+    #[test]
+    fn the_pre_home_fallback_reads_as_a_directional_wash() {
+        let c = theme::ROUTE_GROUND_FALLBACK;
+        let luma: Vec<f32> = c.iter().map(|corner| rel_luma(*corner)).collect();
+        let (lo, hi) = (
+            luma.iter().cloned().fold(f32::INFINITY, f32::min),
+            luma.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
+        );
+        assert!(
+            hi / lo.max(1e-6) >= 2.5,
+            "corners span only {lo:.4}..{hi:.4} — too close in luminance to read as directional \
+             light on a television"
+        );
+        for (i, corner) in c.iter().enumerate() {
+            let t = contrast(theme::TEXT_TERTIARY, *corner);
+            assert!(
+                t >= 3.0,
+                "corner {i}: TEXT_TERTIARY at {t:.2}:1, under the 3:1 floor the crumb caption reads at"
+            );
+            let p = contrast(theme::TEXT_PRIMARY, *corner);
+            assert!(p >= 7.0, "corner {i}: TEXT_PRIMARY at {p:.2}:1");
+        }
+    }
+
+    /// The fallback must not merely be brighter — it must stay materially distinct from a flat
+    /// `SURFACE_APP` fill, which is the specific failure mode the correction fixed (three of four
+    /// stops used to sit within ~15 8-bit codes of it in both hue AND luminance). Measured as raw
+    /// mean per-channel distance (display-encoded, not WCAG-linearized) rather than luminance
+    /// alone: WCAG luminance compresses the shadow end sharply, so a corner that is UNMISTAKABLY
+    /// darker at the near-black end (this fallback's own `ATMOS_CHARCOAL`) can read as luminance-
+    /// close to the surface while an 8-bit-code comparison — closer to how banding-free darks
+    /// actually read on a panel — shows it plainly is not.
+    #[test]
+    fn every_fallback_corner_is_visibly_apart_from_the_app_surface() {
+        for (i, corner) in theme::ROUTE_GROUND_FALLBACK.iter().enumerate() {
+            let d: f32 = (0..3)
+                .map(|ch| (corner[ch] - theme::SURFACE_APP[ch]).abs())
+                .sum::<f32>()
+                / 3.0;
+            assert!(
+                d > 0.06,
+                "corner {i} sits only {d:.4} from SURFACE_APP's own raw channel values — that \
+                 reads as the app's flat ground, not atmosphere"
+            );
+        }
+    }
+
+    /// The narrative flow: crumb band, SM, title, MD, copy; an absent crumb takes no room.
+    #[test]
+    fn the_narrative_flow_is_one_ladder_with_an_absent_crumb() {
+        let l = RouteLayout::screen();
+        let with = l.narrative_flow(true, 90.0);
+        let crumb = with.crumb.expect("crumb");
+        assert!((crumb.y - l.narrative.y).abs() < 0.01 && crumb.h == CRUMB_BAND);
+        assert!((with.title.y - (crumb.y + CRUMB_BAND + theme::space::SM)).abs() < 0.01);
+        assert!((with.copy_top - (with.title.y + 90.0 + theme::space::MD)).abs() < 0.01);
+        let bare = l.narrative_flow(false, 90.0);
+        assert!(bare.crumb.is_none());
+        assert!((bare.title.y - l.narrative.y).abs() < 0.01);
+        assert!((bare.copy_top - (l.narrative.y + 90.0 + theme::space::MD)).abs() < 0.01);
+    }
+    /// The Hero title (every route that is not a Settings page) keeps its 72 px rung and its
+    /// crumb pushing the title down; the Page title (a Settings page) is 48 on the guide with the
+    /// crumb above it. One switch, [`RouteLayout::page_titled`]; `screen()` never sets it.
+    #[test]
+    fn a_route_sets_the_hero_title_and_a_settings_page_sets_the_page_title() {
+        let hero = RouteLayout::screen();
+        let page = RouteLayout::settings_page();
+        assert_eq!(hero.title_style, TitleStyle::Hero);
+        assert_eq!(page.title_style, TitleStyle::Page);
+        assert_eq!((hero.narrative, hero.content, hero.action), (page.narrative, page.content, page.action));
+        assert_eq!(TitleStyle::Hero.size(), theme::size::HERO);
+        assert_eq!(TitleStyle::Page.size(), theme::size::DISPLAY);
+        assert_eq!(TitleStyle::Page.size(), 48);
+        assert!((hero.title_view("Settings").line_h() - theme::size::HERO as f32 * 1.05).abs() < 0.01);
+        assert!((page.title_view("Settings").line_h() - theme::size::DISPLAY as f32 * 1.05).abs() < 0.01);
+        // `narrative_title` (the layout-free view consent grades) stays the Hero one
+        assert_eq!(RouteLayout::narrative_title("Settings").line_h(), hero.title_view("Settings").line_h());
+    }
+
+    /// Hero: a crumb pushes the title down by its band plus one rung. Page: the crumb hangs above
+    /// the guide, the title stays at the root's y, and the copy moves with neither.
+    #[test]
+    fn a_crumb_pushes_a_hero_title_and_hangs_above_a_page_title() {
+        let hero = RouteLayout::screen();
+        assert_eq!(hero.narrative_top(true) - hero.narrative_top(false), CRUMB_RISE);
+        let crumb = hero.narrative_flow(true, 90.0).crumb.expect("crumb");
+        assert_eq!(crumb.y, hero.narrative.y);
+
+        let page = RouteLayout::settings_page();
+        assert_eq!(page.narrative_top(false), page.narrative.y);
+        assert_eq!(page.narrative_top(true), page.narrative_top(false), "a crumb costs a Page title no room");
+        let crumb = page.narrative_flow(true, 50.0).crumb.expect("crumb");
+        assert_eq!(crumb.y + CRUMB_RISE, page.narrative.y, "the band and one rung of air end on the guide");
+        assert!(crumb.y >= SAFE.y, "…and the band stays inside the safe area");
+        assert_eq!(page.narrative_flow(true, 50.0).copy_top, page.narrative_flow(false, 50.0).copy_top);
+        assert!((page.narrative_flow(false, 50.0).copy_top - (page.narrative.y + 50.0 + theme::space::MD)).abs() < 0.01);
+        assert!(page.document(true).y >= page.narrative.y);
+    }
+
+    /// A Page title is the board's CSS box: tracked `-.02em` and set its half-leading plus ascent
+    /// under the box top; a Hero title is tracked by nothing and cap-anchored on the box top.
+    #[test]
+    fn a_page_title_is_tracked_and_dropped_into_its_css_box_and_a_hero_title_is_neither() {
+        struct M;
+        impl Measure for M {
+            fn width(&self, text: &std::ffi::CStr, size: i32, _bold: bool) -> f32 {
+                text.to_string_lossy().chars().count() as f32 * size as f32 * 0.6
+            }
+            fn cap_h(&self, size: i32) -> f32 { size as f32 * 0.727 }
+            fn line_h(&self, size: i32) -> f32 { size as f32 * 1.2 }
+        }
+        assert_eq!(TitleStyle::Hero.tracking(), 0.0);
+        assert!((TitleStyle::Page.tracking() - (-0.96)).abs() < 1e-4);
+        let (hero, page) = (RouteLayout::screen(), RouteLayout::settings_page());
+        assert_eq!(hero.title_cap_drop(&M), 0.0);
+        assert_eq!(hero.copy_cap_drop(theme::size::LABEL, &M), 0.0);
+        assert!((page.title_cap_drop(&M) - 7.1).abs() < 0.2, "{}", page.title_cap_drop(&M));
+        assert!((page.copy_cap_drop(theme::size::LABEL, &M) - 7.1).abs() < 0.2, "{}", page.copy_cap_drop(theme::size::LABEL, &M));
+    }
+
+    /// The picture slot is the board's: 660 wide at y 440, ending on the safe area's floor, under
+    /// the five lines a followed sentence may take below a one-line Page title.
+    #[test]
+    fn the_picture_slot_clears_five_sentence_lines_under_a_one_line_page_title() {
+        let l = RouteLayout::settings_page();
+        let slot = l.picture_slot();
+        assert_eq!((slot.x, slot.y, slot.w), (l.narrative.x, 440.0, 660.0));
+        assert!(slot.h <= 586.0 + 0.5 && (slot.y + slot.h - (SAFE.y + SAFE.h)).abs() < 0.01);
+        let title_h = l.title_view("Settings").line_h();
+        let lines = crate::follow_copy::FOLLOW_LINES as f32 * (theme::size::LABEL as f32 + theme::space::XS);
+        assert!(l.narrative_flow(false, title_h).copy_top + lines <= slot.y, "five lines end above the slot");
+    }
+
+    // ---- the held-narrative push (Settings v2 motion) ------------------------------------------
+
+    /// One frame of `push` driven toward `open` at 60 fps, returning `(list, fade)`.
+    fn push_trace(open: bool, from: f32, frames: usize) -> Vec<(f32, f32)> {
+        let mut push = RoutePush::at(from);
+        let mut out = vec![(push.amount(), push.fade_amount())];
+        for _ in 0..frames {
+            push.update(open, 1.0 / 60.0);
+            out.push((push.amount(), push.fade_amount()));
+        }
+        out
+    }
+
+    fn at(role: PushRole, list: f32, fade: f32) -> PushFrame {
+        PushFrame { role, list, fade }
+    }
+
+    /// **The narrative column's frame is constant across a whole push, both roles**: whatever the
+    /// spring does, the narrative painter carries no translate, and only its alpha moves.
+    #[test]
+    fn the_narrative_frame_never_moves_through_a_push() {
+        for (list, fade) in push_trace(true, 0.0, 90) {
+            for role in [PushRole::Parent, PushRole::Child] {
+                let p = at(role, list, fade).narrative(Painter::root());
+                assert_eq!((p.dx(), p.dy()), (0.0, 0.0), "{role:?} at list {list}");
+            }
+        }
+    }
+
+    /// **The two columns' content cross-fades**: at every frame the leaving page's narrative alpha
+    /// and the entering page's sum to exactly 1, from `(1, 0)` at the start to `(0, 1)` at rest.
+    #[test]
+    fn the_narrative_cross_fade_sums_to_one_and_runs_from_parent_to_child() {
+        let trace = push_trace(true, 0.0, 120);
+        for &(list, fade) in &trace {
+            let (parent, child) = (at(PushRole::Parent, list, fade), at(PushRole::Child, list, fade));
+            assert!((parent.narrative_alpha() + child.narrative_alpha() - 1.0).abs() < 1e-6);
+        }
+        let (list, fade) = trace[0];
+        assert_eq!(at(PushRole::Parent, list, fade).narrative_alpha(), 1.0);
+        assert_eq!(at(PushRole::Child, list, fade).narrative_alpha(), 0.0);
+        let (list, fade) = *trace.last().unwrap();
+        assert!(at(PushRole::Parent, list, fade).narrative_alpha() < 1e-3);
+        assert!(at(PushRole::Child, list, fade).narrative_alpha() > 1.0 - 1e-3);
+    }
+
+    /// **The cross-fade is on the appear token (300) and the list on the push token (200)**: the
+    /// fade is ahead of the list at every frame of the flight, and both land.
+    #[test]
+    fn the_fade_rides_the_appear_spring_and_leads_the_list_on_the_push_spring() {
+        let mut fade = Spring::at(0.0);
+        let mut list = Spring::at(0.0);
+        let trace = push_trace(true, 0.0, 90);
+        for (i, &(l, f)) in trace.iter().enumerate().skip(1) {
+            fade.step(1.0, crate::popover::K_APPEAR, 1.0 / 60.0);
+            list.step(1.0, 200.0, 1.0 / 60.0);
+            assert_eq!(f, fade.pos.clamp(0.0, 1.0), "frame {i}: the fade is the K_APPEAR spring");
+            assert_eq!(l, list.pos.clamp(0.0, 1.0), "frame {i}: the list is the k 200 spring");
+            if l < 0.999 {
+                assert!(f >= l, "frame {i}: fade {f} behind list {l}");
+            }
+        }
+        let (l, f) = *trace.last().unwrap();
+        assert!((l - 1.0).abs() < 1e-3 && (f - 1.0).abs() < 1e-3);
+    }
+
+    /// **The list endpoints are the board's**: the child leads in from `.22 x screen-w` and the
+    /// parent leaves `.35 x screen-w` to the left, each fading, and both rest where the page does.
+    #[test]
+    fn the_list_travels_to_the_board_endpoints() {
+        let w = Rect::FULL.w;
+        let root = Painter::root();
+        let child_start = at(PushRole::Child, 0.0, 0.0).list(root);
+        assert_eq!((child_start.dx(), child_start.opacity()), (0.22 * w, 0.0));
+        let child_end = at(PushRole::Child, 1.0, 1.0).list(root);
+        assert_eq!((child_end.dx(), child_end.opacity()), (0.0, 1.0));
+        let parent_start = at(PushRole::Parent, 0.0, 0.0).list(root);
+        assert_eq!((parent_start.dx(), parent_start.opacity()), (0.0, 1.0));
+        let parent_end = at(PushRole::Parent, 1.0, 1.0).list(root);
+        assert_eq!((parent_end.dx(), parent_end.opacity()), (-0.35 * w, 0.0));
+        let mid = at(PushRole::Parent, 0.5, 0.5).list(root);
+        assert_eq!((mid.dx(), mid.opacity()), (-0.175 * w, 0.5));
+    }
+
+    /// **Back is the exact reverse**: the springs are symmetric, so frame `i` of a pop is `1 - ` frame
+    /// `i` of the push, for the list and for the fade, and the roles' formulas are the same ones.
+    #[test]
+    fn a_pop_reverses_the_push_frame_for_frame() {
+        let forward = push_trace(true, 0.0, 90);
+        let back = push_trace(false, 1.0, 90);
+        for (i, (f, b)) in forward.iter().zip(&back).enumerate() {
+            assert!((f.0 - (1.0 - b.0)).abs() < 1e-5, "frame {i}: list {f:?} vs {b:?}");
+            assert!((f.1 - (1.0 - b.1)).abs() < 1e-5, "frame {i}: fade {f:?} vs {b:?}");
+        }
+    }
+
+    /// **A page that does not hold its column is drawn exactly as before**: `parent`/`child` are the
+    /// whole-page translate and alpha off the list spring alone, frame for frame (the golden is the
+    /// pre-change arithmetic, stepped on its own `Spring`).
+    #[test]
+    fn a_whole_page_push_is_the_pre_change_translate_and_alpha() {
+        let w = Rect::FULL.w;
+        let mut old = Spring::at(0.0);
+        let mut push = RoutePush::new();
+        let root = Painter::root();
+        for i in 0..90 {
+            old.step(1.0, 200.0, 1.0 / 60.0);
+            push.update(true, 1.0 / 60.0);
+            let t = old.pos.clamp(0.0, 1.0);
+            let (parent, child) = (push.parent(root), push.child(root));
+            assert_eq!((parent.dx(), parent.opacity()), (-0.35 * w * t, 1.0 - t), "parent, frame {i}");
+            assert_eq!((child.dx(), child.opacity()), (0.22 * w * (1.0 - t), t), "child, frame {i}");
+            assert_eq!((parent.dy(), child.dy()), (0.0, 0.0));
+        }
+    }
+
+    #[test]
+    fn a_push_rests_only_when_both_springs_have_arrived() {
+        let mut push = RoutePush::new();
+        assert!(push.resting(false));
+        push.update(true, 1.0 / 60.0);
+        assert!(!push.resting(true) && !push.resting(false));
+        for _ in 0..600 {
+            push.update(true, 1.0 / 60.0);
+        }
+        assert!(push.resting(true));
+        let mut other = RoutePush::new();
+        other.sync_to(&push);
+        assert_eq!((other.amount(), other.fade_amount()), (push.amount(), push.fade_amount()), "sync_to seeds both springs");
+        assert!(other.fade_amount() > 0.999);
+    }
+
+    // ---- the pre-roll: a push waits at 0 while its destination's text is rasterised --------------
+
+    /// One frame of `push` toward open at 16 ms, the way the surface's tick drives it. `latched`
+    /// is the iteration's text readiness; `walk` is what the surface's draw does afterwards.
+    /// Returns whether the frame asked for another.
+    fn warm_frame(push: &mut RoutePush, ms: &mut u32, latched: bool, walk: bool) -> bool {
+        let mut present = plx_machine::present::Present::new();
+        *ms += 16;
+        plx_gfx::text::latch_surface_text_pending(latched);
+        let t = plx_machine::machine::Tick { ms: *ms, dt_us: 16_000 };
+        push.tick(true, t, &mut plx_machine::machine::PresentHandle::of(&mut present));
+        if walk && push.warming() {
+            push.walked();
+        }
+        present.changed()
+    }
+
+    fn started() -> RoutePush {
+        let mut push = RoutePush::new();
+        push.jump(false);
+        push.begin_warm();
+        push
+    }
+
+    /// The same push without a wait, `frames` ticks of 16 ms in.
+    fn unwarmed(frames: u32) -> RoutePush {
+        let mut push = RoutePush::new();
+        push.jump(false);
+        let mut ms = 0;
+        for _ in 0..frames {
+            warm_frame(&mut push, &mut ms, false, false);
+        }
+        push
+    }
+
+    /// **A warm page's push is exactly where it would have been without the wait**: the request
+    /// frame is the probe (nothing is moved, the next frame is asked for), and the next frame steps
+    /// the springs by both frames' time.
+    #[test]
+    fn a_warm_pages_push_loses_no_time_to_its_probe() {
+        let _g = plx_base::testlock::serial();
+        let mut push = started();
+        let mut ms = 0;
+        assert!(warm_frame(&mut push, &mut ms, false, true), "the probe frame asks for another");
+        assert_eq!(push.amount(), 0.0, "…and moved nothing: the incoming page was walked, not shown");
+        assert!(push.warming());
+        warm_frame(&mut push, &mut ms, false, true);
+        assert!(!push.warming(), "nothing pending: the wait is over");
+        let reference = unwarmed(2);
+        assert!((push.amount() - reference.amount()).abs() < 1e-5, "{} vs {}", push.amount(), reference.amount());
+        assert!((push.fade_amount() - reference.fade_amount()).abs() < 1e-5);
+        for _ in 0..3 {
+            warm_frame(&mut push, &mut ms, false, true);
+        }
+        let reference = unwarmed(5);
+        assert!((push.amount() - reference.amount()).abs() < 1e-5, "and it stays on that curve");
+    }
+
+    /// **A cold page's push waits, motionless, while its text is pending, then starts from rest**
+    /// without crediting the wait to the spring.
+    #[test]
+    fn a_cold_pages_push_waits_for_its_text_and_starts_from_rest() {
+        let _g = plx_base::testlock::serial();
+        let mut push = started();
+        let mut ms = 0;
+        warm_frame(&mut push, &mut ms, false, true); // the probe
+        for frame in 0..3 {
+            assert!(warm_frame(&mut push, &mut ms, true, true), "wait {frame} asks for another frame");
+            assert_eq!((push.amount(), push.fade_amount()), (0.0, 0.0), "wait {frame}: still at the start");
+            assert!(push.warming());
+        }
+        warm_frame(&mut push, &mut ms, false, true);
+        assert!(!push.warming());
+        let reference = unwarmed(1);
+        assert!(push.amount() > 0.0, "it started");
+        assert!((push.amount() - reference.amount()).abs() < 1e-5, "from rest, one frame of spring: {} vs {}", push.amount(), reference.amount());
+    }
+
+    /// **The wait is bounded**: a queue that never drains, and a surface that is never drawn, each
+    /// release the push by [`SURFACE_TEXT_HOLD_MAX_MS`], and the spring then runs from rest.
+    #[test]
+    fn the_wait_is_bounded() {
+        let _g = plx_base::testlock::serial();
+        for (label, walks) in [("a queue that never drains", true), ("a surface that is never drawn", false)] {
+            let mut push = started();
+            let mut ms = 0;
+            let mut frames = 0u32;
+            while push.warming() {
+                warm_frame(&mut push, &mut ms, true, walks);
+                frames += 1;
+                assert!(frames <= (SURFACE_TEXT_HOLD_MAX_MS / 16.0).ceil() as u32 + 1, "{label}: still waiting after {frames} frames");
+            }
+            assert!(push.amount() > 0.0 && push.amount() < 0.05, "{label}: released into a spring that starts from rest ({})", push.amount());
+        }
+    }
+
+    /// **A pop never waits, and a jump ends a wait**: the page a pop returns to has been drawn, and
+    /// a new journey is not held for the old one's destination.
+    #[test]
+    fn a_pop_never_waits_and_a_jump_ends_a_wait() {
+        let mut push = started();
+        assert!(push.warming());
+        push.jump(true);
+        assert!(!push.warming(), "BACK during the wait ends it");
+        let mut push = RoutePush::new();
+        push.jump(true);
+        assert!(!push.warming(), "a pop has no wait to begin");
+        push.walked();
+        assert!(!push.warming(), "…and a walk reported to no wait begins none");
+    }
+}

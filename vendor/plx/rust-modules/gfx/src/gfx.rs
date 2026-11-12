@@ -1,0 +1,11592 @@
+//! GLES2 rendering foundation (was src/gfx.c). Three shader programs (SDF
+//! rrect/tri/focus, 4-corner ambient gradient, textured RGBA), the draw primitives,
+//! the spring helper, and the seven-segment FPS digits. All GLES2 calls; state is
+//! main-thread statics. link_program/use_prog are also used by text.rs (crate path).
+use std::ffi::CStr;
+use std::os::raw::{c_char, c_int, c_uint, c_void};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+use plx_base::surface::{LOGICAL_H as SCR_H, LOGICAL_W as SCR_W};
+use crate::overdraw::{
+    card_split, gate, masked, masked_part, note_card_path, note_px, region_cache, region_snap, set_clip, CardPart,
+    CardPath, Class,
+};
+
+// What `gfx` and `text` draw WITH, defined here so this layer names nothing of `ui` beyond the
+// overdraw ledger and the machine runtime (module-layers step L5). `ui` re-exports each of them
+// at its old path (`ui::Rect`, `ui::frame::backdrop`, `ui::profile`, `ui::theme`).
+/// The live-backdrop walk: layer/damage algebra, the discovery pass and the retained glass sources.
+pub mod backdrop;
+mod geom;
+pub mod scrim;
+/// The straight-alpha compositor's half of the frame: the pass that un-premultiplies the surface over
+/// the bound video plane, and the ledger of what every draw wrote that decides whether a frame needs
+/// it and where.
+pub mod straighten;
+/// Draw-phase instrumentation (`phase`, the GPU timer / HWCNT / CPU profilers) and the LOAD DIAL's
+/// published state.
+pub mod profile;
+#[cfg(test)]
+mod region_cache_tests;
+/// The design tokens the renderer draws with: the app ground and scrim ink, the card shading
+/// constants its image shader mirrors, and the type-size ladder.
+pub mod tokens;
+pub use geom::{Crop, Rect};
+pub use geom::Zoom;
+
+// Per-frame counters for the frame-drop detector: how many card composites are actually issued
+// (`draw_tex_carded`), and how many of those are (partly) off-screen — to confirm the cull is tight.
+static CARD_CT: AtomicU32 = AtomicU32::new(0);
+static CARD_OFF: AtomicU32 = AtomicU32::new(0);
+/// (card composites drawn, of which fully+partly off-screen) since the last call; resets both.
+pub fn take_card_stats() -> (u32, u32) {
+    (
+        CARD_CT.swap(0, Ordering::Relaxed),
+        CARD_OFF.swap(0, Ordering::Relaxed),
+    )
+}
+
+/// SDF edge headroom, in px. The fill AA is `1 - smoothstep(-1, 1, d)` — a 2px band centred on the
+/// shape edge (`d = 0`). Its outer half (`d ∈ [0, 1]`, alpha 0.5→0) lies OUTSIDE the shape, so unless
+/// the drawn quad extends past the edge those fragments are never rasterised and the edge aliases
+/// (asymmetrically, at the mercy of each edge's subpixel alignment — the "zipper" on one side). We
+/// inflate the quad by this much on every side (and bump `u_pad` to match, keeping `hsz` unchanged)
+/// so the falloff has geometry to fade into. 1px exactly covers the band's outer half.
+const AA_BLEED: f32 = 1.0;
+
+// Shader sources live in `shaders/*.vert`/`*.frag`, embedded at compile time (`include_str!`) so
+// the binary stays self-contained — nothing is loaded at runtime. Each file carries its own docs;
+// the family-wide highp/mediump rule is the PRECISION note in `shaders/fs_src.frag`.
+macro_rules! glsl {
+    ($file:literal) => {
+        // SAFETY: GLSL sources contain no interior NUL; concat! appends the terminator.
+        unsafe {
+            ::std::ffi::CStr::from_bytes_with_nul_unchecked(
+                concat!(include_str!($file), "\0").as_bytes(),
+            )
+        }
+    };
+    ($file:literal, $prefix:literal) => {
+        unsafe {
+            ::std::ffi::CStr::from_bytes_with_nul_unchecked(
+                concat!($prefix, include_str!($file), "\0").as_bytes(),
+            )
+        }
+    };
+}
+pub(crate) use glsl;
+
+/// [`glsl`] with the SHARED OUTPUT DITHER prepended — `shaders/dither.glsl`, whose header is the
+/// argument for all of it.
+///
+/// A textual prelude rather than a second shader object, because GLSL ES 2 has no `#include` and no
+/// separate compilation: a program is one vertex source and one fragment source, so "shared code"
+/// can only mean shared TEXT. The prelude opens with its own `precision mediump float;` and gives
+/// every declaration it introduces an explicit type, so it does not depend on — and does not
+/// disturb — the precision statement the shader below it makes for itself. (Repeating the statement
+/// is legal; the last one before a declaration is the one that applies to it.)
+///
+/// Every program built with this owes `gfx` two things at link time: `u_dither_tex` set to texture
+/// unit 2 ([`bind_dither_tile`]), and `u_dither` set per draw from [`dither_for_field`] (the ambient
+/// wash takes [`DITHER_LSB`] on every draw that reaches its program: it is always broad, and since
+/// 2026-09-19 nothing may switch its noise off. A wash of one colour never reaches the program: it
+/// is a clear, [`flat_clear`]).
+///
+/// **Only the SLOW-FIELD programs are built with it** — `fs_ambient`, `fs_field` (and its panel
+/// twin `fs_field_panel`) and `fs_glass`, the ones whose ramp is a blur, a field or a full-screen
+/// wash. `fs_src` and `fs_shadow`, the
+/// per-rect programs every card, chip, scrim and row highlight goes through, are deliberately plain:
+/// the prelude is not free on Midgard (then behind a uniform branch, which is itself not free —
+/// `dither.glsl` cost rule 1), and carrying it on those two was measured
+/// at +4M shader words a frame on the hero paging scene — the whole of the 57→50 fps regression the
+/// tile arrived with (bisected 2026-09-04; `docs/backdrop-blur-profiling.md`). The test
+/// `every_dithered_program_carries_the_one_shared_dither_and_no_hash_of_its_own` pins both lists.
+/// [`glsl_dithered`]'s twin: the SAME fragment source behind `shaders/dither_stub.glsl`, whose
+/// `plx_dither` is the identity — so one file links as two programs, and the plain one (the corner
+/// fade's, `draw_grad4`) has no uniform, no sampler and no fetch. See [`ambient_program`] for why OFF is a program, not a zero.
+macro_rules! glsl_undithered {
+    ($file:literal) => {
+        // SAFETY: as `glsl!` — GLSL sources contain no interior NUL.
+        unsafe {
+            ::std::ffi::CStr::from_bytes_with_nul_unchecked(
+                concat!(include_str!("shaders/dither_stub.glsl"), include_str!($file), "\0").as_bytes(),
+            )
+        }
+    };
+}
+
+macro_rules! glsl_dithered {
+    ($file:literal) => {
+        // SAFETY: as `glsl!` — GLSL sources contain no interior NUL.
+        unsafe {
+            ::std::ffi::CStr::from_bytes_with_nul_unchecked(
+                concat!(include_str!("shaders/dither.glsl"), include_str!($file), "\0").as_bytes(),
+            )
+        }
+    };
+}
+
+/// The VERTEX half of a [`glsl_dithered`] program: the same vertex source with `PLX_DITHER_NC`
+/// defined, which makes it emit `v_dither_nc` — the noise tile's coordinate, target px /
+/// [`NOISE_DIM`] — so `shaders/dither.glsl` fetches straight from a varying and does no arithmetic
+/// on `gl_FragCoord` (its cost rule 4, measured 2026-09-19). Every `glsl_dithered!` fragment source
+/// must link against one of these; the plain vertex source (`VS_IMG` behind every poster and card,
+/// `VS_AMBIENT` behind the undithered twin) stays free of the extra varying.
+macro_rules! glsl_vs_dithered {
+    ($file:literal) => {
+        // SAFETY: as `glsl!` — GLSL sources contain no interior NUL.
+        unsafe {
+            ::std::ffi::CStr::from_bytes_with_nul_unchecked(
+                concat!("#define PLX_DITHER_NC\n", include_str!($file), "\0").as_bytes(),
+            )
+        }
+    };
+}
+
+const VS_SRC: &CStr = glsl!("shaders/vs_src.vert");
+const FS_SRC: &CStr = glsl!("shaders/fs_src.frag");
+const FS_AMBIENT: &CStr = glsl_dithered!("shaders/fs_ambient.frag");
+const FS_AMBIENT_PLAIN: &CStr = glsl_undithered!("shaders/fs_ambient.frag");
+const VS_AMBIENT: &CStr = glsl!("shaders/vs_ambient.vert");
+const FS_SHADOW: &CStr = glsl!("shaders/fs_shadow.frag");
+const VS_IMG: &CStr = glsl!("shaders/vs_img.vert");
+/// The wash's vertex shader: the dithered twin, and the only one carrying the INK RAMP
+/// ([`draw_ambient_inked`]) — the plain twin behind `draw_grad4` has real corner alpha and no ramp.
+const VS_AMBIENT_DITHERED: &CStr =
+    glsl!("shaders/vs_ambient.vert", "#define PLX_DITHER_NC\n#define PLX_WASH_INK\n#define PLX_SCRIM\n");
+/// The ground scrim drawn ALONE as a blended layer ([`draw_scrim_layer`]): `vs_ambient.vert`'s scrim
+/// field as the colour the plain, undithered fragment blends. For the frames the ground cannot carry
+/// the scrim in its own pass (a hero slide's two art layers; a resting hero whose opaque art hides the
+/// wash, so there is no ground pass).
+const VS_SCRIM_LAYER: &CStr =
+    glsl!("shaders/vs_ambient.vert", "#define PLX_SCRIM\n#define PLX_SCRIM_LAYER\n");
+const VS_IMG_DITHERED: &CStr = glsl_vs_dithered!("shaders/vs_img.vert");
+const VS_SRC_DITHERED: &CStr = glsl_vs_dithered!("shaders/vs_src.vert");
+const FS_IMG: &CStr = glsl!("shaders/fs_img.frag");
+const FS_DISSOLVE_PLAIN: &CStr = glsl!("shaders/fs_tex.frag", "#define PLX_DISSOLVE\n");
+const FS_DISSOLVE: &CStr = glsl!("shaders/fs_img.frag", "#define PLX_DISSOLVE\n");
+const FS_FIELD: &CStr = glsl_dithered!("shaders/fs_field.frag");
+const FS_FIELD_PANEL: &CStr = glsl_dithered!("shaders/fs_field_panel.frag");
+const VS_STILL: &CStr = glsl!("shaders/vs_img.vert", "#define PLX_STILL_GROUND\n");
+const FS_STILL: &CStr = glsl!("shaders/fs_img.frag", "#define PLX_STILL_GROUND\n");
+/// The FOCUSED-tile specialization: the lit-glass edge + risen shadow, in their own program rather
+/// than a branch every plain IPROG draw paid for (when this was measured, that was every resting
+/// card, glyph, blur reduction, `field_kick` and `FrameCache` quad; the square-cornered ones among
+/// them now run [`PLAIN_IMAGE`] instead). A TV A/B measured real backpressure from the bigger
+/// program running on EVERY card even with nothing focused — Midgard's per-thread tiler flattens
+/// the extra uniform branches into selects and the `v_gloss` varying load costs something on every
+/// fragment regardless of `u_focus.x`. [`draw_tex_impl`] only ever reaches for this when a draw is actually
+/// focused or risen (`focus > 0.0 || dy > 0.0` — at most one card on screen), falling back to
+/// [`IPROG`] with the plain look if it fails to link, same as [`STILL_IMAGE`]'s own fallback.
+const VS_FOCUS: &CStr = glsl!("shaders/vs_img.vert", "#define PLX_FOCUS\n");
+const FS_FOCUS: &CStr = glsl!("shaders/fs_img.frag", "#define PLX_FOCUS\n");
+/// The wash with its photograph dissolved into it (`draw_art_wash`): dithered, because the wash it
+/// carries always dithers, over `vs_ambient.vert`'s field mesh so its colour is the wash's own
+/// per-vertex field.
+const FS_ART_WASH: &CStr = glsl_dithered!("shaders/fs_art_wash.frag");
+const VS_ART_WASH: &CStr = glsl!(
+    "shaders/vs_ambient.vert",
+    "#define PLX_DITHER_NC\n#define PLX_WASH_INK\n#define PLX_SCRIM\n#define PLX_ART_WASH\n"
+);
+const FS_BLUR: &CStr = glsl!("shaders/fs_blur.frag");
+const FS_GLASS: &CStr = glsl_dithered!("shaders/fs_glass.frag");
+const FS_FLAT: &CStr = glsl!("shaders/fs_flat.frag");
+const FS_RAMP: &CStr = glsl!("shaders/fs_ramp.frag");
+/// The PLAIN TEXTURE program's fragment half ([`PLAIN_IMAGE`]): `fs_img.frag`'s `u_card.z < 0.5`
+/// exit as a whole program, linked against [`VS_IMG`] like every other image program.
+const FS_TEX: &CStr = glsl!("shaders/fs_tex.frag");
+const VS_ART_SCRIM: &CStr = glsl!("shaders/vs_art_scrim.vert");
+const FS_ART_SCRIM: &CStr = glsl!("shaders/fs_art_scrim.frag");
+/// The straighten pass (`gfx/straighten.rs`): one vertex shader that stretches the unit quad over a box
+/// of the viewport and one fragment source in three variants, picked by a `#define` prefix. The fetch variants read the frame in place; the
+/// copy variant samples a copy of it.
+const VS_STRAIGHTEN: &CStr = glsl!("shaders/vs_straighten.vert");
+const FS_STRAIGHTEN_ARM: &CStr = glsl!("shaders/fs_straighten.frag", "#define PLX_STRAIGHTEN_ARM\n");
+const FS_STRAIGHTEN_EXT: &CStr = glsl!("shaders/fs_straighten.frag", "#define PLX_STRAIGHTEN_EXT\n");
+const FS_STRAIGHTEN_COPY: &CStr = glsl!("shaders/fs_straighten.frag");
+const GL_VERTEX_SHADER: c_uint = 0x8B31;
+const GL_FRAGMENT_SHADER: c_uint = 0x8B30;
+const GL_COMPILE_STATUS: c_uint = 0x8B81;
+/// `glGetString` name for the driver's GLSL version — what `glsl_preamble` reads.
+const GL_SHADING_LANGUAGE_VERSION: c_uint = 0x8B8C;
+const GL_LINK_STATUS: c_uint = 0x8B82;
+const GL_ARRAY_BUFFER: c_uint = 0x8892;
+const GL_STATIC_DRAW: c_uint = 0x88E4;
+const GL_FLOAT: c_uint = 0x1406;
+const GL_FALSE: u8 = 0;
+const GL_TRIANGLE_STRIP: c_uint = 0x0005;
+const GL_TRIANGLES: c_uint = 0x0004;
+const GL_BLEND: c_uint = 0x0BE2;
+const GL_DITHER: c_uint = 0x0BD0;
+const GL_ONE: c_uint = 0x0001;
+const GL_SRC_ALPHA: c_uint = 0x0302;
+const GL_ONE_MINUS_SRC_ALPHA: c_uint = 0x0303;
+const GL_TEXTURE_2D: c_uint = 0x0DE1;
+const GL_TEXTURE0: c_uint = 0x84C0;
+const GL_TEXTURE1: c_uint = 0x84C1;
+/// The shared dither tile's unit — see `gfx::bind_dither_tile`.
+const GL_TEXTURE2: c_uint = 0x84C2;
+/// `fs_glass.frag`'s composite-time dim field — see `draw_blur_backdrop`.
+const GL_TEXTURE3: c_uint = 0x84C3;
+
+extern "C" {
+    fn glGetString(name: c_uint) -> *const c_char;
+    fn glCreateShader(ty: c_uint) -> c_uint;
+    fn glShaderSource(
+        shader: c_uint,
+        count: c_int,
+        string: *const *const c_char,
+        length: *const c_int,
+    );
+    fn glCompileShader(shader: c_uint);
+    fn glGetShaderiv(shader: c_uint, pname: c_uint, params: *mut c_int);
+    fn glGetShaderInfoLog(shader: c_uint, bufsize: c_int, length: *mut c_int, infolog: *mut c_char);
+    fn glCreateProgram() -> c_uint;
+    fn glAttachShader(program: c_uint, shader: c_uint);
+    fn glBindAttribLocation(program: c_uint, index: c_uint, name: *const c_char);
+    fn glLinkProgram(program: c_uint);
+    fn glGetProgramiv(program: c_uint, pname: c_uint, params: *mut c_int);
+    fn glUseProgram(program: c_uint);
+    fn glGetUniformLocation(program: c_uint, name: *const c_char) -> c_int;
+    fn glUniform4f(loc: c_int, x: f32, y: f32, z: f32, w: f32);
+    fn glUniform2f(loc: c_int, x: f32, y: f32);
+    fn glUniform3f(loc: c_int, x: f32, y: f32, z: f32);
+    fn glUniform1f(loc: c_int, x: f32);
+    fn glUniform4fv(loc: c_int, count: c_int, value: *const f32);
+    fn glUniform1i(loc: c_int, x: c_int);
+    fn glGenBuffers(n: c_int, buffers: *mut c_uint);
+    fn glBindBuffer(target: c_uint, buffer: c_uint);
+    fn glBufferData(target: c_uint, size: isize, data: *const c_void, usage: c_uint);
+    fn glEnableVertexAttribArray(index: c_uint);
+    fn glVertexAttribPointer(
+        index: c_uint,
+        size: c_int,
+        ty: c_uint,
+        normalized: u8,
+        stride: c_int,
+        pointer: *const c_void,
+    );
+    /// The raw import. Nothing but [`glDrawArrays`] below (and the straighten pass's own quads over the
+    /// boxes the frame drew into, which are not content) calls it: see that wrapper.
+    #[link_name = "glDrawArrays"]
+    fn glDrawArrays_raw(mode: c_uint, first: c_int, count: c_int);
+    fn glBindTexture(target: c_uint, texture: c_uint);
+    fn glActiveTexture(texture: c_uint);
+    fn glEnable(cap: c_uint);
+    fn glDisable(cap: c_uint);
+    fn glScissor(x: c_int, y: c_int, w: c_int, h: c_int);
+    fn glBlendFuncSeparate(src_rgb: c_uint, dst_rgb: c_uint, src_a: c_uint, dst_a: c_uint);
+    fn glClearColor(r: f32, g: f32, b: f32, a: f32);
+    /// The raw import: only [`glClear`] below calls it.
+    #[link_name = "glClear"]
+    fn glClear_raw(mask: c_uint);
+    #[cfg(feature = "devtriggers")]
+    fn glFinish();
+    #[cfg(feature = "devtriggers")]
+    fn glFlush();
+    fn glGenTextures(n: c_int, textures: *mut c_uint);
+    // `#[allow(dead_code)]` — the same shape as `app/mod.rs`'s SDL text-input externs: the sole
+    // caller (`delete_tex`, below) compiles its real call out under `cfg(test)`, so this
+    // declaration loses its only use in the TEST build alone and warns there. It stays live on
+    // device and in the simulator, where `delete_tex` still calls it for real.
+    #[allow(dead_code)]
+    fn glDeleteTextures(n: c_int, textures: *const c_uint);
+    fn glPixelStorei(pname: c_uint, param: c_int);
+    fn glTexImage2D(
+        target: c_uint,
+        level: c_int,
+        ifmt: c_int,
+        w: c_int,
+        h: c_int,
+        border: c_int,
+        format: c_uint,
+        ty: c_uint,
+        pixels: *const c_void,
+    );
+    fn glTexParameteri(target: c_uint, pname: c_uint, param: c_int);
+    // UI self-capture (the "cap_*" section at the bottom of this file)
+    fn glGenFramebuffers(n: c_int, ids: *mut c_uint);
+    fn glDeleteFramebuffers(n: c_int, ids: *const c_uint);
+    /// The raw import: only [`glBindFramebuffer`] below calls it.
+    #[link_name = "glBindFramebuffer"]
+    fn glBindFramebuffer_raw(target: c_uint, framebuffer: c_uint);
+    fn glFramebufferTexture2D(
+        target: c_uint,
+        attachment: c_uint,
+        textarget: c_uint,
+        texture: c_uint,
+        level: c_int,
+    );
+    fn glCheckFramebufferStatus(target: c_uint) -> c_uint;
+    fn glReadPixels(
+        x: c_int,
+        y: c_int,
+        w: c_int,
+        h: c_int,
+        format: c_uint,
+        ty: c_uint,
+        pixels: *mut c_void,
+    );
+    fn glCopyTexSubImage2D(
+        target: c_uint,
+        level: c_int,
+        xoff: c_int,
+        yoff: c_int,
+        x: c_int,
+        y: c_int,
+        w: c_int,
+        h: c_int,
+    );
+    fn glGetError() -> c_uint;
+    fn glViewport(x: c_int, y: c_int, w: c_int, h: c_int);
+}
+
+/// **Every draw call this module issues, with the extent it writes.** `glDrawArrays` is shadowed by this
+/// wrapper so that every call site keeps its spelling, adds one argument and books itself in
+/// [`straighten::note_draw`]: the straighten pass draws over the boxes the frame drew into and
+/// nowhere else, so a draw that did not say where it lands would be a translucent pixel the pass
+/// skipped. The `extent` is [`set_rect`]'s answer for every quad placed by a rect uniform (the numbers
+/// the vertex shader places the quad with, not the logical rect it was asked for) and
+/// [`straighten::Extent::Target`], the whole target, for a draw with none. A test pins that the raw
+/// import is called nowhere else in this file.
+#[allow(non_snake_case)]
+#[inline(always)]
+unsafe fn glDrawArrays(mode: c_uint, first: c_int, count: c_int, extent: straighten::Extent) {
+    straighten::note_draw(extent);
+    glDrawArrays_raw(mode, first, count)
+}
+
+/// Set a program's rect uniform (`u_rect` / `u_trect`: the authored-pixel quad the vertex shader
+/// places the unit quad over) and return the extent that quad writes, for the draw that follows. The
+/// one function that does both, so the extent a draw books cannot differ from the rect the shader
+/// draws.
+#[inline(always)]
+pub(crate) unsafe fn set_rect(loc: c_int, x: f32, y: f32, w: f32, h: f32) -> straighten::Extent {
+    glUniform4f(loc, x, y, w, h);
+    straighten::Extent::quad(x, y, w, h)
+}
+
+/// `glClear`, shadowed so a clear of the surface to a colour the straighten pass does not leave alone
+/// is booked ([`straighten::note_clear`]); the colour is the one [`set_clear_color`] left.
+#[allow(non_snake_case)]
+#[inline(always)]
+unsafe fn glClear(mask: c_uint) {
+    straighten::note_clear(CLEAR_COLOR[3]);
+    glClear_raw(mask)
+}
+
+/// `glBindFramebuffer`, shadowed so the straighten pass's ledger knows whether gfx is drawing into
+/// the surface or into a target of its own ([`straighten::note_bind`]).
+#[allow(non_snake_case)]
+#[inline(always)]
+unsafe fn glBindFramebuffer(target: c_uint, framebuffer: c_uint) {
+    straighten::note_bind(framebuffer);
+    glBindFramebuffer_raw(target, framebuffer)
+}
+
+const GL_RGBA: c_uint = 0x1908;
+const GL_UNSIGNED_BYTE: c_uint = 0x1401;
+const GL_UNPACK_ALIGNMENT: c_uint = 0x0CF5;
+const GL_TEXTURE_MIN_FILTER: c_uint = 0x2801;
+const GL_TEXTURE_MAG_FILTER: c_uint = 0x2800;
+const GL_TEXTURE_WRAP_S: c_uint = 0x2802;
+const GL_NEAREST: c_int = 0x2600;
+const GL_TEXTURE_WRAP_T: c_uint = 0x2803;
+const GL_LINEAR: c_int = 0x2601;
+const GL_CLAMP_TO_EDGE: c_int = 0x812F;
+const GL_REPEAT: c_int = 0x2901;
+
+const GL_COLOR_BUFFER_BIT: c_uint = 0x0000_4000;
+const GL_SCISSOR_TEST: c_uint = 0x0C11;
+
+/// Hard-clip subsequent draws to the UI-space rect (top-left origin, 1920×1080 authored coords).
+/// Pair with [`clip_clear`]. Scrolling lists use this so a partial row is cut cleanly at the frame
+/// edge instead of poking over the video / buttons (`Painter` otherwise has no clip). Rect is
+/// clamped to the canvas so a negative edge can't underflow the unsigned scissor box.
+///
+/// **This is the one drawing call that is NOT in logical coordinates.** Everything else reaches GL
+/// through `u_screen`, which the shaders divide by — so the viewport transform scales the whole
+/// authored canvas to whatever the drawable is, for free. `glScissor` bypasses all of that: it
+/// takes bottom-left *window pixels*. So it needs both the Y flip and the logical→physical scale,
+/// which is 1.0 unless a webOS 1-3 owner picks a smaller Interface resolution (or the debug drawable trigger asks for one) (`surface::scale`) and would otherwise clip the
+/// wrong band of the screen.
+/// Where authored coordinates land in the CURRENTLY BOUND target, as the same `(vx, vy, scale)`
+/// triple `glViewport` was given, plus the live box a [`clip_clear`] must restore.
+///
+/// `None` means framebuffer 0, and [`clip_set`] then reads `surface::viewport()`/`scale()` exactly
+/// as it always has. It is `Some` only while a page is drawn into a target other than the frame
+/// through a negative-origin viewport: for the duration of [`blur_snapshot_direct`]'s scene draw (a
+/// small, scaled FBO), and for a [`FrameCache::render_region`] fill (the region's own texture, at
+/// scale 1; [`RegionTarget`] puts the previous value back). Without
+/// this, every `Painter::clip` inside that draw would compute a full-resolution screen box — the
+/// scissor is the one drawing call that is not in logical coordinates — and clip a completely
+/// different part of the picture, while `clip_clear`'s bare `glDisable` would additionally throw
+/// away the region clamp for the rest of the pass.
+static mut CLIP_TARGET: Option<(c_int, c_int, f32, c_int, c_int)> = None;
+
+/// The scissor box the GL context holds right now, as window-pixel edges `[x0, y0, x1, y1]` (GL's
+/// bottom-left origin, the far edges exclusive); `None` while `GL_SCISSOR_TEST` is off. Every
+/// scissor change in this file goes through [`scissor_box`] / [`scissor_off`], so a draw that
+/// scissors pieces of its own ([`draw_tex_core_in`]'s resting cards) can intersect them with the
+/// clip a scrolling list set and put that clip back afterwards.
+static mut LIVE_SCISSOR: Option<[c_int; 4]> = None;
+
+/// Enable the scissor test with this box (`w`, `h` clamped to >= 0 by the caller) and record it.
+unsafe fn scissor_box(x: c_int, y: c_int, w: c_int, h: c_int) {
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(x, y, w, h);
+    LIVE_SCISSOR = Some([x, y, x + w, y + h]);
+}
+
+/// Disable the scissor test and record that.
+unsafe fn scissor_off() {
+    glDisable(GL_SCISSOR_TEST);
+    LIVE_SCISSOR = None;
+}
+
+/// The clear colour the GL context holds, as the last [`set_clear_color`] left it (GL's initial
+/// transparent black before any). There is no getter bound for it, and the `glClear`s that set no
+/// colour of their own (the blur chain's tiler hints) read whatever is held, so a draw that clears
+/// to a colour of its own ([`clear_flat_ground`]) has to put the held one back.
+static mut CLEAR_COLOR: [f32; 4] = [0.0; 4];
+
+/// **`glClearColor`, the only call of it in the process**, recording the colour in [`CLEAR_COLOR`]:
+/// the app's own player-route clear goes through here too, and a test fails on any other call in
+/// this file.
+pub fn set_clear_color(r: f32, g: f32, b: f32, a: f32) {
+    // SAFETY: written and read on the render thread only, like every GL call and static here.
+    unsafe {
+        CLEAR_COLOR = [r, g, b, a];
+        glClearColor(r, g, b, a);
+    }
+}
+
+/// Where authored coordinates land in the bound target: its window origin `(vx, vy)` and the window
+/// pixels per authored px. The same triple `glViewport` was given - the main surface's
+/// ([`plx_base::surface`]), or the reduced-resolution source pass's ([`CLIP_TARGET`]) or a
+/// [`FrameCache::render_region`] fill's (scale 1) - which is what keeps a scissor box and the pixel
+/// grid of a quad cut along it on the very pixels the viewport maps to.
+fn target_map() -> (c_int, c_int, f32) {
+    match unsafe { CLIP_TARGET } {
+        Some((tx, ty, ts, _, _)) => (tx, ty, ts),
+        None => {
+            let (vx, vy, _, _) = plx_base::surface::viewport();
+            (vx, vy, plx_base::surface::scale())
+        }
+    }
+}
+
+/// Window column of authored `x` in a target at `(vx, _)` with `s` pixels per authored px.
+///
+/// **Round each EDGE in physical space; derive an extent as the difference of two rounded edges.**
+/// Never truncate the origin and the extent independently: because `trunc(a) + trunc(b) <=
+/// trunc(a + b)`, a box's far edge can fall SHORT of where the next box's near edge begins, and
+/// adjacent scissored bands could then only ever gap, never abut (a bright hairline the full width
+/// of the tile was measured in the simulator). Deriving both edges from the same expression on the
+/// same input is what makes it safe: band k's top and band k+1's bottom are then literally the same
+/// computation, so float error moves them together and no row can fall between. On a 1:1 surface
+/// every value is already an integer, so this is bit-identical to what the television has always
+/// rendered.
+#[inline]
+fn win_x(x: f32, vx: c_int, s: f32) -> c_int {
+    vx + (x * s).round() as c_int
+}
+
+/// Window row of authored `y`, GL's rows counting upward from the bottom of the target while the
+/// canvas's rows count down; see [`win_x`] for the rounding.
+#[inline]
+fn win_y(y: f32, vy: c_int, s: f32) -> c_int {
+    vy + ((SCR_H - y) * s).round() as c_int
+}
+
+pub fn clip_set(x: f32, y: f32, w: f32, h: f32) {
+    backdrop::clip(Some(Rect::new(x,y,w,h)));
+    if backdrop::discovering() { return; }
+    let x0 = x.max(0.0);
+    let y_top = y.max(0.0);
+    let x1 = (x + w).min(SCR_W);
+    let y1 = (y + h).min(SCR_H);
+    set_clip(Some([x0, y_top, x1.max(x0), y1.max(y_top)]));
+    // Only the height is needed as an extent now — the x edges are rounded independently and
+    // differenced, same as the y ones.
+    let hi = (y1 - y_top).max(0.0);
+    // The same uniform scale and centring offset `glViewport` was given, because the scissor box
+    // has to land on the same pixels the viewport maps to ([`target_map`]), each edge rounded on its
+    // own ([`win_x`]).
+    let (vx, vy, s) = target_map();
+    let gx0 = win_x(x0, vx, s);
+    let gx1 = win_x(x1.max(x0), vx, s);
+    // GL y is bottom-up, so the box's BOTTOM comes from the band's logical bottom edge.
+    let gy0 = win_y(y_top + hi, vy, s);
+    let gy1 = win_y(y_top, vy, s);
+    unsafe { scissor_box(gx0, gy0, (gx1 - gx0).max(0), (gy1 - gy0).max(0)) }
+}
+/// Remove the scissor clip set by [`clip_set`].
+///
+/// While a render-target override is active this restores that target's LIVE BOX rather than
+/// disabling the test: the box is the direct pass's only clamp on where the page may write, and a
+/// bare `glDisable` in the middle of the scene draw would let the rest of the page spill across
+/// the tap targets' other content.
+pub fn clip_clear() {
+    backdrop::clip(None);
+    if backdrop::discovering() { return; }
+    set_clip(None);
+    unsafe {
+        match CLIP_TARGET {
+            Some((_, _, _, tw, th)) => scissor_box(0, 0, tw, th),
+            None => scissor_off(),
+        }
+    }
+}
+
+/// clear the framebuffer to an opaque color — the retui frame's first op, so the
+/// framework doesn't have to link GLES itself (it draws only through gfx/text).
+pub fn frame_clear(r: f32, g: f32, b: f32) {
+    frame_clear_alpha(r, g, b, 1.0);
+}
+
+/// Transparent black. The compositor blends this surface over the hardware video plane, so alpha 0
+/// is a hole, not a black fill. The player route clears this way from the loop because that page
+/// never paints a ground. A page that keeps its own chrome (the detail trailer preview) has to
+/// punch the same hole itself: [`frame_clear`] here is a full-screen sheet over the plane, which
+/// is sound with no picture.
+pub fn frame_clear_through() {
+    frame_clear_alpha(0.0, 0.0, 0.0, 0.0);
+}
+
+thread_local! {
+    static SUPPRESS_FRAME_CLEAR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A text-recording scene may call raw frame clears outside its recording Painter.
+/// Keep those calls off the visible framebuffer; restore even if the screen unwinds.
+pub fn without_frame_clear<R>(draw: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SUPPRESS_FRAME_CLEAR.with(|v| v.set(self.0));
+        }
+    }
+    let _restore = Restore(SUPPRESS_FRAME_CLEAR.with(|v| v.replace(true)));
+    draw()
+}
+
+fn frame_clear_allowed() -> bool {
+    !page_frozen() && !backdrop::suppressed() && !SUPPRESS_FRAME_CLEAR.with(|v| v.get())
+}
+
+fn frame_clear_alpha(r: f32, g: f32, b: f32, a: f32) {
+    if backdrop::discovering() {
+        if SUPPRESS_FRAME_CLEAR.with(|v|v.get()) { return; }
+        backdrop::paint(backdrop::canvas(),
+            vec![0,r.to_bits() as u64,g.to_bits() as u64,b.to_bits() as u64,a.to_bits() as u64]);
+        return;
+    }
+    // A frozen page must not clear: the cached host quad is already on the framebuffer and this is
+    // the FIRST thing every page draws, so an ungated clear would wipe the snapshot and leave the
+    // popover sitting on flat grey. See [`page_frozen`] — this is the one refusal that is not a
+    // quad and so cannot ride on [`culled`].
+    if !frame_clear_allowed() {
+        return;
+    }
+    probed_clear(clears_presented_fb, || {
+        plx_base::diag::spans::span("clear", || unsafe {
+            set_clear_color(r, g, b, a);
+            glClear(GL_COLOR_BUFFER_BIT);
+        })
+    });
+}
+
+/// Does a clear issued now write the framebuffer the frame is PRESENTED from? Only that one can be
+/// the back-buffer wait. A page replayed into a blur source ([`blur_source_pass`], the tap target
+/// bound by `blur_snapshot_direct`) or drawn into a host snapshot ([`plx_base::surface::PageTarget`],
+/// which redirects [`plx_base::surface::default_fb`]) clears an FBO instead. Two flag reads, no GL
+/// query: the hooks are installed in every build, so this runs on the first clear of every frame.
+fn clears_presented_fb() -> bool {
+    !blur_source_pass() && plx_base::surface::default_fb() == plx_base::surface::frame_fb()
+}
+
+/// Run `clear`, bracketed by the installed probe when [`arm_clear_probe`] offered it this frame
+/// and `presented` says this clear writes the presented framebuffer. A clear of any other target
+/// leaves the probe armed for the frame's real first framebuffer command: on a frame that rebuilds
+/// a glass source, the page's own clear runs first INSIDE the source replay, into the tap target,
+/// and bracketing that one priced a 0.04 ms wait while the real one (the visible page's clear,
+/// 8-18 ms on the television's pong scenes) went unpriced. `presented` is asked only when offered.
+fn probed_clear(presented: impl FnOnce() -> bool, clear: impl FnOnce()) {
+    let probe = CLEAR_PROBE
+        .with(|p| (p.armed.get() && presented()).then(|| {
+            p.armed.set(false);
+            p.hooks.get()
+        }))
+        .flatten();
+    if let Some((waiting, _)) = probe {
+        waiting();
+    }
+    clear();
+    if let Some((_, acquired)) = probe {
+        acquired();
+    }
+}
+
+/// The frame's first framebuffer-0 command is where this driver parks the wait for a free back
+/// buffer, and on every route but the player it is the page's [`frame_clear`]. The dev frame
+/// probe (`/tmp/plxnative-framecb`) prices that wait, but its clock is `platform`'s and this
+/// crate does not depend on `platform`, so the application hands the two edges down once at boot:
+/// `waiting` runs just before the clear, `acquired` just after it returns.
+pub fn install_clear_probe(waiting: fn(), acquired: fn()) {
+    CLEAR_PROBE.with(|p| p.hooks.set(Some((waiting, acquired))));
+}
+
+/// Offer the installed probe the next clear, and only the next one: the first clear that actually
+/// reaches the PRESENTED framebuffer after this call brackets the wait (a clear into a blur source
+/// or a host snapshot does not take it), later clears of the same frame (a popover's, a second
+/// pass) do not, so one frame yields one waiting/acquired pair. The loop calls
+/// this once per non-player frame; the player clears from the loop and brackets that itself.
+pub fn arm_clear_probe() {
+    CLEAR_PROBE.with(|p| p.armed.set(p.hooks.get().is_some()));
+}
+
+#[derive(Default)]
+struct ClearProbe {
+    hooks: std::cell::Cell<Option<(fn(), fn())>>,
+    armed: std::cell::Cell<bool>,
+}
+
+thread_local! {
+    static CLEAR_PROBE: ClearProbe = ClearProbe::default();
+}
+
+/// Block until the GPU has finished all queued commands. Used as a completion boundary by the draw
+/// profiler (`ui::profile`), a coarse wall-clock aid, and by dump mode's GPU wait
+/// (`snapshot_frame_begin`, only while `crate::dump` is armed). It is not a GPU timestamp and it
+/// serializes the pipeline, so never call it on the normal render path of a live loop.
+#[cfg(feature = "devtriggers")]
+pub fn gl_finish() {
+    unsafe { glFinish() }
+}
+
+/// Submit everything queued without waiting for it. Unlike [`gl_finish`] this does not stall the
+/// CPU, which is what lets the asynchronous timer path use it: on a tile-based Midgard GPU the
+/// fragment work for a render target is only issued when that target's pass is flushed, so a
+/// `GL_TIME_ELAPSED` interval closed before the flush contains no submitted job and reports a
+/// cost of essentially zero. Profiler-only, for the same reason `gl_finish` is.
+#[cfg(feature = "devtriggers")]
+pub fn gl_flush() {
+    unsafe { glFlush() }
+}
+
+static mut PROG: c_uint = 0;
+static mut LOC_RECT: c_int = 0;
+static mut LOC_SCREEN: c_int = 0;
+static mut LOC_SIZE: c_int = 0;
+static mut LOC_PAD: c_int = 0;
+static mut LOC_RADIUS: c_int = 0;
+static mut LOC_COLTOP: c_int = 0;
+static mut LOC_COLBOT: c_int = 0;
+static mut LOC_FOCUS: c_int = 0;
+static mut LOC_RGB_CAP: c_int = 0;
+static mut LOC_RADR: c_int = 0;
+static mut LOC_RIMW: c_int = 0;
+static mut LOC_RIMCOL: c_int = 0;
+static mut LOC_RIMTOP: c_int = 0;
+/// The capsule outline's two solved vectors and the focused face's inner glow — see
+/// `shaders/fs_src.frag`, and [`pill_off`] for the default every other draw sends.
+static mut LOC_PILL1: c_int = 0;
+static mut LOC_PILL2: c_int = 0;
+static mut LOC_GLOW: c_int = 0;
+
+static mut APROG: c_uint = 0;
+static mut AL_RECT: c_int = 0;
+static mut AL_SCREEN: c_int = 0;
+static mut AL_TL: c_int = 0;
+static mut AL_TR: c_int = 0;
+static mut AL_BR: c_int = 0;
+static mut AL_BL: c_int = 0;
+/// `u_dither` on each `glsl_dithered!` program — the three slow-field ones, one uniform name, one
+/// policy: `shaders/dither.glsl`.
+/// The flat-fill program (`shaders/fs_flat.frag`) and its two uniforms; 0 when the link failed, in
+/// which case every uniform rect takes `fs_src.frag`'s flat path as before.
+static mut FPROG: c_uint = 0;
+static mut FL_RECT: c_int = 0;
+static mut FL_COL: c_int = 0;
+/// The two-stop ramp program (`shaders/fs_ramp.frag`) and its three uniforms; 0 when it failed to
+/// compile or link (it is built with `link_optional_program`, so a driver's compile rejection
+/// degrades instead of exiting), in which case a square, unfocused gradient takes `fs_src.frag`'s
+/// flat path as before.
+static mut RPROG: c_uint = 0;
+static mut RP_RECT: c_int = 0;
+static mut RP_TOP: c_int = 0;
+static mut RP_BOT: c_int = 0;
+static mut UL_DITHER: c_int = 0;
+// The artwork's bottom gradient has its own small program: no card focus/rim/pill work.
+static mut AS_PROG: c_uint = 0;
+static mut AS_RECT: c_int = 0;
+static mut AS_SIZE: c_int = 0;
+static mut AS_BAND: c_int = 0;
+static mut AS_COL: c_int = 0;
+static mut AL_DITHER: c_int = 0;
+/// The dithered wash program's ink-ramp uniforms (`u_ink`, `u_inka`) — see [`draw_ambient_inked`].
+static mut AL_INK: c_int = -1;
+static mut AL_INKA: c_int = -1;
+/// ...and its scrim field (`u_sc`, `u_scn`: [`scrim::GroundShade`]).
+static mut AL_SCRIM: ScrimLoc = ScrimLoc::NONE;
+/// The scrim LAYER program ([`draw_scrim_layer`]) and its uniforms; 0 when the link failed.
+static mut SCRIM_PROG: c_uint = 0;
+static mut SCL_RECT: c_int = -1;
+static mut SCL_INK: c_int = -1;
+static mut SCL_SCRIM: ScrimLoc = ScrimLoc::NONE;
+/// What each of the three programs that carry a scrim field (`APROG`, the art wash, the layer) was
+/// last given, so a frame's dozen cells upload it once. A fresh program's uniforms are zero, which
+/// is [`scrim::GroundShade::NONE`], so that is what an unwritten slot holds; `init_*` resets them.
+static mut SCRIM_SENT: [scrim::GroundShade; 3] = [scrim::GroundShade::NONE; 3];
+/// The ambient field's PLAIN program (`FS_AMBIENT_PLAIN`) — the corner fade's (`draw_grad4`), never
+/// the wash's — and its uniforms; 0 when the link failed, in which case `APROG` serves the fade
+/// with `u_dither` at 0.
+static mut APROG_PLAIN: c_uint = 0;
+static mut PL_RECT: c_int = 0;
+static mut PL_TL: c_int = 0;
+static mut PL_TR: c_int = 0;
+static mut PL_BR: c_int = 0;
+static mut PL_BL: c_int = 0;
+/// The ONE dither source for every `glsl_dithered!` program: a [`NOISE_DIM`]-square tile of TPDF noise, `GL_REPEAT`,
+/// `GL_NEAREST`, sampled 1:1 with the panel through the vertex shader's `v_dither_nc`. A TEXTURE rather than a hash for one reason
+/// the counters made plain: on this part the arithmetic pipe is what binds a full-screen quad, and
+/// the texture pipe sits nearly idle beside it. The interleaved-gradient hash that preceded it —
+/// two `fract`s, a `dot` and a multiply, all in highp because `gl_FragCoord` is — cost the fold's
+/// full-screen wash ~2 GPU cycles a pixel, 4M of a 14.4M-cycle frame (2026-09-02). One fetch on
+/// the other pipe costs the arithmetic pipe a single multiply.
+static mut NOISE_TEX: c_uint = 0;
+/// Side of the noise tile. It must stay a POWER OF TWO: `GL_REPEAT` on an NPOT texture is not
+/// GLES2 without an extension, so this is the one axis here that cannot be tuned freely.
+///
+/// **256, not 64 — and the 64 was measured VISIBLE on the television.** It was chosen as "well past
+/// the eye's ability to see a repeat at ±½ LSB amplitude", and that reasoning does not hold: a tile
+/// is a PERIODIC signal, and the eye finds periodic structure far below the contrast at which it
+/// resolves the grain making it up. On the person page's wash — the app's slowest gradient, measured
+/// at 4.6 LSB over 600 rows — a panel capture autocorrelates at **+0.570 at horizontal lag 64**
+/// against +0.13 at lags 63 and 65, and **+0.703 at vertical lag 128**: a 30-across plaid, which is
+/// exactly the "strange visual patterns" the wash was reported for. 256 quarters that spatial
+/// frequency to 7.5 repeats across a 1920px panel.
+///
+/// It costs 256 KB of texture instead of 16 KB, giving up the old "small enough to live in the
+/// texture cache whole" argument — which was worth less than it read. The mapping is 1:1 in screen
+/// space under `GL_NEAREST`, so each fragment fetches a DISTINCT texel in tile order: a coherent
+/// streaming read, which is the access pattern a texture cache is best at, rather than the random
+/// re-reads a resident tile would be protecting against. Measured cost of the change on the set:
+/// the dated section in `docs/backdrop-blur-profiling.md`.
+const NOISE_DIM: usize = 256;
+
+/// Build the dither tile: **TPDF** (triangular) noise, from two independent full-avalanche hashes
+/// of the texel index — no dependency, deterministic, built once at boot.
+///
+/// **The triangle is baked HERE, on the CPU, and that is what makes it free.** Textbook dither is
+/// triangular over ±1 LSB, which is the sum of two independent ±½ LSB uniforms. Formed in the
+/// shader that is a second channel plus an add on a full-screen quad, and `fs_ambient.frag`'s
+/// header prices what one extra arithmetic word costs on this part. Summing the two hashes into the
+/// STORED byte instead leaves the fragment expression byte-for-byte unchanged — `plx_noise() *
+/// u_dither` in `shaders/dither.glsl` — and moves the entire difference into the amplitude every
+/// caller passes, [`DITHER_LSB`] (2/255), through `dither_for_field` or
+/// [`draw_ambient`] directly. Same one fetch, same one multiply, 2M times a frame.
+///
+/// What it buys is NOT less contour: the ±½ LSB uniform it replaces already flattened this
+/// gradient's staircase about tenfold, and simulation on the measured person-page ramp says
+/// triangular is marginally WORSE on absolute blurred error, because it is more noise. What it
+/// removes is noise MODULATION — under uniform dither the quantisation error's variance still
+/// tracks the signal, which reads as a slow wash breathing or going blotchy rather than as grain.
+/// On that same ramp the per-row error variance's coefficient of variation falls 0.44 → 0.08.
+fn noise_tex() -> c_uint {
+    /// lowbias32 (Chris Wellons): a full-avalanche integer hash.
+    fn lowbias32(mut x: u32) -> u32 {
+        x ^= x >> 16;
+        x = x.wrapping_mul(0x7FEB_352D);
+        x ^= x >> 15;
+        x = x.wrapping_mul(0x846C_A68B);
+        x ^= x >> 16;
+        x
+    }
+    let mut px = vec![0u8; NOISE_DIM * NOISE_DIM * 4];
+    for i in 0..NOISE_DIM * NOISE_DIM {
+        // Two INDEPENDENT streams — the same avalanche under different seeds — averaged into one
+        // byte. Their mean is triangular on [0, 255]; `draw_ambient`'s 2/255 scale then places it
+        // at ±1 LSB about zero, i.e. the sum of two ±½ LSB uniforms, which is the definition.
+        let a = lowbias32(i as u32 ^ 0x9E37_79B9) >> 24;
+        let b = lowbias32(i as u32 ^ 0x85EB_CA6B) >> 24;
+        let v = ((a + b + 1) / 2) as u8;
+        px[i * 4..i * 4 + 4].copy_from_slice(&[v, v, v, 255]);
+    }
+    unsafe {
+        let tex = upload_rgba(0, NOISE_DIM as c_int, NOISE_DIM as c_int, px.as_ptr());
+        // `upload_rgba` leaves it bound: nearest (one texel, one noise value — filtering would
+        // average the tile into grey) and repeating, so one small tile covers any drawable.
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        tex
+    }
+}
+
+static mut SPROG: c_uint = 0;
+static mut SL_RECT: c_int = 0;
+static mut SL_SCREEN: c_int = 0;
+static mut SL_SIZE: c_int = 0;
+static mut SL_MAP: c_int = 0;
+static mut SL_RADIUS: c_int = 0;
+static mut SL_BLUR: c_int = 0;
+static mut SL_OFF: c_int = 0;
+static mut SL_CUT: c_int = 0;
+static mut SL_COL: c_int = 0;
+
+static mut IPROG: c_uint = 0;
+static mut IL_RECT: c_int = 0;
+static mut IL_SCREEN: c_int = 0;
+static mut IL_TINT: c_int = 0;
+static mut IL_UVRECT: c_int = 0;
+static mut IL_CARD: c_int = 0;
+static mut IL_TEX: c_int = 0;
+static mut IL_RIMW: c_int = 0;
+static mut IL_RIMCOL: c_int = 0;
+static mut IL_SHINV: c_int = 0;
+static mut IL_SHCOL: c_int = 0;
+static mut IL_FOCUS: c_int = 0;
+/// **The UNDERLAY FIELD program** (`shaders/fs_field.frag` over `vs_src.vert`) and its uniforms;
+/// 0 when the link failed, in which case [`draw_field`] draws nothing and its caller falls back to
+/// the flat rect it would otherwise have drawn.
+///
+/// Its own program rather than a mode of `IPROG` for the reason every other one-purpose program
+/// here has: the field is a magnification of a 60x32 texture over up to 2.07M fragments, and the
+/// image program's SDF radius, rim and penumbra branches are all disabled on every one of them.
+/// It takes the program slot `fs_modal_ground.frag` used to hold, so the dithered-program count is
+/// still three — see [`glsl_dithered`]. (Four since the panel twin below.)
+static mut UPROG: c_uint = 0;
+static mut UL_RECT: c_int = 0;
+static mut UL_TINT: c_int = 0;
+/// **The underlay field as a PANEL'S MATERIAL** (`shaders/fs_field_panel.frag` over
+/// `vs_src.vert`): the same 60x32 texture as [`UPROG`], sampled at the panel's own window into it
+/// and cut to its rounded shape. Its own program so that neither the sub-rect nor the SDF costs the
+/// full-screen dims drawn through [`UPROG`] a single instruction — see the shader's header. 0 when
+/// the link failed; [`draw_field_panel`] then reports `false` and the caller draws the flat sheet.
+static mut PPROG: c_uint = 0;
+static mut FP_RECT: c_int = 0;
+static mut FP_TINT: c_int = 0;
+static mut FP_UVRECT: c_int = 0;
+static mut FP_SIZE: c_int = 0;
+static mut FP_RADIUS: c_int = 0;
+static mut FP_DITHER: c_int = 0;
+#[derive(Clone, Copy)]
+struct ImageUniforms {
+    rect: c_int, tint: c_int, uvrect: c_int, card: c_int, rimw: c_int,
+    rimcol: c_int, shinv: c_int, shcol: c_int, focus: c_int,
+}
+// Optional still specialization; the ordinary image shader remains the fallback.
+// Linked only when two images actually overlap; ordinary images keep their existing program.
+static mut DISSOLVE_IMAGE: Option<(c_uint, ImageUniforms, c_int)> = None;
+static mut DISSOLVE_PLAIN: Option<(c_uint, ImageUniforms, c_int)> = None;
+static mut DISSOLVE_TRIED: bool = false;
+static mut STILL_IMAGE: Option<(c_uint, ImageUniforms, c_int, c_int)> = None;
+/// Optional FOCUSED-card specialization ([`VS_FOCUS`]/[`FS_FOCUS`]) — [`IPROG`] remains the
+/// fallback (the plain look, same as before this program existed) if this fails to link.
+static mut FOCUS_IMAGE: Option<(c_uint, ImageUniforms)> = None;
+/// What the plain texture program reads per draw: the quad ([`VS_IMG`]'s `u_trect`), the source
+/// window it samples (`u_uvrect`) and the tint (`fs_tex.frag`'s `u_tint`). Its screen size and
+/// sampler unit are set once at link time, like every image program's. Nothing else: no card
+/// geometry, rim, shadow or focus uniform exists in it.
+#[derive(Clone, Copy)]
+struct PlainUniforms {
+    rect: c_int, tint: c_int, uvrect: c_int,
+}
+/// Optional PLAIN TEXTURE program ([`VS_IMG`]/[`FS_TEX`]): a picture that `fs_img.frag` would leave
+/// through its `u_card.z < 0.5` exit for every fragment — a square-cornered image (the Home hero's
+/// photographs, a cached layer's composite) or the interior piece of a card drawn in pieces — is a
+/// texture fetch and a tint multiply, and the image program's card chain, which that exit never
+/// reaches, still sizes its registers and occupancy (Midgard allocates for the whole shader). Which
+/// draws go here is [`plain_texture_program`]. [`IPROG`] remains the fallback — the same picture,
+/// drawn by the larger program — if this fails to link.
+static mut PLAIN_IMAGE: Option<(c_uint, PlainUniforms)> = None;
+
+/// The wash-with-art program — see [`draw_art_wash`]. Linked at [`init_image`] beside the image
+/// programs, not lazily: it serves shipped frames (Home's dive, Detail's scroll), and a link on
+/// first use would be a compile stall on the first frame of the very motion it exists to keep
+/// inside budget. `None` (a driver that refused it) keeps the two layers, which is the same picture.
+static mut ART_WASH: Option<ArtWashProgram> = None;
+
+#[derive(Clone, Copy)]
+struct ArtWashProgram {
+    prog: c_uint,
+    rect: c_int,
+    corners: [c_int; 4],
+    art: c_int,
+    uvrect: c_int,
+    tint: c_int,
+    ink: c_int,
+    inka: c_int,
+    scrim: ScrimLoc,
+    dither: c_int,
+}
+
+/// Where a program built from `vs_ambient.vert` with `PLX_SCRIM` keeps the ground shade: its blocks
+/// (`u_sc`, [`scrim::VEC4S`] vectors) and how many of them are live (`u_scn`), which is what lets
+/// the vertex shader stop at the last live block instead of running all six
+/// ([`scrim::GroundShade::live`]). `-1` where the program has neither.
+#[derive(Clone, Copy)]
+struct ScrimLoc {
+    sc: c_int,
+    scn: c_int,
+}
+
+impl ScrimLoc {
+    const NONE: ScrimLoc = ScrimLoc { sc: -1, scn: -1 };
+
+    /// The locations in `prog`, which need not be the program in use.
+    unsafe fn of(prog: c_uint) -> ScrimLoc {
+        ScrimLoc {
+            sc: glGetUniformLocation(prog, c"u_sc".as_ptr()),
+            scn: glGetUniformLocation(prog, c"u_scn".as_ptr()),
+        }
+    }
+}
+
+/// The `#version` + compatibility preamble prepended to every shader, chosen by the DRIVER's GLSL
+/// version rather than by platform.
+///
+/// The nine sources in `shaders/` are GLSL ES 1.00 — `attribute`, `varying`, `texture2D`,
+/// `gl_FragColor`, `precision mediump float;`. That is what the television's GLES2 driver wants,
+/// and it needs no preamble there, so this returns an empty string and the sources compile exactly
+/// as they always have.
+///
+/// A desktop core profile has none of those spellings. macOS caps at 4.1 core and has no GLES
+/// driver at all, so the simulator gets GLSL 4.10, where the ES names must be macro-mapped. All
+/// nine were compiled against a real 4.10 context on an M4 to settle this rather than assume it.
+///
+/// Two details that are not guesses:
+/// - `#define gl_FragColor …` is what works. Declaring `out vec4 gl_FragColor;` is rejected —
+///   "Identifier name 'gl_FragColor' cannot start with 'gl_'" — because that restriction binds
+///   DECLARATIONS, while the preprocessor substitutes before the parser ever sees the name.
+/// - `#line 1` closes the preamble so compiler error line numbers still point at the real source
+///   line in `shaders/*.frag`, not at an offset only this function knows.
+///
+/// Probing the driver rather than keying on `cfg!` means this also answers correctly for a future
+/// desktop-GL webOS, a Mesa GLES2 box, or anything else — there is one arm, so nothing can rot.
+/// Is this context an OpenGL **ES** driver, asked of the driver once?
+///
+/// Hoisted out of `glsl_preamble` so the two GL-flavour adaptations cannot disagree. They very
+/// nearly did: the preamble probes, while `bind_core_profile_vao` trusted `cfg!(hostsim)` — so a
+/// host build against a Mesa GLES2 driver (a Pi, a Linux VM) would have bound a VAO into a context
+/// that has none *while* compiling ES shaders. A nonsense state that compiles clean.
+fn gl_is_es() -> bool {
+    use std::sync::OnceLock;
+    static ES: OnceLock<bool> = OnceLock::new();
+    *ES.get_or_init(|| unsafe {
+        let v = glGetString(GL_SHADING_LANGUAGE_VERSION);
+        // "OpenGL ES GLSL ES 1.00" on the television; "4.10" on a desktop core profile. An
+        // unreadable string is treated as ES, which is the configuration that needs no preamble
+        // and therefore the safe default — a wrong guess there changes nothing.
+        // `starts_with`, not a substring scan: the ES spec mandates this exact prefix, while a
+        // desktop vendor string containing "ES" anywhere would otherwise skip the preamble and
+        // hard-exit at the first shader compile.
+        v.is_null() || CStr::from_ptr(v).to_bytes().starts_with(b"OpenGL ES")
+    })
+}
+
+fn glsl_preamble(ty: c_uint) -> &'static CStr {
+    if gl_is_es() {
+        return c"";
+    }
+    if ty == GL_VERTEX_SHADER {
+        c"#version 410 core\n#define attribute in\n#define varying out\n#define texture2D texture\n#line 1\n"
+    } else {
+        c"#version 410 core\n#define varying in\n#define texture2D texture\nout vec4 plx_frag;\n#define gl_FragColor plx_frag\n#line 1\n"
+    }
+}
+
+/// The coverage edges' antialiasing ramp is written as `smoothstep(-1.0, 1.0, d)` — one AUTHORED
+/// pixel either side, which is one physical pixel on a television and `n` of them supersampled
+/// (`surface::render_scale`, simulator only), so every rounded corner would come out `n` times
+/// softer than the render it sits in. Narrow exactly that ramp to one physical pixel. `None` —
+/// the source untouched — at scale 1, so the default simulator compiles what the television does.
+#[cfg(feature = "hostsim")]
+unsafe fn supersample_aa(src: *const c_char) -> Option<std::ffi::CString> {
+    let n = plx_base::surface::render_scale();
+    if n <= 1 {
+        return None;
+    }
+    let text = CStr::from_ptr(src).to_str().ok()?;
+    const EDGE: &str = "smoothstep(-1.0, 1.0, d)";
+    if !text.contains(EDGE) {
+        return None;
+    }
+    let w = 1.0 / n as f32;
+    std::ffi::CString::new(text.replace(EDGE, &format!("smoothstep(-{w:.6}, {w:.6}, d)"))).ok()
+}
+
+pub fn gfx_compile(ty: c_uint, src: *const c_char) -> c_uint {
+    try_compile(ty, src).unwrap_or_else(|| plx_base::process::exit_now(1))
+}
+
+/// Optional programs may degrade on a driver's compile rejection; required shaders keep the
+/// existing exit policy through `gfx_compile` above.
+fn try_compile(ty: c_uint, src: *const c_char) -> Option<c_uint> {
+    unsafe {
+        let s = glCreateShader(ty);
+        // Two source strings rather than a concatenation: GL joins them itself, so the preamble
+        // needs no allocation and the original `&CStr` sources stay untouched.
+        #[cfg(feature = "hostsim")]
+        let supersampled = supersample_aa(src);
+        #[cfg(feature = "hostsim")]
+        let src = supersampled.as_ref().map_or(src, |c| c.as_ptr());
+        let srcs: [*const c_char; 2] = [glsl_preamble(ty).as_ptr(), src];
+        glShaderSource(s, 2, srcs.as_ptr(), std::ptr::null());
+        glCompileShader(s);
+        let mut ok: c_int = 0;
+        glGetShaderiv(s, GL_COMPILE_STATUS, &mut ok);
+        if ok == 0 {
+            let mut buf = [0u8; 1024];
+            glGetShaderInfoLog(
+                s,
+                1024,
+                std::ptr::null_mut(),
+                buf.as_mut_ptr() as *mut c_char,
+            );
+            let msg = CStr::from_ptr(buf.as_ptr() as *const c_char)
+                .to_string_lossy()
+                .into_owned();
+            // The EVENT log is the only surface anyone reads over ssh, and neither of the two lines
+            // below reaches it: `eprintln!` goes to /tmp/plxnative-stderr.log (main.c replaces
+            // stderr), and `process::exit` is a CLEAN exit, so the crash tracer never fires and
+            // /tmp/plxnative-crash.log stays empty. Without this the window flashes, the app is back
+            // at the launcher, the event log simply stops mid-boot, and triage correctly reports
+            // "not a crash" with nothing pointing at the shader. `eprintln!` stays because it costs
+            // nothing, NOT because it is the durable copy: `main.c` truncates both sinks at every
+            // launch, so neither survives the relaunch that `plxnative-crash.log` is append-only for.
+            log(&format!("shader compile FAILED: {msg}"));
+            eprintln!("shader error: {msg}");
+            return None;
+        }
+        Some(s)
+    }
+}
+
+/// Shared program bring-up for every shader pair: create → attach VS/FS → bind `a_pos`
+/// (attrib 0, the shared unit quad) → link. `None` = link failure; each caller keeps its
+/// own failure policy (hard-exit, degrade to 0, or early-return).
+pub fn link_program(vs: *const c_char, fs: *const c_char) -> Option<c_uint> {
+    link_shaders(gfx_compile(GL_VERTEX_SHADER, vs), gfx_compile(GL_FRAGMENT_SHADER, fs))
+}
+
+fn link_optional_program(vs: *const c_char, fs: *const c_char) -> Option<c_uint> {
+    link_shaders(try_compile(GL_VERTEX_SHADER, vs)?, try_compile(GL_FRAGMENT_SHADER, fs)?)
+}
+
+fn link_shaders(vs: c_uint, fs: c_uint) -> Option<c_uint> {
+    unsafe {
+        let p = glCreateProgram();
+        glAttachShader(p, vs);
+        glAttachShader(p, fs);
+        glBindAttribLocation(p, 0, c"a_pos".as_ptr());
+        glLinkProgram(p);
+        let mut ok: c_int = 0;
+        glGetProgramiv(p, GL_LINK_STATUS, &mut ok);
+        (ok != 0).then_some(p)
+    }
+}
+
+/// Lazy program binding: the driver call is skipped when `p` is already current. Every draw fn
+/// binds ITS OWN program through this (draw_rect no longer assumes PROG is left bound by whoever
+/// ran before it), which deletes the unconditional switch+restore pair the textured/text/ambient/
+/// shadow paths used to pay on every call. Main-thread only, like all GL here.
+static mut CUR_PROG: c_uint = 0;
+#[inline]
+pub fn use_prog(p: c_uint) {
+    unsafe {
+        if CUR_PROG != p {
+            glUseProgram(p);
+            CUR_PROG = p;
+        }
+    }
+}
+
+static QUAD: [f32; 8] = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+
+/// Cells per side of the FIELD MESH — the grid the four-corner programs (`draw_ambient`,
+/// `draw_grad4`) are drawn as instead of one quad. See [`field_mesh`].
+const FIELD_N: usize = 16;
+/// Vertices in the field mesh: two triangles a cell.
+const FIELD_VERTS: usize = FIELD_N * FIELD_N * 6;
+
+/// **The unit square as `FIELD_N`² cells of two triangles each**, as `GL_TRIANGLES` positions.
+///
+/// The four-corner field is bilinear, and the cheapest place to evaluate it is per VERTEX: the
+/// fragment then reads one interpolated colour and does no arithmetic on it at all. One quad
+/// cannot carry that — a triangle interpolates linearly and the field is not linear — which is why
+/// the quad form kept `top(u)`/`bot(u)` as two varyings plus `v_uv` and mixed them per fragment.
+/// On a grid the linear interpolant is within `twist·h²/4` of the field (`h = 1/FIELD_N`), under
+/// half an 8-bit code at 16 for the largest twist a colour can have; the test
+/// `the_field_mesh_is_the_bilinear_field_within_half_a_code` walks this very list.
+///
+/// Measured on the set (2026-09-19, `plxnative-hwcnt`, `docs/backdrop-blur-profiling.md`): the
+/// full-screen wash drawn this way cost ~0.4M fewer GPU cycles a frame on Home's fold and grid —
+/// four varyings down to two — for 1536 vertices the vertex stage does not notice.
+fn field_mesh() -> Vec<f32> {
+    let mut v = Vec::with_capacity(FIELD_VERTS * 2);
+    let f = |i: usize| i as f32 / FIELD_N as f32;
+    for j in 0..FIELD_N {
+        for i in 0..FIELD_N {
+            let (x0, x1, y0, y1) = (f(i), f(i + 1), f(j), f(j + 1));
+            v.extend_from_slice(&[x0, y0, x1, y0, x0, y1, x1, y0, x1, y1, x0, y1]);
+        }
+    }
+    v
+}
+
+/// Bind the one vertex array object a desktop core profile requires.
+///
+/// **GLES2 has no VAOs and a core profile has no DEFAULT one**, and the difference is silent: with
+/// VAO 0 bound, `glVertexAttribPointer` and `glDrawArrays` raise `GL_INVALID_OPERATION` and draw
+/// nothing at all. `glClear` is unaffected, so the symptom is a window painted the clear colour and
+/// a completely empty interface — which is exactly what the first simulator screenshots were, at
+/// every frame sampled.
+///
+/// One VAO for the process is enough and is not a simplification: this renderer has a single
+/// attribute layout — attribute 0, the shared unit quad in one static VBO, set up immediately
+/// below and never rebound. There is nothing for a second VAO to describe.
+///
+/// `#[cfg]` rather than a runtime check because these two entry points do not EXIST in GLES2; the
+/// television's libGLESv2 exports neither, so merely naming them in the shared `extern` block
+/// would be a link-time undefined symbol on the device.
+#[cfg(feature = "hostsim")]
+fn bind_core_profile_vao() {
+    extern "C" {
+        fn glGenVertexArrays(n: c_int, arrays: *mut c_uint);
+        fn glBindVertexArray(array: c_uint);
+    }
+    // A hostsim build is not necessarily a core profile — Mesa GLES2 exists on desktops too, and
+    // there VAO 0 is legal and these entry points are absent. Ask the driver, like the preamble.
+    if gl_is_es() {
+        return;
+    }
+    unsafe {
+        let mut vao: c_uint = 0;
+        glGenVertexArrays(1, &mut vao);
+        glBindVertexArray(vao);
+    }
+}
+
+pub fn init_gl() {
+    unsafe {
+        WARM_TARGET = None;
+        // Before any buffer or attribute state is touched — in a core profile the calls below are
+        // errors without it.
+        #[cfg(feature = "hostsim")]
+        bind_core_profile_vao();
+
+        PROG = link_program(VS_SRC.as_ptr(), FS_SRC.as_ptr()).unwrap_or_else(|| {
+            // Logged for the same reason as the compile failure in `gfx_compile`: stderr is not the
+            // event log and a clean exit is not a crash, so this line is the only trace the death
+            // leaves. The base program is the one every draw needs, hence the exit where the
+            // ambient/shadow/image programs below merely degrade.
+            log("base prog link FAILED — exiting");
+            eprintln!("link failed");
+            plx_base::process::exit_now(1);
+        });
+        use_prog(PROG);
+        LOC_RECT = glGetUniformLocation(PROG, c"u_rect".as_ptr());
+        LOC_SCREEN = glGetUniformLocation(PROG, c"u_screen".as_ptr());
+        LOC_SIZE = glGetUniformLocation(PROG, c"u_size".as_ptr());
+        LOC_PAD = glGetUniformLocation(PROG, c"u_pad".as_ptr());
+        LOC_RADIUS = glGetUniformLocation(PROG, c"u_radius".as_ptr());
+        LOC_COLTOP = glGetUniformLocation(PROG, c"u_colTop".as_ptr());
+        LOC_COLBOT = glGetUniformLocation(PROG, c"u_colBot".as_ptr());
+        LOC_FOCUS = glGetUniformLocation(PROG, c"u_focus".as_ptr());
+        LOC_RGB_CAP = glGetUniformLocation(PROG, c"u_rgb_cap".as_ptr());
+        LOC_RADR = glGetUniformLocation(PROG, c"u_radR".as_ptr());
+        LOC_RIMW = glGetUniformLocation(PROG, c"u_rimw".as_ptr());
+        LOC_RIMCOL = glGetUniformLocation(PROG, c"u_rimcol".as_ptr());
+        LOC_RIMTOP = glGetUniformLocation(PROG, c"u_rimtop".as_ptr());
+        LOC_PILL1 = glGetUniformLocation(PROG, c"u_pill1".as_ptr());
+        LOC_PILL2 = glGetUniformLocation(PROG, c"u_pill2".as_ptr());
+        LOC_GLOW = glGetUniformLocation(PROG, c"u_glow".as_ptr());
+        glUniform2f(LOC_SCREEN, SCR_W, SCR_H);
+
+        let mut vbo: c_uint = 0;
+        glGenBuffers(1, &mut vbo);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        // ONE buffer, one attribute layout: the unit quad at vertex 0 and the field mesh right
+        // after it at vertex 4, so a field draw is `glDrawArrays(GL_TRIANGLES, 4, ..)` against the
+        // same pointer and nothing is ever rebound (see `bind_core_profile_vao`).
+        let mut verts: Vec<f32> = QUAD.to_vec();
+        verts.extend(field_mesh());
+        glBufferData(
+            GL_ARRAY_BUFFER,
+            std::mem::size_of_val(verts.as_slice()) as isize,
+            verts.as_ptr() as *const c_void,
+            GL_STATIC_DRAW,
+        );
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, std::ptr::null());
+
+        APROG = link_program(VS_AMBIENT_DITHERED.as_ptr(), FS_AMBIENT.as_ptr()).unwrap_or_else(|| {
+            log("ambient prog link failed");
+            0 // draw_ambient then binds program 0 and draws nothing — the corner wash is a nicety
+        });
+        if APROG != 0 {
+            AL_RECT = glGetUniformLocation(APROG, c"u_rect".as_ptr());
+            AL_SCREEN = glGetUniformLocation(APROG, c"u_screen".as_ptr());
+            AL_TL = glGetUniformLocation(APROG, c"u_atl".as_ptr());
+            AL_TR = glGetUniformLocation(APROG, c"u_atr".as_ptr());
+            AL_BR = glGetUniformLocation(APROG, c"u_abr".as_ptr());
+            AL_BL = glGetUniformLocation(APROG, c"u_abl".as_ptr());
+            AL_DITHER = dither_uniforms(APROG);
+            AL_INK = glGetUniformLocation(APROG, c"u_ink".as_ptr());
+            AL_INKA = glGetUniformLocation(APROG, c"u_inka".as_ptr());
+            AL_SCRIM = ScrimLoc::of(APROG);
+        }
+        SCRIM_SENT = [scrim::GroundShade::NONE; 3];
+        SCRIM_PROG = link_program(VS_SCRIM_LAYER.as_ptr(), FS_AMBIENT_PLAIN.as_ptr()).unwrap_or_else(|| {
+            log("scrim layer prog link failed — a layered hero draws no scrim over its art");
+            0
+        });
+        if SCRIM_PROG != 0 {
+            SCL_RECT = glGetUniformLocation(SCRIM_PROG, c"u_rect".as_ptr());
+            SCL_INK = glGetUniformLocation(SCRIM_PROG, c"u_ink".as_ptr());
+            SCL_SCRIM = ScrimLoc::of(SCRIM_PROG);
+            use_prog(SCRIM_PROG);
+            glUniform2f(glGetUniformLocation(SCRIM_PROG, c"u_screen".as_ptr()), SCR_W, SCR_H);
+        }
+        bind_dither_tile();
+
+        APROG_PLAIN = link_program(VS_AMBIENT.as_ptr(), FS_AMBIENT_PLAIN.as_ptr()).unwrap_or_else(|| {
+            log("ambient (plain) prog link failed — the dithered program serves every frame");
+            0
+        });
+        if APROG_PLAIN != 0 {
+            PL_RECT = glGetUniformLocation(APROG_PLAIN, c"u_rect".as_ptr());
+            PL_TL = glGetUniformLocation(APROG_PLAIN, c"u_atl".as_ptr());
+            PL_TR = glGetUniformLocation(APROG_PLAIN, c"u_atr".as_ptr());
+            PL_BR = glGetUniformLocation(APROG_PLAIN, c"u_abr".as_ptr());
+            PL_BL = glGetUniformLocation(APROG_PLAIN, c"u_abl".as_ptr());
+            use_prog(APROG_PLAIN);
+            glUniform2f(glGetUniformLocation(APROG_PLAIN, c"u_screen".as_ptr()), SCR_W, SCR_H);
+        }
+
+        // Soft-shadow program (own program so the hot FS_SRC pays nothing; mirrors init_image).
+        SPROG = link_program(VS_SRC.as_ptr(), FS_SHADOW.as_ptr()).unwrap_or_else(|| {
+            log("shadow prog link failed");
+            0 // draw_shadow no-ops → cards simply lose the drop-shadow, nothing else breaks
+        });
+        if SPROG != 0 {
+            SL_RECT = glGetUniformLocation(SPROG, c"u_rect".as_ptr());
+            SL_SCREEN = glGetUniformLocation(SPROG, c"u_screen".as_ptr());
+            SL_SIZE = glGetUniformLocation(SPROG, c"u_size".as_ptr());
+            SL_MAP = glGetUniformLocation(SPROG, c"u_map".as_ptr());
+            SL_RADIUS = glGetUniformLocation(SPROG, c"u_radius".as_ptr());
+            SL_BLUR = glGetUniformLocation(SPROG, c"u_blur".as_ptr());
+            SL_OFF = glGetUniformLocation(SPROG, c"u_off".as_ptr());
+            SL_CUT = glGetUniformLocation(SPROG, c"u_cut".as_ptr());
+            SL_COL = glGetUniformLocation(SPROG, c"u_col".as_ptr());
+        }
+
+        FPROG = link_program(VS_SRC.as_ptr(), FS_FLAT.as_ptr()).unwrap_or_else(|| {
+            log("flat prog link failed — uniform rects take the fill program's flat path");
+            0
+        });
+        if FPROG != 0 {
+            FL_RECT = glGetUniformLocation(FPROG, c"u_rect".as_ptr());
+            FL_COL = glGetUniformLocation(FPROG, c"u_col".as_ptr());
+            use_prog(FPROG);
+            glUniform2f(glGetUniformLocation(FPROG, c"u_screen".as_ptr()), SCR_W, SCR_H);
+        }
+
+        // Optional on purpose: `link_program` exits the process on a compile rejection
+        // (`gfx_compile`), which would make `draw_ramp`'s fallback unreachable for the failure a
+        // driver is likeliest to give a new program. `try_compile` logs the compile error itself.
+        RPROG = link_optional_program(VS_SRC.as_ptr(), FS_RAMP.as_ptr()).unwrap_or_else(|| {
+            log("ramp prog compile/link failed — square gradients take the fill program's flat path");
+            0
+        });
+        if RPROG != 0 {
+            RP_RECT = glGetUniformLocation(RPROG, c"u_rect".as_ptr());
+            RP_TOP = glGetUniformLocation(RPROG, c"u_colTop".as_ptr());
+            RP_BOT = glGetUniformLocation(RPROG, c"u_colBot".as_ptr());
+            use_prog(RPROG);
+            glUniform2f(glGetUniformLocation(RPROG, c"u_screen".as_ptr()), SCR_W, SCR_H);
+        }
+
+        // The underlay field. `vs_src.vert` because a field is drawn 1:1 over its rect, so the
+        // unit quad IS the texture coordinate and there is nothing for a `u_uvrect` to express.
+        // DITHERED: `fs_field.frag` is built with `glsl_dithered!`, so its paired vertex source
+        // must be the `PLX_DITHER_NC` variant that supplies `v_dither_nc` (cost rule 4).
+        UPROG = link_program(VS_SRC_DITHERED.as_ptr(), FS_FIELD.as_ptr()).unwrap_or_else(|| {
+            log("field prog link failed — an underlay field draws nothing");
+            0
+        });
+        if UPROG != 0 {
+            UL_RECT = glGetUniformLocation(UPROG, c"u_rect".as_ptr());
+            UL_TINT = glGetUniformLocation(UPROG, c"u_tint".as_ptr());
+            use_prog(UPROG);
+            glUniform2f(glGetUniformLocation(UPROG, c"u_screen".as_ptr()), SCR_W, SCR_H);
+            glUniform1i(glGetUniformLocation(UPROG, c"u_tex".as_ptr()), 0);
+            UL_DITHER = dither_uniforms(UPROG);
+        }
+
+        // The same field as a popover's material — `draw_field_panel`. DITHERED, same contract as
+        // `UPROG` above: `fs_field_panel.frag` is built with `glsl_dithered!`, so it must link
+        // against the `PLX_DITHER_NC` vertex variant.
+        PPROG = link_program(VS_SRC_DITHERED.as_ptr(), FS_FIELD_PANEL.as_ptr()).unwrap_or_else(|| {
+            log("field-panel prog link failed — popover panels fall back to the flat sheet");
+            0
+        });
+        if PPROG != 0 {
+            FP_RECT = glGetUniformLocation(PPROG, c"u_rect".as_ptr());
+            FP_TINT = glGetUniformLocation(PPROG, c"u_tint".as_ptr());
+            FP_UVRECT = glGetUniformLocation(PPROG, c"u_uvrect".as_ptr());
+            FP_SIZE = glGetUniformLocation(PPROG, c"u_size".as_ptr());
+            FP_RADIUS = glGetUniformLocation(PPROG, c"u_radius".as_ptr());
+            use_prog(PPROG);
+            glUniform2f(glGetUniformLocation(PPROG, c"u_screen".as_ptr()), SCR_W, SCR_H);
+            glUniform1i(glGetUniformLocation(PPROG, c"u_tex".as_ptr()), 0);
+            FP_DITHER = dither_uniforms(PPROG);
+        }
+
+        AS_PROG = link_optional_program(VS_ART_SCRIM.as_ptr(), FS_ART_SCRIM.as_ptr()).unwrap_or_else(|| {
+            log("art scrim prog link failed — retaining the scissored corner bands");
+            0
+        });
+        if AS_PROG != 0 {
+            AS_RECT = glGetUniformLocation(AS_PROG, c"u_rect".as_ptr());
+            AS_SIZE = glGetUniformLocation(AS_PROG, c"u_size".as_ptr());
+            AS_BAND = glGetUniformLocation(AS_PROG, c"u_band".as_ptr());
+            AS_COL = glGetUniformLocation(AS_PROG, c"u_col".as_ptr());
+            use_prog(AS_PROG);
+            glUniform2f(glGetUniformLocation(AS_PROG, c"u_screen".as_ptr()), SCR_W, SCR_H);
+        }
+
+        // Hoist the compile-time-constant uniforms: uniforms are per-program state, so each
+        // program's screen size is set ONCE here instead of on every draw call. (The UI is a
+        // fixed 1920x1080 with no DPI scaling — that constancy is what makes this legal.)
+        if APROG != 0 {
+            use_prog(APROG);
+            glUniform2f(AL_SCREEN, SCR_W, SCR_H);
+        }
+        if SPROG != 0 {
+            use_prog(SPROG);
+            glUniform2f(SL_SCREEN, SCR_W, SCR_H);
+        }
+        use_prog(PROG);
+        // Texture unit 0 is the only unit this renderer ever samples from — set it once.
+        glActiveTexture(GL_TEXTURE0);
+
+        glEnable(GL_BLEND);
+        // **SEPARATE, and the alpha half is the whole point.** Colour composites the ordinary way;
+        // ALPHA must ACCUMULATE (`GL_ONE`), because this surface is a wayland surface the compositor
+        // blends over the video plane — `system.rs` deliberately makes it non-opaque — so the alpha
+        // channel is not scratch space, it is what the television multiplies our picture by.
+        //
+        // With one `glBlendFunc` for both, alpha used `GL_SRC_ALPHA` as well and every partial-alpha
+        // draw over an opaque ground computed `dst.a = a² + dst.a(1−a)`: at a=.40 the surface fell to
+        // **0.76** where it had been 1. The colour was right and the SURFACE had a hole in it, and
+        // the compositor showed black through the hole — measured on the panel as 43 → 33, which is
+        // exactly `43 × 0.76`.
+        //
+        // It is near-invisible in a screenshot and a hard bar on the television, because sRGB 43 vs
+        // 33 is ~2× in luminance down there. Found through the search screen's navigation-bar scrim
+        // (reported as "on screenshot capture I see a pleasing fade, but on TV it is like a shadow"),
+        // but it was never that screen's bug: EVERY partial-alpha draw in this app punched the same
+        // hole — the Library's scrim, the hero scrims, `art_scrim`, every popover scrim, every page
+        // and content fade, every glyph drawn at less than full alpha. Fades have always come out a
+        // shade darker than authored on the panel and nothing but a photograph could show it.
+        //
+        // The player's transparent clear is unaffected in the right direction: over `dst.a = 0`,
+        // accumulating alpha gives `src.a`, which is what a HUD drawn over the video plane means.
+        //
+        // **What that leaves in the framebuffer is PREMULTIPLIED colour** — `(rgb * a, a)` over the
+        // clear — and the television's compositor takes it as STRAIGHT (`panel = ui.rgb * ui.a +
+        // video * (1 - ui.a)`, measured on the dev set: the 43 -> 33 above is that multiply, 43 x 0.76).
+        // The two read the same pixel differently, so over the BOUND video plane the frame's last draw
+        // is the straighten pass (`straighten.rs`), which divides the colour by its alpha for the
+        // compositor to multiply back. Over an opaque ground `a` is 1 and the two agree.
+        glBlendFuncSeparate(
+            GL_SRC_ALPHA,
+            GL_ONE_MINUS_SRC_ALPHA,
+            GL_ONE,
+            GL_ONE_MINUS_SRC_ALPHA,
+        );
+        // GL_DITHER is ON by default in GLES2; it dithers low-alpha gradients (the card shadow
+        // penumbra) into a regular ordered-dither dot pattern visible along tile edges. The panel is
+        // 888 and SURFACE_APP is snapped to exact 8-bit codes, so dithering buys nothing here — off.
+        glDisable(GL_DITHER);
+        // Last: it reads GL's extension string and links against the context just built.
+        straighten::init();
+    }
+}
+
+/// The CAPSULE OUTLINE's solved geometry as the shader takes it — `[R, f, r, big centre y, end
+/// centre x, blend centre x, blend centre y, enabled]`. Built by `ui::pill::Pill::args`;
+/// the renderer only ever forwards it.
+pub type PillArgs = [f32; 8];
+/// The focused face's INNER GLOW — `[top depth px, top weight, bottom depth px, bottom weight]`.
+/// The design draws it as two inset shadows either side of the perimeter line; this is the same
+/// light as a falloff inward from the edge, weighted by the surface normal so it dies out where the
+/// face turns away instead of stopping on an arc.
+pub type GlowArgs = [f32; 4];
+
+/// Send "this draw is an ordinary rounded rect, with no inner glow" — the state every PROG path but
+/// the capsule's must leave behind. Uniforms are per-PROGRAM and persist across draws, so a shape
+/// left armed would put the last capsule's outline on the next scrim.
+#[inline]
+unsafe fn pill_off() {
+    unsafe {
+        glUniform4f(LOC_PILL1, 0.0, 0.0, 0.0, 0.0);
+        glUniform4f(LOC_PILL2, 0.0, 0.0, 0.0, 0.0);
+        glUniform4f(LOC_GLOW, 0.0, 0.0, 0.0, 0.0);
+    }
+}
+
+/// [`pill_off`]'s opposite: arm an outline and a glow, either of which may be absent.
+#[inline]
+unsafe fn pill_on(pill: Option<&PillArgs>, glow: Option<&GlowArgs>) {
+    unsafe {
+        match pill {
+            Some(p) => {
+                glUniform4f(LOC_PILL1, p[0], p[1], p[2], p[3]);
+                glUniform4f(LOC_PILL2, p[4], p[5], p[6], p[7]);
+            }
+            None => {
+                glUniform4f(LOC_PILL1, 0.0, 0.0, 0.0, 0.0);
+                glUniform4f(LOC_PILL2, 0.0, 0.0, 0.0, 0.0);
+            }
+        }
+        match glow {
+            Some(g) => glUniform4f(LOC_GLOW, g[0], g[1], g[2], g[3]),
+            None => glUniform4f(LOC_GLOW, 0.0, 0.0, 0.0, 0.0),
+        }
+    }
+}
+
+/// Are two 4-float colours the same fill? Pointer equality first — every `Painter::rect` caller
+/// that wants one colour passes the same array twice — then the four components.
+#[inline]
+fn same_colour(top: *const f32, bot: *const f32) -> bool {
+    if std::ptr::eq(top, bot) {
+        return true;
+    }
+    // SAFETY: every caller passes a 4-float colour, exactly as `glUniform4fv` beside it requires.
+    unsafe { (0..4).all(|i| *top.add(i) == *bot.add(i)) }
+}
+
+/// Which program fills a [`draw_rect`] quad. The first two are the cases where `fs_src.frag` would
+/// have taken its own flat fast path anyway (the quad is exactly the rect, no AA bleed), so they
+/// draw the same pixels from a smaller program.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RectFill {
+    /// One colour: `shaders/fs_flat.frag` ([`draw_flat`]).
+    Flat,
+    /// Two colours, top to bottom: `shaders/fs_ramp.frag` ([`draw_ramp`]).
+    Ramp,
+    /// Everything else (rounded, focused): `fs_src.frag`'s SDF fill.
+    Sdf,
+}
+
+/// The program for a rect of this corner `radius` and `focus`, whose top and bottom colours are
+/// (`one_colour`) or are not the same fill. The `radius`/`focus` thresholds are `fs_src.frag`'s own
+/// flat-path test (`u_radius < 0.5 && u_focus < 0.001`), so a rect is routed off that program only
+/// when the shader would have skipped the SDF for it; `pad` is not an input because that path never
+/// reads it.
+///
+/// The test is made in `f32` here. On the device `u_focus` is a mediump uniform, so the shader's
+/// `u_focus < 0.001` may compare in fp16 and round a focus just under 1e-3 differently; no caller
+/// passes such a value on a square rect, and `draw_flat` already had the same property.
+#[inline]
+fn rect_fill(radius: f32, focus: f32, one_colour: bool) -> RectFill {
+    if radius < 0.5 && focus < 0.001 {
+        if one_colour {
+            RectFill::Flat
+        } else {
+            RectFill::Ramp
+        }
+    } else {
+        RectFill::Sdf
+    }
+}
+
+/// One colour over an axis-aligned quad through `shaders/fs_flat.frag` — the cheapest fragment this
+/// renderer has, and the one every full-screen scrim is. Falls back to the fill program's flat path
+/// (same pixels, ~2 shader words a fragment dearer) when the flat program failed to link.
+unsafe fn draw_flat(x: f32, y: f32, w: f32, h: f32, col: *const f32) {
+    if FPROG == 0 {
+        use_prog(PROG);
+        let ext = set_rect(LOC_RECT, x, y, w, h);
+        glUniform2f(LOC_SIZE, w, h);
+        glUniform1f(LOC_PAD, 0.0);
+        glUniform1f(LOC_RADIUS, 0.0);
+        glUniform1f(LOC_RADR, 0.0);
+        glUniform4fv(LOC_COLTOP, 1, col);
+        glUniform4fv(LOC_COLBOT, 1, col);
+        glUniform1f(LOC_FOCUS, 0.0);
+        glUniform1f(LOC_RIMW, 0.0);
+        glUniform4f(LOC_RIMCOL, 0.0, 0.0, 0.0, 0.0);
+        glUniform1f(LOC_RIMTOP, 0.0);
+        pill_off();
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4, ext);
+        return;
+    }
+    use_prog(FPROG); // u_screen is set once at init (uniforms are per-program state)
+    let ext = set_rect(FL_RECT, x, y, w, h);
+    glUniform4fv(FL_COL, 1, col);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4, ext);
+}
+
+/// A top-to-bottom two-stop gradient over an axis-aligned quad through `shaders/fs_ramp.frag` — the
+/// hero backdrop's ramp bands. Falls back to the fill program's flat path (same pixels, dearer per
+/// fragment) when the ramp program failed to compile or link. The quad is exactly `x, y, w, h` on both paths,
+/// the AA bleed being the SDF path's alone.
+unsafe fn draw_ramp(x: f32, y: f32, w: f32, h: f32, top: *const f32, bot: *const f32) {
+    if RPROG == 0 {
+        use_prog(PROG);
+        let ext = set_rect(LOC_RECT, x, y, w, h);
+        glUniform2f(LOC_SIZE, w, h);
+        glUniform1f(LOC_PAD, 0.0);
+        glUniform1f(LOC_RADIUS, 0.0);
+        glUniform1f(LOC_RADR, 0.0);
+        glUniform4fv(LOC_COLTOP, 1, top);
+        glUniform4fv(LOC_COLBOT, 1, bot);
+        glUniform1f(LOC_FOCUS, 0.0);
+        glUniform1f(LOC_RIMW, 0.0);
+        glUniform4f(LOC_RIMCOL, 0.0, 0.0, 0.0, 0.0);
+        glUniform1f(LOC_RIMTOP, 0.0);
+        pill_off();
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4, ext);
+        return;
+    }
+    use_prog(RPROG); // u_screen is set once at init (uniforms are per-program state)
+    let ext = set_rect(RP_RECT, x, y, w, h);
+    glUniform4fv(RP_TOP, 1, top);
+    glUniform4fv(RP_BOT, 1, bot);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4, ext);
+}
+
+/// Only the bottom band and its AA fringe are rasterized; the shader clips to the full card.
+fn art_scrim_quad(x: f32, y: f32, w: f32, h: f32, band: f32) -> Option<[f32; 4]> {
+    let band = band.min(h);
+    if w <= 0.0 || h <= 0.0 || band <= 0.0 {
+        return None;
+    }
+    Some([
+        x - AA_BLEED,
+        y + h - band - AA_BLEED,
+        w + 2.0 * AA_BLEED,
+        band + 2.0 * AA_BLEED,
+    ])
+}
+
+/// The central column's fully covered interior, including the straight bottom above its AA row.
+fn art_scrim_inner(w: f32, h: f32, radius: f32) -> [f32; 2] {
+    [w * 0.5 - radius.max(AA_BLEED), h * 0.5 - AA_BLEED]
+}
+
+/// A seamless bottom gradient inside the card's rounded silhouette. Returns false only when
+/// the optional shader failed to link, so the caller can retain the scissored-band fallback.
+/// Coordinates stay authored pixels, including during a scaled blur-source pass; no scissor
+/// state changes, so an enclosing panel's clip remains in force.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_art_scrim(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    band: f32,
+    col: [f32; 4],
+) -> bool {
+    let Some([qx, qy, qw, qh]) = art_scrim_quad(x, y, w, h, band) else {
+        return true;
+    };
+    unsafe {
+        if AS_PROG == 0 {
+            return false;
+        }
+        if col[3] <= 0.0 || culled(qx, qy, qw, qh) || gate(Class::Grad, qx, qy, qw, qh) {
+            return true;
+        }
+        use_prog(AS_PROG);
+        let radius = radius.max(0.0).min(w * 0.5).min(h * 0.5);
+        let inner = art_scrim_inner(w, h, radius);
+        let ext = set_rect(AS_RECT, qx, qy, qw, qh);
+        glUniform4f(AS_SIZE, w, h, w * 0.5 - radius, h * 0.5 - radius);
+        glUniform4f(AS_BAND, band.min(h), radius, inner[0], inner[1]);
+        glUniform4fv(AS_COL, 1, col.as_ptr());
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4, ext);
+    }
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn draw_rect(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    pad: f32,
+    radius: f32,
+    top: *const f32,
+    bot: *const f32,
+    focus: f32,
+    rgb_cap: f32,
+) {
+    if culled(x, y, w, h) || gate(Class::Rect, x, y, w, h) {
+        return;
+    }
+    unsafe {
+        // `pad` is not an input to the routing: `fs_src.frag`'s own flat path never reads it
+        // either, so the programs draw the same quad for a square, unfocused rect whatever it was
+        // given. A uniform one goes to the flat program, a two-stop gradient to the ramp program.
+        match rect_fill(radius, focus, same_colour(top, bot)) {
+            RectFill::Flat => {
+                draw_flat(x, y, w, h, top);
+                return;
+            }
+            RectFill::Ramp => {
+                draw_ramp(x, y, w, h, top, bot);
+                return;
+            }
+            RectFill::Sdf => {}
+        }
+        // History, because the obvious reroute for a flat gradient is not the one that paid. In
+        // `plxnative-hwcnt` on 2026-09-02, sending the hero's two full-width ramp quads through the
+        // AMBIENT program made the frame 0.6M GPU cycles DEARER, because `fs_src`'s early-out was
+        // one `mix` where a four-corner field is three. What the ramps were paying on THIS program
+        // was its size (2026-10-24: ~3 arithmetic words a fragment for what is one `mix`):
+        // Midgard sizes the register file for the whole shader, so the capsule arcs and the glow
+        // lowered the occupancy of a path that never ran them, and the uniform test ahead of the
+        // `mix` ran on every fragment. `draw_ramp` is the same `mix` in a program with nothing else
+        // in it, which is why it, and not the ambient field, is where a square gradient goes.
+        use_prog(PROG);
+        // Only the rounded/focus SDF path needs the AA bleed; a plain rect (the flat and ramp
+        // programs above, `fs_src.frag`'s own fast path) must stay exactly its bounds (a 1px
+        // overhang would fatten scrims/backgrounds).
+        let aa = if radius >= 0.5 || focus > 0.001 {
+            AA_BLEED
+        } else {
+            0.0
+        };
+        let ext = set_rect(LOC_RECT, x - aa, y - aa, w + 2.0 * aa, h + 2.0 * aa);
+        glUniform2f(LOC_SIZE, w + 2.0 * aa, h + 2.0 * aa);
+        glUniform1f(LOC_PAD, pad + aa);
+        glUniform1f(LOC_RADIUS, radius);
+        glUniform1f(LOC_RADR, radius);
+        glUniform4fv(LOC_COLTOP, 1, top);
+        glUniform4fv(LOC_COLBOT, 1, bot);
+        glUniform1f(LOC_FOCUS, focus);
+        // Fill/rim colours arrive pre-scaled by the Painter's RGB gain; `rgb_cap` is that gain
+        // itself, the ceiling the shader holds the SUM of fill, rim, glow and focus ring to (see
+        // `fs_src.frag`'s `u_rgb_cap`). Every PROG draw sets it: uniforms persist per program.
+        glUniform1f(LOC_RGB_CAP, rgb_cap);
+        glUniform1f(LOC_RIMW, 0.0);
+        glUniform4f(LOC_RIMCOL, 0.0, 0.0, 0.0, 0.0); // no edge-sheen (default)
+        glUniform1f(LOC_RIMTOP, 0.0);
+        pill_off();
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4, ext);
+    }
+}
+
+/// [`draw_rect`] with the focus edge-sheen (a `rimw`-px inset perimeter rim in `rimcol`) baked into
+/// the same fill pass — the no-texture (skeleton / chip disc) counterpart of [`draw_tex_stroked`].
+#[allow(clippy::too_many_arguments)]
+pub fn draw_rect_sheened(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    top: *const f32,
+    bot: *const f32,
+    rimw: f32,
+    rimcol: *const f32,
+    rimtop: f32,
+    rgb_cap: f32,
+) {
+    draw_rect_shaped(
+        x, y, w, h, radius, top, bot, rimw, rimcol, rimtop, rgb_cap, None, None,
+    )
+}
+
+/// [`draw_rect_sheened`] with the CAPSULE OUTLINE and the focused face's inner glow — the control
+/// family's own entry point. `radius` is still the stadium's, and it stays load-bearing with an
+/// outline armed: the flat fast-path and the interior early-out are both keyed off it, and the
+/// solved outline is strictly inside the stadium, so a conservative test against the larger shape is
+/// conservative against this one too.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_rect_shaped(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    top: *const f32,
+    bot: *const f32,
+    rimw: f32,
+    rimcol: *const f32,
+    rimtop: f32,
+    rgb_cap: f32,
+    pill: Option<&PillArgs>,
+    glow: Option<&GlowArgs>,
+) {
+    if culled(x, y, w, h) || gate(Class::Rect, x, y, w, h) {
+        return;
+    }
+    unsafe {
+        use_prog(PROG);
+        let aa = AA_BLEED; // a sheened tile is always rounded → always SDF path
+        let ext = set_rect(LOC_RECT, x - aa, y - aa, w + 2.0 * aa, h + 2.0 * aa);
+        glUniform2f(LOC_SIZE, w + 2.0 * aa, h + 2.0 * aa);
+        glUniform1f(LOC_PAD, aa);
+        glUniform1f(LOC_RADIUS, radius);
+        glUniform1f(LOC_RADR, radius);
+        glUniform4fv(LOC_COLTOP, 1, top);
+        glUniform4fv(LOC_COLBOT, 1, bot);
+        glUniform1f(LOC_FOCUS, 0.0);
+        glUniform1f(LOC_RIMW, rimw);
+        glUniform4fv(LOC_RIMCOL, 1, rimcol);
+        glUniform1f(LOC_RIMTOP, rimtop);
+        glUniform1f(LOC_RGB_CAP, rgb_cap);
+        pill_on(pill, glow);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4, ext);
+    }
+}
+
+/// The OPAQUE 4-corner gradient: rgb corners scaled by `dim`, alpha forced to 1.0. That literal
+/// `1.0` is **load-bearing**, not incidental — `fs_ambient.frag` now interpolates alpha with the
+/// colour (see [`draw_grad4`]), so this is what keeps every ambient wash a ground that REPLACES what
+/// is under it rather than a translucent film over it.
+pub fn draw_ambient(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    dim: f32,
+    tl: *const f32,
+    tr: *const f32,
+    br: *const f32,
+    bl: *const f32,
+) {
+    draw_ambient_impl(x, y, w, h, dim, tl, tr, br, bl, None, &scrim::GroundShade::NONE);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_ambient_impl(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    dim: f32,
+    tl: *const f32,
+    tr: *const f32,
+    br: *const f32,
+    bl: *const f32,
+    ink: Option<([f32; 3], [f32; 2])>,
+    scrim: &scrim::GroundShade,
+) {
+    if culled(x, y, w, h) || gate(Class::Ambient, x, y, w, h) {
+        return;
+    }
+    // A wash of ONE colour (four equal corners, no ink ramp) has no gradient to band and shades no
+    // fragment: it is a clear of its box. Everything below is the gradient's path.
+    // SAFETY: the callers hand four pointers to at least three floats each, as the draw below reads.
+    let corners = unsafe { [tl, tr, br, bl].map(|p| [*p, *p.add(1), *p.add(2)]) };
+    if let Some(rgb) = flat_clear(corners, dim, ink.is_some()) {
+        unsafe { clear_flat_ground(x, y, w, h, rgb) };
+        return;
+    }
+    unsafe {
+        let c3 = |p: *const f32, i: usize| *p.add(i);
+        // **A wash with a gradient ALWAYS dithers — every page, every frame, moving or not.** (One
+        // of a single colour is the clear above: nothing in it can band.) It is the one
+        // surface in the app that is a still, opaque, slow gradient across the whole panel, which
+        // is the one case 8-bit output bands visibly, and every attempt to take its noise away for
+        // "frames nobody looks at" has come back as banding the owner saw: a global motion gate
+        // (2026-09-04, every focus spring on Settings), the PAGE's motion verdict (until
+        // 2026-09-19, the wash's own colour dissolve), and last the ARTWORK's (Home's snap dive and
+        // hero slide, Detail's scroll — the wash-only band under the sliding photograph is exactly
+        // what the eye is on). Those gates existed because the noise used to cost ~2.5M GPU cycles
+        // a frame at full screen (2026-09-02). It does not any more: cost rules 1 and 4 in
+        // `dither.glsl` and the field mesh made it one fetch and one add, and the whole of it on
+        // Home's fold measured +0.6M cycles a frame (2026-09-19,
+        // `docs/backdrop-blur-profiling.md`). The tile lives permanently on unit 2
+        // (`bind_dither_tile`), so the dithered draw is one uniform and no binding.
+        let amp = DITHER_LSB;
+        let (prog, l_rect, l_tl, l_tr, l_br, l_bl) = ambient_program(amp);
+        use_prog(prog); // u_screen is set once per program at init
+        let ext = set_rect(l_rect, x, y, w, h);
+        glUniform4f(l_tl, c3(tl, 0) * dim, c3(tl, 1) * dim, c3(tl, 2) * dim, 1.0);
+        glUniform4f(l_tr, c3(tr, 0) * dim, c3(tr, 1) * dim, c3(tr, 2) * dim, 1.0);
+        glUniform4f(l_br, c3(br, 0) * dim, c3(br, 1) * dim, c3(br, 2) * dim, 1.0);
+        glUniform4f(l_bl, c3(bl, 0) * dim, c3(bl, 1) * dim, c3(bl, 2) * dim, 1.0);
+        if prog == APROG {
+            glUniform1f(AL_DITHER, amp);
+            let (ink, inka) = ink.unwrap_or(([0.0; 3], [0.0; 2]));
+            glUniform3f(AL_INK, ink[0], ink[1], ink[2]);
+            glUniform2f(AL_INKA, inka[0], inka[1]);
+            send_scrim(0, AL_SCRIM, scrim);
+        }
+        draw_field_mesh(ext);
+    }
+}
+
+/// One channel at the 8-bit code a framebuffer stores, so a colour that sits on a code is the colour
+/// drawn whatever `GL_DITHER` or the driver's float-to-unorm rounding does with it.
+fn snap_code(v: f32) -> f32 {
+    (v.clamp(0.0, 1.0) * 255.0).round() / 255.0
+}
+
+/// **Is this ambient draw ONE colour?** Four equal corners and no ink ramp make a field whose every
+/// fragment is the same colour: nothing for the dither to hide, nothing for a shader to compute.
+/// `Some(rgb)` is that colour as the shader would receive it (the corners times `dim`), snapped to
+/// exact 8-bit codes ([`snap_code`]); anything else is `None`, and the shader draws it.
+fn flat_clear(corners: [[f32; 3]; 4], dim: f32, inked: bool) -> Option<[f32; 3]> {
+    let one_colour = !inked && corners[1..].iter().all(|c| *c == corners[0]);
+    one_colour.then(|| corners[0].map(|v| snap_code(v * dim)))
+}
+
+/// How [`clear_flat_ground`] issues its clear, from [`ground_clear`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ClearBox {
+    /// The box is the whole of what is open: clear under the state as it stands.
+    Open,
+    /// Part of what is open: scissor to this box for the clear, then put the clip back.
+    Within(PxBox),
+}
+
+/// **Which pixels a flat ground clears**: the rect's window box `edges`, cut to the bound target's
+/// area `view` and to the clip `live` the context holds (`None` = the test is off), or `None` when
+/// nothing of it is left. `bare` says `view` is the whole of the surface a clear reaches, which is
+/// what lets a box that fills it clear with the test off; a letterboxed surface's bars belong to the
+/// frame clear, and a bare clear would paint them. It is `surface::viewport_fills_drawable()`, which
+/// takes the viewport's SIZE against the drawable's as well as its origin: a one-pixel remainder the
+/// centring floors away leaves an origin of zero and a column outside the viewport.
+///
+/// A box that IS the whole of what is open - the live clip, or the target with the test off - clears
+/// under the state as it stands: a full-surface clear is one a tiler can fold into its tile clear,
+/// a scissored one it may emit as a quad. Any smaller box is scissored.
+fn ground_clear(edges: PxBox, view: PxBox, live: Option<PxBox>, bare: bool) -> Option<ClearBox> {
+    let b = clip_px(edges, Some(view)).and_then(|b| clip_px(b, live))?;
+    let whole = match live {
+        Some(l) => b == l,
+        None => bare && b == view,
+    };
+    Some(if whole { ClearBox::Open } else { ClearBox::Within(b) })
+}
+
+/// The opaque ground of one colour `rgb` over the authored rect `(x, y, w, h)`, as a clear of its
+/// pixel box instead of a pass of the ambient program: what the shader would write for four equal
+/// corners, minus its dither, alpha 1 ([`flat_clear`] decides when).
+///
+/// The box is the rect's, cut to the target ([`target_map`]'s edges, [`win_x`]/[`win_y`], as the card
+/// split's are) and to the clip the caller holds ([`LIVE_SCISSOR`]); [`ground_clear`] has the rest.
+/// On a render-target override ([`CLIP_TARGET`]) the target is its live box `[0, 0, tw, th]`, and
+/// never a bare one: the allocation holds other tap targets' content. The scissor goes back through
+/// the two functions that keep [`LIVE_SCISSOR`] honest, and so does the clear colour the context
+/// held, which the `glClear`s that set none of their own read.
+unsafe fn clear_flat_ground(x: f32, y: f32, w: f32, h: f32, rgb: [f32; 3]) {
+    let (vx, vy, s) = target_map();
+    let (view, bare): (PxBox, bool) = match CLIP_TARGET {
+        Some((_, _, _, tw, th)) => ([0, 0, tw, th], false),
+        None => {
+            let (.., vw, vh) = plx_base::surface::viewport();
+            // Bare only when the viewport IS the drawable. An origin of zero is not proof: the
+            // centring is floored, so a drawable a pixel past the canvas has `vx == 0` and a column
+            // the viewport does not cover.
+            ([vx, vy, vx + vw, vy + vh], plx_base::surface::viewport_fills_drawable())
+        }
+    };
+    let live = LIVE_SCISSOR;
+    // GL rows count upward: the rect's top edge is the box's far row.
+    let edges = [win_x(x, vx, s), win_y(y + h, vy, s), win_x(x + w, vx, s), win_y(y, vy, s)];
+    let Some(plan) = ground_clear(edges, view, live, bare) else { return };
+    let held = CLEAR_COLOR;
+    set_clear_color(rgb[0], rgb[1], rgb[2], 1.0);
+    match plan {
+        ClearBox::Open => glClear(GL_COLOR_BUFFER_BIT),
+        ClearBox::Within(b) => {
+            scissor_box(b[0], b[1], b[2] - b[0], b[3] - b[1]);
+            glClear(GL_COLOR_BUFFER_BIT);
+            match live {
+                Some(l) => scissor_box(l[0], l[1], l[2] - l[0], l[3] - l[1]),
+                None => scissor_off(),
+            }
+        }
+    }
+    set_clear_color(held[0], held[1], held[2], held[3]);
+}
+
+/// Can the wash carry an ink ramp ([`draw_ambient_inked`])? Only the dithered program has one; if
+/// it failed to link, the plain twin draws the wash and the caller keeps the ramp as its own layer.
+#[inline]
+pub fn wash_ink_ok() -> bool {
+    // SAFETY: written once at init on the render thread, read on the render thread.
+    unsafe { APROG != 0 }
+}
+
+/// Give the program in use its scrim field if it does not hold it already (`slot`: 0 the wash, 1 the
+/// art wash, 2 the layer): one `glUniform4fv` of [`scrim::VEC4S`] vectors and the live-block count
+/// (`u_scn`), and none at all for the next cell of the same frame — nor, for a screen with no scrim,
+/// on any frame after the first. The cache compares the whole shade, which fixes the count with it,
+/// so the two uniforms are never out of step; a fresh program holds a count of 0, which is
+/// [`scrim::GroundShade::NONE`]'s.
+#[inline]
+unsafe fn send_scrim(slot: usize, loc: ScrimLoc, want: &scrim::GroundShade) {
+    let sent = &mut *std::ptr::addr_of_mut!(SCRIM_SENT[slot]);
+    if loc.sc < 0 || *sent == *want {
+        return;
+    }
+    let u = want.uniforms();
+    glUniform4fv(loc.sc, scrim::VEC4S as c_int, u.as_ptr().cast());
+    glUniform1f(loc.scn, want.shader_count());
+    *sent = *want;
+}
+
+/// [`draw_ambient`] with a vertical INK RAMP laid over the field in the same pass: `ink` (rgb) at an
+/// alpha running linearly from `inka[0]` at the rect's top edge to `inka[1]` at its bottom — the
+/// screen's atmospheric scrim, cut by the caller at its knees so each rect is one straight segment.
+/// The same picture as the wash and then a full-width `draw_rect` of `ink` from `inka[0]` to
+/// `inka[1]` over it, which is the pair it replaces (`AmbientWash::draw_ground`).
+///
+/// **Free where it lands.** The ramp is evaluated per VERTEX, into the one colour the fragment
+/// already reads, so the fragment does exactly what the plain wash does; a full-width blended
+/// rect over the same pixels was a pass of its own, and on Home's snap dive the ramp's two
+/// passes were most of what still carried the frame over budget once the art had joined the wash
+/// (`draw_art_wash`). Callers must check [`wash_ink_ok`] first — without the dithered program
+/// there is no ramp to carry, and this draws the wash alone.
+///
+/// `scrim` is the ground scrim ([`scrim::GroundShade`]) laid over the field in the same pass, with
+/// the same ink and the ramp folded in: [`scrim::GroundShade::NONE`] for none, which the shader
+/// evaluates to exactly zero.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_ambient_inked(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    dim: f32,
+    corners: [*const f32; 4],
+    ink: [f32; 3],
+    inka: [f32; 2],
+    scrim: &scrim::GroundShade,
+) {
+    let [tl, tr, br, bl] = corners;
+    draw_ambient_impl(x, y, w, h, dim, tl, tr, br, bl, Some((ink, inka)), scrim);
+}
+
+/// Can the scrim be drawn as a layer of its own ([`draw_scrim_layer`])?
+#[inline]
+pub fn scrim_layer_ok() -> bool {
+    // SAFETY: written once at init on the render thread, read on the render thread.
+    unsafe { SCRIM_PROG != 0 }
+}
+
+/// **The ground scrim alone, blended over whatever is under it**: `ink` (rgb) at the stacked alpha
+/// of `scrim` ([`scrim::GroundShade::at`]) over `(x, y, w, h)`, evaluated per vertex of the field
+/// mesh like the ground's own. It is the same field the ground carries in its one pass
+/// ([`draw_ambient_inked`], [`draw_art_wash`]), for the frames that pass cannot take it: a hero
+/// slide, which has two art layers and needs the scrim OVER both, and a resting hero whose opaque
+/// photograph covers the wash, so that no ground pass is drawn for the scrim to ride in
+/// (Home's `wash_hidden`). Not dithered (a translucent scrim over a photograph has nothing to
+/// band, as [`draw_grad4`]'s). It draws nothing when the program did not link
+/// ([`scrim_layer_ok`] says so; no caller needs to ask first).
+///
+/// **It draws only where the shade is.** The field mesh is 1536 vertices a call, each running one
+/// rounded-rect distance per live block (`u_scn`, [`scrim::GroundShade::live`]), and a hero's shade
+/// is a few soft blocks: most of the panel's cells hold nothing but zeros. A rect the shade cannot reach ([`scrim::GroundShade::reaches`]:
+/// exact where it says no, so every vertex would have been alpha 0) is dropped before any GL state
+/// is touched, and of one it reaches only the mesh rows from the first strip the shade reaches to
+/// the last are drawn ([`scrim::GroundShade::reached_rows`]; the rows left out are all zeros too).
+/// That changes no pixel; [`scrim::GroundShade::NONE`] draws nothing at all. On the set
+/// (Home `hero-pong` and `grid-pong`, release, HWCNT, 2026-11-10) the layer drawn over the whole
+/// panel was the whole rise of the vertex/tiler slot (JS1) over `main`: masking the `grad` class took
+/// it from 2.4-2.9M to 0.2-0.3M a frame. The caller still declares every cell (`Painter::scrim_layer`
+/// records before it gets here), so the recorded stream does not depend on this skip.
+pub fn draw_scrim_layer(x: f32, y: f32, w: f32, h: f32, ink: [f32; 3], scrim: &scrim::GroundShade) {
+    if culled(x, y, w, h) {
+        return;
+    }
+    let Some(rows) = scrim.reached_rows([x, y, w, h], FIELD_N) else {
+        return;
+    };
+    if gate(Class::Grad, x, y, w, h) {
+        return;
+    }
+    unsafe {
+        if SCRIM_PROG == 0 {
+            return;
+        }
+        use_prog(SCRIM_PROG);
+        let ext = set_rect(SCL_RECT, x, y, w, h);
+        glUniform3f(SCL_INK, ink[0], ink[1], ink[2]);
+        send_scrim(2, SCL_SCRIM, scrim);
+        draw_field_mesh_rows(rows, ext);
+    }
+}
+
+/// Issue the field mesh (see [`field_mesh`]) — every four-corner draw goes through this.
+#[inline]
+unsafe fn draw_field_mesh(ext: straighten::Extent) {
+    draw_field_mesh_rows(0..FIELD_N, ext);
+}
+
+/// Issue rows `rows` of the field mesh (`0..FIELD_N`, top to bottom). [`field_mesh`] stores it row
+/// by row, `FIELD_N` squares of 6 vertices to a row, after the unit quad's 4 vertices, so a run of
+/// rows is one contiguous `glDrawArrays` and draws exactly the vertices the whole mesh holds there.
+/// `ext` is the rect the program places the WHOLE mesh over ([`set_rect`]'s answer); the draw books
+/// the part of it the rows reach ([`rows_extent`]).
+#[inline]
+unsafe fn draw_field_mesh_rows(rows: std::ops::Range<usize>, ext: straighten::Extent) {
+    const ROW_VERTS: usize = FIELD_N * 6;
+    glDrawArrays(
+        GL_TRIANGLES,
+        (4 + rows.start * ROW_VERTS) as c_int,
+        (rows.len() * ROW_VERTS) as c_int,
+        rows_extent(ext, &rows),
+    );
+}
+
+/// The part of the mesh's rect `ext` that rows `rows` cover: row `j` spans `j / FIELD_N .. (j + 1) /
+/// FIELD_N` of the rect's height ([`field_mesh`]). A whole-target extent has no rect to cut.
+fn rows_extent(ext: straighten::Extent, rows: &std::ops::Range<usize>) -> straighten::Extent {
+    match ext {
+        straighten::Extent::Quad([x, y, w, h]) => {
+            let n = FIELD_N as f32;
+            straighten::Extent::quad(x, y + h * rows.start as f32 / n, w, h * rows.len() as f32 / n)
+        }
+        whole => whole,
+    }
+}
+
+/// Which of the two ambient programs draws a field, with its uniform locations: the dithered one
+/// (`APROG`) for the wash's gradient, which always dithers, and the plain twin (`APROG_PLAIN`, the
+/// same source behind the no-op stub) for the corner fade (`draw_grad4`) — each the other's fallback
+/// when one failed to link, in which case the caller sets `u_dither` itself.
+///
+/// The prelude has no off switch of its own — it is straight-line, because a uniform branch there
+/// measured +5.8M arithmetic words a frame on a scrolling Library (`dither.glsl` cost rule 1,
+/// 2026-09-19) — so an undithered field is the plain twin, and a `u_dither` of 0 on `APROG` (the
+/// fallback) pays the fetch times zero.
+#[inline]
+unsafe fn ambient_program(amp: f32) -> (c_uint, c_int, c_int, c_int, c_int, c_int) {
+    // Each program is the other's fallback: a positive amplitude with the dithered program gone
+    // draws the field undithered rather than through program 0 (which draws nothing at all).
+    if (amp > 0.0 && APROG != 0) || APROG_PLAIN == 0 {
+        (APROG, AL_RECT, AL_TL, AL_TR, AL_BR, AL_BL)
+    } else {
+        (APROG_PLAIN, PL_RECT, PL_TL, PL_TR, PL_BR, PL_BL)
+    }
+}
+
+/// The 4-corner bilinear gradient with REAL per-corner ALPHA (rgba each) — the corner fade's
+/// primitive, and the reason `fs_ambient.frag` mixes vec4 instead of vec3. [`draw_ambient`] is this
+/// with every corner forced opaque; the two share one program because they are one field.
+///
+/// Each pointer must address FOUR floats (rgba). Blending is the app-wide
+/// `GL_SRC_ALPHA`/`GL_ONE_MINUS_SRC_ALPHA` set at init, so this composites over whatever is already
+/// on the panel — which is the whole point of having it beside the opaque wash.
+pub fn draw_grad4(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    tl: *const f32,
+    tr: *const f32,
+    br: *const f32,
+    bl: *const f32,
+) {
+    if culled(x, y, w, h) || gate(Class::Grad, x, y, w, h) {
+        return;
+    }
+    unsafe {
+        // Never dithered (a translucent scrim over artwork has nothing to band), so always the
+        // plain twin when it linked.
+        let (prog, l_rect, l_tl, l_tr, l_br, l_bl) = ambient_program(0.0);
+        use_prog(prog); // u_screen is set once per program at init
+        let ext = set_rect(l_rect, x, y, w, h);
+        glUniform4fv(l_tl, 1, tl);
+        glUniform4fv(l_tr, 1, tr);
+        glUniform4fv(l_br, 1, br);
+        glUniform4fv(l_bl, 1, bl);
+        if prog == APROG {
+            glUniform1f(AL_DITHER, 0.0);
+        }
+        draw_field_mesh(ext);
+    }
+}
+
+pub fn draw_rrect(x: f32, y: f32, w: f32, h: f32, rad_l: f32, rad_r: f32, col: *const f32) {
+    if culled(x, y, w, h) || gate(Class::Rect, x, y, w, h) {
+        return;
+    }
+    unsafe {
+        if rad_l < 0.5 && rad_r < 0.5 {
+            draw_flat(x, y, w, h, col);
+            return;
+        }
+        use_prog(PROG);
+        // Rounded corners always take the SDF path, so always give the edge band its bleed.
+        let aa = if rad_l >= 0.5 || rad_r >= 0.5 {
+            AA_BLEED
+        } else {
+            0.0
+        };
+        let ext = set_rect(LOC_RECT, x - aa, y - aa, w + 2.0 * aa, h + 2.0 * aa);
+        glUniform2f(LOC_SIZE, w + 2.0 * aa, h + 2.0 * aa);
+        glUniform1f(LOC_PAD, aa);
+        glUniform1f(LOC_RADIUS, rad_l);
+        glUniform1f(LOC_RADR, rad_r);
+        glUniform4fv(LOC_COLTOP, 1, col);
+        glUniform4fv(LOC_COLBOT, 1, col);
+        // A single colour: no ramp to quantise, so the policy answers 0 and the branch is skipped.
+        glUniform1f(LOC_FOCUS, 0.0);
+        glUniform1f(LOC_RIMW, 0.0);
+        glUniform4f(LOC_RIMCOL, 0.0, 0.0, 0.0, 0.0); // no edge-sheen (default)
+        glUniform1f(LOC_RIMTOP, 0.0);
+        glUniform1f(LOC_RGB_CAP, 1.0); // no rim, glow or ring to hold
+        pill_off();
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4, ext);
+    }
+}
+
+/// [`draw_rrect`] with the focus edge-sheen baked in (flat fill + `rimw`-px inset rim in `rimcol`).
+pub fn draw_rrect_sheened(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    rad_l: f32,
+    rad_r: f32,
+    col: *const f32,
+    rimw: f32,
+    rimcol: *const f32,
+    rimtop: f32,
+    rgb_cap: f32,
+) {
+    if culled(x, y, w, h) || gate(Class::Rect, x, y, w, h) {
+        return;
+    }
+    unsafe {
+        use_prog(PROG);
+        let aa = AA_BLEED;
+        let ext = set_rect(LOC_RECT, x - aa, y - aa, w + 2.0 * aa, h + 2.0 * aa);
+        glUniform2f(LOC_SIZE, w + 2.0 * aa, h + 2.0 * aa);
+        glUniform1f(LOC_PAD, aa);
+        glUniform1f(LOC_RADIUS, rad_l);
+        glUniform1f(LOC_RADR, rad_r);
+        glUniform4fv(LOC_COLTOP, 1, col);
+        glUniform4fv(LOC_COLBOT, 1, col);
+        // A single colour: no ramp to quantise, so the policy answers 0 and the branch is skipped.
+        glUniform1f(LOC_FOCUS, 0.0);
+        glUniform1f(LOC_RIMW, rimw);
+        glUniform4fv(LOC_RIMCOL, 1, rimcol);
+        glUniform1f(LOC_RIMTOP, rimtop);
+        glUniform1f(LOC_RGB_CAP, rgb_cap);
+        pill_off();
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4, ext);
+    }
+}
+
+/// Soft drop-shadow of the box `(x,y,w,h)` with corner `radius` (w/2 = circle), penumbra `blur` px.
+/// The quad is inflated by `blur` on every side; the shader falls the alpha off outward over that
+/// band (see `FS_SHADOW`). `(x,y)` is the shadow's box origin — the caller bakes any downward offset
+/// into `y`. No-ops if the program failed to link. Own GL program (bound lazily via [`use_prog`]),
+/// so it doesn't disturb the base shader's uniforms.
+///
+/// `cut` picks WHICH INTERIOR the shader throws away, and the choice is about the occluder's
+/// OPACITY, not its shape. Negative (the default, `Painter::shadow`)
+/// takes the cheap box cut an opaque tile can afford — it leaves a full-strength band under the
+/// occluder's rim, which the occluder hides. A non-negative value is the occluder's own corner
+/// radius, and cuts the rounded shape exactly, so a TRANSLUCENT occluder has no ink under it to
+/// show through (`Painter::shadow_outside`).
+pub fn draw_shadow(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    blur: f32,
+    off: f32,
+    cut: f32,
+    col: *const f32,
+) {
+    let b = blur.max(0.5);
+    // **Cull the QUAD, not the box.** A shadow paints a penumbra `b` px beyond the rect it is asked
+    // for, and `b` is tens of px on a focused card — far past `culled`'s 4 px of AA slack. Culling
+    // the un-inflated box therefore dropped shadows whose penumbra reached INTO a blur source
+    // region while their box sat outside it, so the backdrop snapshot and the visible frame
+    // disagreed along the region's edge. `draw_tex_core` has always culled its inflated quad; this
+    // is the same rule, and the two paths handle the same object.
+    let (qx, qy, qw, qh) = (x - b, y - b, w + 2.0 * b, h + 2.0 * b);
+    if culled(qx, qy, qw, qh) || gate(Class::Shadow, qx, qy, qw, qh) {
+        return;
+    }
+    unsafe {
+        if SPROG == 0 {
+            return;
+        }
+        use_prog(SPROG); // SL_SCREEN is set once at init
+        glUniform2f(SL_SIZE, qw, qh);
+        glUniform1f(SL_RADIUS, radius);
+        glUniform1f(SL_BLUR, b);
+        glUniform1f(SL_OFF, off); // occluder (tile) offset above the shadow box; shader discards the covered interior
+        glUniform1f(SL_CUT, cut); // <0 = the opaque tile's box cut; >=0 = cut the occluder's rounded shape
+        glUniform4fv(SL_COL, 1, col);
+        // **Draw the bands around the part the shader certainly discards, not the whole quad.** A
+        // glass menu's shadow is a 30 px blur under a panel hundreds of px across: most of the quad
+        // is the panel interior, where every fragment was rasterized and shaded only to be
+        // discarded (~0.74M GPU cycles/frame on the T820 for that one shadow, measured at 60 px). The skip
+        // rect lies strictly inside the discard region, so the pixels are identical. Its edges sit
+        // on the drawable's pixel grid so a seam never splits a pixel (a pixel drawn twice would
+        // blend twice) and `u_map` keeps `p` relative to the FULL quad. The ledger above books the
+        // full quad once, as before.
+        let inner = shadow_skip_rect([qx, qy, qw, qh], b, radius, off, cut);
+        // the target's pixel grid: a seam between two bands must sit on it ([`snap_inner`])
+        let (bands, n) = shadow_bands([qx, qy, qw, qh], inner, target_map().2);
+        let (cx, cy) = (qx + qw * 0.5, qy + qh * 0.5);
+        for r in &bands[..n] {
+            let ext = set_rect(SL_RECT, r[0], r[1], r[2], r[3]);
+            glUniform4f(SL_MAP, r[0] - cx, r[1] - cy, r[2], r[3]);
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4, ext);
+        }
+    }
+}
+
+/// The rectangle of a shadow quad (`quad` = x, y, w, h, the box inflated by `blur`) that
+/// `fs_shadow.frag` is certain to `discard`, inset so float error cannot make it claim a fragment
+/// the shader would keep; `None` when the occluder leaves no such rectangle. Not yet snapped to the
+/// pixel grid ([`shadow_bands`] does that) and clipped to the quad.
+fn shadow_skip_rect(quad: [f32; 4], blur: f32, radius: f32, off: f32, cut: f32) -> Option<[f32; 4]> {
+    let (bw, bh) = (quad[2] - 2.0 * blur, quad[3] - 2.0 * blur);
+    if bw <= 0.0 || bh <= 0.0 {
+        return None;
+    }
+    // The occluder is the shadow box moved UP by `off`.
+    let (ox, oy) = (quad[0] + blur, quad[1] + blur - off);
+    let k = if cut >= 0.0 {
+        // Rounded occluder, corner radius rc: the axis-aligned rect inset by rc(1 - 1/sqrt 2) has
+        // its corners on the arcs' 45-degree points, so it lies inside the shape; +1 px is margin,
+        // which also covers the cut's coverage ramp (fs_shadow's `CUT_AA`, 0.75 px: the rect lies
+        // where the coverage is exactly 0, not only where the sd is negative).
+        let rc = cut.min(bw * 0.5).min(bh * 0.5);
+        rc * (1.0 - std::f32::consts::FRAC_1_SQRT_2) + 1.0
+    } else {
+        // The box cut stops `radius + 1` short of the occluder's edge; +1 px is margin.
+        radius.max(0.0) + 2.0
+    };
+    let (x0, y0) = ((ox + k).max(quad[0]), (oy + k).max(quad[1]));
+    let (x1, y1) = ((ox + bw - k).min(quad[0] + quad[2]), (oy + bh - k).min(quad[1] + quad[3]));
+    (x1 > x0 && y1 > y0).then_some([x0, y0, x1 - x0, y1 - y0])
+}
+
+/// `inner` clipped to `quad` and shrunk INWARD onto multiples of `1/scale` (the drawable's pixel
+/// edges), as its edges `[x0, y0, x1, y1]`; `None` when nothing is left of it or `scale` is no grid.
+/// A seam on a pixel edge splits no pixel and no float ulp can move it across a pixel centre, so a
+/// quad cut along it still draws every pixel exactly once.
+fn snap_inner(quad: [f32; 4], inner: [f32; 4], scale: f32) -> Option<[f32; 4]> {
+    if !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    let (qx1, qy1) = (quad[0] + quad[2], quad[1] + quad[3]);
+    let snap_up = |v: f32| (v * scale).ceil() / scale;
+    let snap_dn = |v: f32| (v * scale).floor() / scale;
+    let (x0, y0) = (snap_up(inner[0].max(quad[0])), snap_up(inner[1].max(quad[1])));
+    let (x1, y1) = (snap_dn((inner[0] + inner[2]).min(qx1)), snap_dn((inner[1] + inner[3]).min(qy1)));
+    (x1 > x0 && y1 > y0).then_some([x0, y0, x1, y1])
+}
+
+/// The rects (up to four, and how many are used) that tile `quad` minus the rect with edges
+/// `hole` (`[x0, y0, x1, y1]`, inside `quad`, from [`snap_inner`]): the full-width bands above and
+/// below it, then the strips to its left and right. Edges, not sums: neighbouring bands share the
+/// very same f32 seam value.
+fn bands_around(quad: [f32; 4], hole: [f32; 4]) -> ([[f32; 4]; 4], usize) {
+    let (qx1, qy1) = (quad[0] + quad[2], quad[1] + quad[3]);
+    let [x0, y0, x1, y1] = hole;
+    let mut out = [[0.0f32; 4]; 4];
+    let mut n = 0;
+    for r in [
+        [quad[0], quad[1], quad[2], y0 - quad[1]],
+        [quad[0], y1, quad[2], qy1 - y1],
+        [quad[0], y0, x0 - quad[0], y1 - y0],
+        [x1, y0, qx1 - x1, y1 - y0],
+    ] {
+        if r[2] > 0.0 && r[3] > 0.0 {
+            out[n] = r;
+            n += 1;
+        }
+    }
+    (out, n)
+}
+
+/// The rects (up to four, and how many are used) that tile `quad` minus `inner`: the full-width
+/// bands above and below `inner`, then the strips to its left and right. `inner` is first
+/// snapped inward onto the pixel grid ([`snap_inner`]), so every pixel is drawn exactly once. No
+/// `inner`, or one that clips away, returns the quad whole.
+fn shadow_bands(quad: [f32; 4], inner: Option<[f32; 4]>, scale: f32) -> ([[f32; 4]; 4], usize) {
+    match inner.and_then(|i| snap_inner(quad, i, scale)) {
+        Some(hole) => bands_around(quad, hole),
+        None => ([quad, [0.0; 4], [0.0; 4], [0.0; 4]], 1),
+    }
+}
+
+/// Critically-damped spring step — the **exact analytic** solution of `x'' + 2ω·x' + ω²·x = 0`
+/// (ω = √k, offset `x = pos − target`) integrated over `dt`.
+///
+/// Because it is the closed form, it is unconditionally stable at any `dt` *and* never overshoots
+/// (critical damping does not ring, by definition). It replaces two flawed discretizations:
+/// - explicit Euler (`vel += (k·x − c·vel)·dt`) had transition-matrix `det = 1 − 2√k·dt`, so at the
+///   clamped `dt = 0.05` any spring with `k ≳ 275` grew every frame and exploded — a k=300 focus-pop
+///   reached a scale of 5·10⁵ (the "scatter"); and
+/// - implicit-damped Euler stayed bounded but was underdamped at large `dt`, so it rang (~4%
+///   overshoot — a visible "bounce").
+///
+/// `x(t) = (x₀ + (v₀ + ω·x₀)·t)·e^(−ω·t)`, and its derivative for the velocity.
+pub fn spring(pos: *mut f32, vel: *mut f32, target: f32, k: f32, dt: f32) {
+    unsafe {
+        let w = k.sqrt(); // natural frequency; critical damping is c = 2ω
+        let e = plx_machine::motion::exp(-w * dt); // this crate's exp: what a recording can replay
+        let x = *pos - target; // offset from target
+        let b = *vel + w * x;
+        *pos = target + (x + b * dt) * e;
+        *vel = (*vel - w * b * dt) * e;
+        // Every animation in the app lands here or in `spring_zeta`, which is what lets
+        // `plx_machine::idle` know EXACTLY whether the screen is still moving without any screen opting in.
+        plx_machine::idle::note_spring(*pos, target, *vel);
+    }
+}
+
+/// **Under**damped spring step — the closed-form solution of `x'' + 2ζω·x' + ω²·x = 0` (ω = √k) for a
+/// damping ratio `zeta < 1`, so unlike [`spring`] (ζ = 1, critical, never overshoots) it **rings**:
+/// it swings past the target and settles back. That overshoot is the tvOS "click" pop — the press
+/// spring-back in `ui::press` uses it (ζ ≈ 0.55) so a released card bounces a hair past its focus
+/// scale before resting. Like [`spring`] it is the exact analytic form, so it is unconditionally
+/// stable at any `dt` (the envelope `e^(−ζω·dt)` only ever decays). The focus-pop / scroll springs
+/// stay on [`spring`] — they must NOT ring.
+///
+/// `x(t) = e^(−ζω·t)·(A·cos(ω_d·t) + B·sin(ω_d·t))`, ω_d = ω·√(1−ζ²), A = x₀, B = (v₀ + ζω·x₀)/ω_d.
+pub fn spring_zeta(pos: *mut f32, vel: *mut f32, target: f32, k: f32, zeta: f32, dt: f32) {
+    unsafe {
+        let w = k.sqrt();
+        let z = zeta.clamp(0.0, 0.999); // guard the ω_d = 0 singularity at critical/over-damping
+        let wd = w * (1.0 - z * z).sqrt(); // damped natural frequency
+        let x0 = *pos - target; // offset from target
+        let v0 = *vel;
+        let e = plx_machine::motion::exp(-z * w * dt);
+        let (s, c) = plx_machine::motion::sin_cos(wd * dt);
+        let a = x0;
+        let b = (v0 + z * w * x0) / wd;
+        *pos = target + e * (a * c + b * s);
+        *vel = e * ((b * wd - z * w * a) * c - (a * wd + z * w * b) * s);
+        plx_machine::idle::note_spring(*pos, target, *vel); // see the note in `spring`
+    }
+}
+
+// --- seven-segment FPS digits (quads) ---
+//
+// The counter's ONLY caller is `app.rs`'s `#[cfg(feature = "devtools")]` draw site, so these three
+// items carry the same gate. Without it `--no-default-features` (i.e. `make RELEASE=1`, and the
+// macOS app bundle) fails the build outright rather than merely warning: `[workspace.lints.rust] warnings =
+// "deny"` in Cargo.toml turns the three `dead_code` findings into errors, and nothing in the dev
+// configuration can see that — the feature is on in every ordinary `make`, `make check` and
+// harness run.
+#[cfg(feature = "devtools")]
+const SEG: [u8; 10] = [0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F];
+
+#[cfg(feature = "devtools")]
+fn draw_digit(d: i32, x: f32, y: f32, s: f32, col: *const f32) {
+    let w = 0.16 * s;
+    // segments: 0 top,1 tr,2 br,3 bottom,4 bl,5 tl,6 mid — each {x,y,w,h}
+    let g: [[f32; 4]; 7] = [
+        [0.0, 0.0, 1.0, 0.0],
+        [1.0, 0.0, 0.0, 0.5],
+        [1.0, 0.5, 0.0, 0.5],
+        [0.0, 1.0, 1.0, 0.0],
+        [0.0, 0.5, 0.0, 0.5],
+        [0.0, 0.0, 0.0, 0.5],
+        [0.0, 0.5, 1.0, 0.0],
+    ];
+    for i in 0..7 {
+        if (SEG[d as usize] >> i) & 1 == 0 {
+            continue;
+        }
+        let sx = x + g[i][0] * s - w / 2.0;
+        let sy = y + g[i][1] * s - w / 2.0;
+        let sw = g[i][2] * s + w;
+        let sh = g[i][3] * s + w;
+        draw_rect(
+            sx,
+            sy,
+            sw,
+            sh,
+            2.0,
+            (w + 4.0) / 2.0 - 2.0,
+            col,
+            col,
+            0.0,
+            1.0,
+        );
+    }
+}
+
+#[cfg(feature = "devtools")]
+pub fn draw_number(mut n: i32, right_x: f32, y: f32, s: f32, col: *const f32) {
+    n = n.clamp(0, 999);
+    let adv = s + 0.55 * s;
+    let mut x = right_x - adv;
+    loop {
+        draw_digit(n % 10, x, y, s, col);
+        n /= 10;
+        x -= adv;
+        if n <= 0 {
+            break;
+        }
+    }
+}
+
+// ---- image program: RGBA textures (posters/logos/backdrop) with rounded corners ----
+pub fn init_image() {
+    unsafe {
+        IPROG = match link_program(VS_IMG.as_ptr(), FS_IMG.as_ptr()) {
+            Some(p) => p,
+            None => {
+                log("image prog link failed");
+                return;
+            }
+        };
+        IL_RECT = glGetUniformLocation(IPROG, c"u_trect".as_ptr());
+        IL_SCREEN = glGetUniformLocation(IPROG, c"u_tscreen".as_ptr());
+        IL_TINT = glGetUniformLocation(IPROG, c"u_tint".as_ptr());
+        IL_UVRECT = glGetUniformLocation(IPROG, c"u_uvrect".as_ptr());
+        IL_CARD = glGetUniformLocation(IPROG, c"u_card".as_ptr());
+        IL_TEX = glGetUniformLocation(IPROG, c"u_tex".as_ptr());
+        IL_RIMW = glGetUniformLocation(IPROG, c"u_rimw".as_ptr());
+        IL_RIMCOL = glGetUniformLocation(IPROG, c"u_rimcol".as_ptr());
+        IL_SHINV = glGetUniformLocation(IPROG, c"u_shinv".as_ptr());
+        IL_SHCOL = glGetUniformLocation(IPROG, c"u_shcol".as_ptr());
+        IL_FOCUS = glGetUniformLocation(IPROG, c"u_focus".as_ptr());
+        // Set this program's constant uniforms once (per-program state): the fixed screen size
+        // and sampler unit 0. draw_tex_impl no longer re-sends them per quad.
+        use_prog(IPROG);
+        glUniform2f(IL_SCREEN, SCR_W, SCR_H);
+        glUniform1i(IL_TEX, 0);
+
+        STILL_IMAGE = link_optional_program(VS_STILL.as_ptr(), FS_STILL.as_ptr()).map(|program| {
+            let loc = |name: &CStr| glGetUniformLocation(program, name.as_ptr());
+            let uniforms = ImageUniforms {
+                rect: loc(c"u_trect"), tint: loc(c"u_tint"), uvrect: loc(c"u_uvrect"),
+                card: loc(c"u_card"), rimw: loc(c"u_rimw"), rimcol: loc(c"u_rimcol"),
+                shinv: loc(c"u_shinv"), shcol: loc(c"u_shcol"), focus: loc(c"u_focus"),
+            };
+            use_prog(program);
+            glUniform2f(loc(c"u_tscreen"), SCR_W, SCR_H);
+            glUniform1i(loc(c"u_tex"), 0);
+            (program, uniforms, loc(c"u_still_band"), loc(c"u_still_col"))
+        });
+        if std::ptr::addr_of!(STILL_IMAGE).read().is_none() {
+            log("still image prog unavailable — using separate artwork scrim");
+        }
+
+        FOCUS_IMAGE = link_optional_program(VS_FOCUS.as_ptr(), FS_FOCUS.as_ptr()).map(|program| {
+            let loc = |name: &CStr| glGetUniformLocation(program, name.as_ptr());
+            let uniforms = ImageUniforms {
+                rect: loc(c"u_trect"), tint: loc(c"u_tint"), uvrect: loc(c"u_uvrect"),
+                card: loc(c"u_card"), rimw: loc(c"u_rimw"), rimcol: loc(c"u_rimcol"),
+                shinv: loc(c"u_shinv"), shcol: loc(c"u_shcol"), focus: loc(c"u_focus"),
+            };
+            use_prog(program);
+            glUniform2f(loc(c"u_tscreen"), SCR_W, SCR_H);
+            glUniform1i(loc(c"u_tex"), 0);
+            (program, uniforms)
+        });
+        if std::ptr::addr_of!(FOCUS_IMAGE).read().is_none() {
+            log("focus image prog unavailable — focused cards keep the plain look");
+        }
+
+        PLAIN_IMAGE = link_optional_program(VS_IMG.as_ptr(), FS_TEX.as_ptr()).map(|program| {
+            let loc = |name: &CStr| glGetUniformLocation(program, name.as_ptr());
+            use_prog(program);
+            glUniform2f(loc(c"u_tscreen"), SCR_W, SCR_H);
+            glUniform1i(loc(c"u_tex"), 0);
+            (program, PlainUniforms { rect: loc(c"u_trect"), tint: loc(c"u_tint"), uvrect: loc(c"u_uvrect") })
+        });
+        if std::ptr::addr_of!(PLAIN_IMAGE).read().is_none() {
+            log("plain image prog unavailable — square-cornered pictures and card interiors stay on the image program");
+        }
+
+        ART_WASH = link_optional_program(VS_ART_WASH.as_ptr(), FS_ART_WASH.as_ptr()).map(|prog| {
+            let loc = |name: &CStr| glGetUniformLocation(prog, name.as_ptr());
+            // Binds `prog`, which the two constant uniforms below are then written to.
+            let dither = dither_uniforms(prog);
+            glUniform2f(loc(c"u_screen"), SCR_W, SCR_H);
+            glUniform1i(loc(c"u_tex"), 0);
+            ArtWashProgram {
+                prog,
+                rect: loc(c"u_rect"),
+                corners: [loc(c"u_atl"), loc(c"u_atr"), loc(c"u_abr"), loc(c"u_abl")],
+                art: loc(c"u_art"),
+                uvrect: loc(c"u_uvrect"),
+                tint: loc(c"u_tint"),
+                ink: loc(c"u_ink"),
+                inka: loc(c"u_inka"),
+                scrim: ScrimLoc::of(prog),
+                dither,
+            }
+        });
+        if std::ptr::addr_of!(ART_WASH).read().is_none() {
+            log("art-wash prog unavailable — the wash and its artwork stay two passes");
+        }
+
+        use_prog(PROG);
+    }
+}
+
+/// Can the wash carry its artwork in one pass? `false` means the caller draws [`draw_ambient`] and
+/// then the art as two layers — the same picture.
+#[inline]
+pub fn art_wash_ok() -> bool {
+    // SAFETY: written once at init on the render thread, read on the render thread.
+    unsafe { std::ptr::addr_of!(ART_WASH).read().is_some() }
+}
+
+/// **The wash with a photograph dissolved into it, in ONE opaque pass**: the four-corner field
+/// `tl..br` over `(x, y, w, h)`, with the texture `tex` — laid out as the quad `art` would have drawn
+/// it, sampling its `uv` window at `tint` — composited per fragment as
+/// `mix(wash, art * tint.rgb, art.a * tint.a)`. The same picture as [`draw_ambient`] then
+/// [`draw_tex_uv`] (radius 0) over the same pixels, which is the pair it replaces. `(x, y, w, h)`
+/// must lie inside `art`: outside it the layered path drew no art, and this has no edge to stop at.
+///
+/// **Measured, dev television, 2026-09-28.** Home's snap dive draws the opaque wash and then the
+/// hero photograph fading by `1 - snap` over most of the panel, and the poster dive ran every frame
+/// of its curve at 17–24 ms (`plxnative-framedrop`, `snap=` 0.04–0.91, GPU-bound in `clear`) —
+/// 56.9 moving fps against a 55 floor, and 54.9 on a bad run. Masking the wash
+/// (`plxnative-drawmask=ambient`) took it to 59.6; drawing the wash only where the art is NOT took
+/// it to 59.9 with no frame over 18 ms. The frame is arithmetic-bound
+/// (`docs/perf-damage-tracking-verdict.md`), so the second pass over those pixels is what has to
+/// go, and here the wash is evaluated where the art already is. Folding the SCRIMS in too was
+/// tried the same day and was dearer (49 fps): it moved their arithmetic onto every pixel of the
+/// panel, including the ones they never touched.
+///
+/// `corners` are the wash's rgb corners FOR THIS RECT (a sub-rect of a wash takes the field's
+/// values at its own corners — the field is bilinear, so that is exact), already through the
+/// painter's cascade exactly as [`draw_ambient`] takes them; `tint` is the art's, likewise; and
+/// `ink`/`inka` the screen's ramp over both, exactly as [`draw_ambient_inked`] takes it (zero
+/// alphas for none), and `scrim` the ground scrim over both with the same ink
+/// ([`scrim::GroundShade::NONE`] for none).
+#[allow(clippy::too_many_arguments)]
+pub fn draw_art_wash(
+    (x, y, w, h): (f32, f32, f32, f32),
+    corners: [[f32; 3]; 4],
+    tex: c_uint,
+    (ax, ay, aw, ah): (f32, f32, f32, f32),
+    uv: [f32; 4],
+    tint: *const f32,
+    ink: [f32; 3],
+    inka: [f32; 2],
+    scrim: &scrim::GroundShade,
+) {
+    // SAFETY: render thread; see `art_wash_ok`.
+    let Some(g) = (unsafe { std::ptr::addr_of!(ART_WASH).read() }) else { return };
+    if tex == 0 || culled(x, y, w, h) || gate(Class::Ambient, x, y, w, h) {
+        return;
+    }
+    let inv = |d: f32| if d.abs() > 0.001 { 1.0 / d } else { 0.0 };
+    unsafe {
+        use_prog(g.prog);
+        let ext = set_rect(g.rect, x, y, w, h);
+        for (loc, c) in g.corners.iter().zip(corners) {
+            glUniform4f(*loc, c[0], c[1], c[2], 1.0);
+        }
+        glUniform1f(g.dither, DITHER_LSB);
+        glUniform4f(g.art, ax, ay, inv(aw), inv(ah));
+        glUniform4f(g.uvrect, uv[0], uv[1], uv[2], uv[3]);
+        glUniform4fv(g.tint, 1, tint);
+        glUniform3f(g.ink, ink[0], ink[1], ink[2]);
+        glUniform2f(g.inka, inka[0], inka[1]);
+        send_scrim(1, g.scrim, scrim);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        draw_field_mesh(ext);
+    }
+}
+
+/// Snap a composited quad origin to a whole pixel — the contract for ALL 1:1-texel content
+/// (glyph strings in `text.rs`, icon masks in `ui/icons.rs`): such textures are rasterized at
+/// their exact draw size and sampled with GL_LINEAR, so a fractional origin bilinear-smears
+/// every texel across two pixels (washed glyph stems, fuzzy icon edges). Snap the FINAL
+/// composited position (after any Painter translate fold), and never apply this to scaled
+/// content — posters and animating quads legitimately move sub-pixel.
+///
+/// Under supersampling (`surface::render_scale`, simulator only) a whole PHYSICAL pixel is `1/n`
+/// of a logical one, and the textures are rasterised at `n`x to match, so that is what it snaps to.
+#[inline]
+pub fn snap(v: f32) -> f32 {
+    #[cfg(feature = "hostsim")]
+    {
+        let n = plx_base::surface::render_scale();
+        if n > 1 {
+            return (v * n as f32).round() / n as f32;
+        }
+    }
+    v.round()
+}
+
+/// Upload an RGBA8 bitmap (`w`×`h`, tightly packed) into a GL texture. Reuses `prev` if non-zero
+/// (re-specs it), else allocates a new id. Returns the texture id. The bytes are neither converted
+/// nor interpreted: image-subtitle (PGS/VobSub) overlays and the text glyph-cache textures are
+/// straight alpha and drawn with [`draw_tex`]; the libass regions are premultiplied and drawn with
+/// [`draw_tex_premultiplied`]. Main-thread only.
+pub fn upload_rgba(prev: c_uint, w: c_int, h: c_int, pixels: *const u8) -> c_uint {
+    unsafe {
+        let mut tex = prev;
+        if tex == 0 {
+            glGenTextures(1, &mut tex);
+        }
+        tex_ledger::specified(tex, w, h);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        glTexImage2D(
+            GL_TEXTURE_2D,
+            0,
+            GL_RGBA as c_int,
+            w,
+            h,
+            0,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            pixels as *const c_void,
+        );
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        tex
+    }
+}
+
+/// **Every texture [`upload_rgba`] specifies, counted until [`delete_tex`] frees it** — the live
+/// count and the bytes the driver holds for them (RGBA8, level 0). `VmRSS` on this driver
+/// includes GPU memory, so a stress bench that watches RSS grow cannot tell texture churn from a
+/// heap leak on its own; this ledger is the half it cannot see, and the stress benches print it
+/// beside `rss_kb=` on every cycle line. Main-render-thread only, like every GL call here.
+pub mod tex_ledger {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::os::raw::{c_int, c_uint};
+
+    thread_local! {
+        static LIVE: RefCell<HashMap<c_uint, (u64,u64)>> = RefCell::new(HashMap::new());
+        static REVISION: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        #[cfg(any(test, feature = "test-support"))]
+        static MUTATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    /// Test-support: how many times a texture was specified or deleted on this thread, ever. A
+    /// test that must show "no texture work happened across this span" compares two readings; the
+    /// live set alone cannot (a delete paired with a re-specify leaves it unchanged).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn mutations() -> u64 { MUTATIONS.with(|n| n.get()) }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn note_mutation() { MUTATIONS.with(|n| n.set(n.get().wrapping_add(1))); }
+
+    /// `tex` was (re)specified at `w`×`h`: a re-spec of a known name replaces its size.
+    pub fn specified(tex: c_uint, w: c_int, h: c_int) {
+        #[cfg(any(test, feature = "test-support"))]
+        note_mutation();
+        let bytes = w.max(0) as u64 * h.max(0) as u64 * 4;
+        LIVE.with(|m| {
+            let revision=REVISION.with(|n| { let next=n.get().wrapping_add(1); n.set(next); next });
+            m.borrow_mut().insert(tex, (bytes,revision));
+        });
+    }
+
+    /// `tex` was deleted. A name this ledger never saw is ignored.
+    pub fn deleted(tex: c_uint) {
+        #[cfg(any(test, feature = "test-support"))]
+        note_mutation();
+        LIVE.with(|m| {
+            m.borrow_mut().remove(&tex);
+        });
+    }
+
+    pub fn revision(tex: c_uint) -> u64 { LIVE.with(|m| m.borrow().get(&tex).map_or(0, |v|v.1)) }
+
+    /// `(live textures, live bytes)`.
+    pub fn totals() -> (usize, u64) {
+        LIVE.with(|m| {
+            let m = m.borrow();
+            (m.len(), m.values().map(|v|v.0).sum())
+        })
+    }
+}
+
+/// **A frame that snapshots the page is not followed by a present until the GPU has finished it.**
+///
+/// A [`FrameCache`] capture puts a whole page render on a frame that also composites the page
+/// and whatever stands over it — the heaviest GPU frame a modal has, and more than a vsync of GPU
+/// on the television. The CPU runs a frame ahead of the GPU, so the capture frame itself returns
+/// quickly and its cost lands on the NEXT presented frame, which waits a whole extra vsync for a
+/// buffer (22–37 ms, once per modal open, `fps:modal-100`, 2026-09-19). The GPU cannot do the
+/// work faster; what can change is who waits. A fence goes in after the capture frame's swap
+/// ([`snapshot_frame_end`]) and the frames that follow are simply not presented until it
+/// signals ([`snapshot_frame_begin`], `app::run`'s present gate) — the panel still shows the
+/// capture frame, which is the unchanged page, and the modal's appear spring stays held at 0
+/// (`PopoverMotion`), so its ramp starts on a GPU with nothing queued rather than behind a
+/// page render.
+///
+/// Bounded by [`SNAPSHOT_DEFER_MAX`] frames, so a fence that never signals costs a few frames
+/// once and never a frozen screen; with no fences (the simulator), ordinary frames never defer.
+/// Controlled replay instead supplies the readiness observed by its recording.
+static SNAPSHOT_THIS_FRAME: AtomicBool = AtomicBool::new(false);
+/// The capture frame's fence. Main render thread only, like the chain.
+static mut SNAPSHOT_FENCE: Option<crate::egl::fence::Fence> = None;
+/// Consecutive frames deferred for the fence so far.
+static SNAPSHOT_DEFERRED: AtomicU32 = AtomicU32::new(0);
+/// This iteration's answer, latched once by [`snapshot_frame_begin`] so the present gate and the
+/// appear spring see the same one.
+static SNAPSHOT_PENDING: AtomicBool = AtomicBool::new(false);
+/// Frames a capture may defer presents for — about 67 ms, several times the capture's own GPU cost.
+pub const SNAPSHOT_DEFER_MAX: u32 = 4;
+
+/// [`snapshot_frame_begin`]'s decision: `fence` is `None` with nothing to wait for, else whether
+/// it has signalled; `deferred` the frames already deferred for it.
+pub fn snapshot_defers(fence: Option<bool>, deferred: u32) -> bool {
+    fence == Some(false) && deferred < SNAPSHOT_DEFER_MAX
+}
+
+/// Dump mode's GPU wait. `glFinish` is bound only in a `devtriggers` build (the dump driver's own
+/// build), so a shipping binary has no call to it here at all.
+fn dump_wait_for_gpu() {
+    #[cfg(feature = "devtriggers")]
+    gl_finish();
+}
+
+/// [`snapshot_defers`] under dump mode, which never defers: the GPU was just waited out, so
+/// readiness is a constant instead of an environmental observation.
+pub fn snapshot_defers_in(dump: bool, fence: Option<bool>, deferred: u32) -> bool {
+    !dump && snapshot_defers(fence, deferred)
+}
+
+/// Close a presented frame: a frame that captured the page leaves a fence behind it.
+pub fn snapshot_frame_end() {
+    if SNAPSHOT_THIS_FRAME.swap(false, Ordering::Relaxed) {
+        // SAFETY: main render thread, like every GL call here.
+        unsafe { SNAPSHOT_FENCE = crate::egl::fence::Fence::insert() };
+        SNAPSHOT_DEFERRED.store(0, Ordering::Relaxed);
+    }
+}
+
+/// Start an iteration: sample the capture fence, then let the frame's readiness capability
+/// supply the observation used by motion and presentation. Ordinary frames retain the live
+/// answer; controlled replay supplies the recorded one. Native fence retirement still follows
+/// the actual GPU, and the independent physical window gate still governs every swap.
+pub fn snapshot_frame_begin(readiness: impl FnOnce(bool) -> bool) {
+    // DUMP MODE (`crate::dump`): the GPU is waited out BEFORE the sample, so the fence has
+    // signalled and the capture is never pending; GPU speed is not an input to the dump.
+    let dump = crate::dump::armed();
+    if dump {
+        dump_wait_for_gpu();
+    }
+    // SAFETY: main render thread.
+    let fence = unsafe { (*std::ptr::addr_of!(SNAPSHOT_FENCE)).as_ref().map(|f| f.signaled()) };
+    let n = SNAPSHOT_DEFERRED.load(Ordering::Relaxed);
+    let defer = snapshot_defers_in(dump, fence, n);
+    if defer {
+        SNAPSHOT_DEFERRED.store(n + 1, Ordering::Relaxed);
+    } else if fence.is_some() {
+        unsafe { SNAPSHOT_FENCE = None };
+    }
+    SNAPSHOT_PENDING.store(readiness(defer), Ordering::Relaxed);
+}
+
+/// Has this frame captured the page so far? Its GPU work will be waited out before the next
+/// present, which makes this the frame to queue anything else that reads the capture.
+pub fn snapshot_captured_this_frame() -> bool {
+    SNAPSHOT_THIS_FRAME.load(Ordering::Relaxed)
+}
+
+/// Is this iteration waiting for a page capture to leave the GPU? See [`SNAPSHOT_THIS_FRAME`].
+pub fn snapshot_pending() -> bool {
+    SNAPSHOT_PENDING.load(Ordering::Relaxed)
+}
+
+/// Force a freshly uploaded texture RESIDENT now, on the upload's own frame, by sampling it once.
+///
+/// On this driver `glTexImage2D` returns after the copy and defers the rest — the allocation and
+/// the tile/layout conversion the GPU actually samples from — to the FIRST DRAW that binds the
+/// texture. Measured on the television (2026-09-02, `plxnative-framedrop`): a 1280x720 backdrop
+/// landing cost 6 ms in the pump and then 116 ms in the NEXT frame's draw, billed to the frame's
+/// first framebuffer command (`hm.clear`) where this driver parks its GPU wait — while `dt.cast`,
+/// the row that was actually scrolling, took under 1 ms. That is the hitch a headshot shelf shows
+/// while it rolls, and the "freeze" a cold detail page shows as its backdrop, logo and posters
+/// land one after another. Paying it HERE moves the cost into the pump, whose budget already
+/// bounds uploads per frame, and off the draw, which cannot bound anything.
+///
+/// **The sample lands in a tiny offscreen target ([`WARM_PX`] square), never on framebuffer 0.**
+/// The first draw of a frame into framebuffer 0 is where this driver blocks on the back buffer
+/// (5-9 ms in `poll` on the television, 2026-10-08). A warm drawn there took that wait inside
+/// `prepare`, so the prepare clock read a 7-10 ms "upload" and admitted one poster per frame, and
+/// the page's draw work queued behind the wait instead of overlapping it. Drawn offscreen the
+/// wait stays with the frame's `clear`; the warm costs 0.3-0.4 ms. Residency is per texture, not
+/// per texel, so a draw into any target forces it. The target is built on the first warm and
+/// kept; if it cannot be built the warm is skipped, never redirected to framebuffer 0.
+///
+/// Leaves the default framebuffer bound and the viewport at `surface::viewport()`, exactly as
+/// every other offscreen pass in this file does.
+pub fn warm_tex(tex: c_uint) {
+    if tex == 0 {
+        return;
+    }
+    const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+    unsafe {
+        let slot = &mut *std::ptr::addr_of_mut!(WARM_TARGET);
+        let target = *slot.get_or_insert_with(|| fbo_target(WARM_PX, WARM_PX, "warm"));
+        let Some((_, fbo)) = target else { return };
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        // The whole logical screen maps onto the target, so a screen-sized quad fills it and
+        // every texel of it samples `tex`.
+        glViewport(0, 0, WARM_PX, WARM_PX);
+        // `Class::Blur`, like every other offscreen pass: the quad writes a 16x16 target, not the
+        // panel, so the overdraw ledger must not book it as a full-screen `Image` and a
+        // `drawmask` of `image` must not skip it (`overdraw::gate` never books or masks `Blur`).
+        draw_tex_core(
+            Class::Blur,
+            tex,
+            0.0,
+            0.0,
+            SCR_W,
+            SCR_H,
+            UV_FULL,
+            0.0,
+            WHITE.as_ptr(),
+            0.0,
+            NO_RIM.as_ptr(),
+            0.0,
+            0.0,
+            0.0,
+            NO_RIM.as_ptr(),
+            0.0,
+            0.0,
+            None,
+        );
+        glBindFramebuffer(GL_FRAMEBUFFER, plx_base::surface::default_fb());
+        let (vx, vy, vw, vh) = plx_base::surface::viewport();
+        glViewport(vx, vy, vw, vh);
+    }
+}
+
+/// Side, in pixels, of the offscreen target [`warm_tex`] draws into.
+const WARM_PX: c_int = 16;
+
+/// [`warm_tex`]'s target: unbuilt (`None`), failed (`Some(None)`, latched so a driver that refuses
+/// it is asked once) or ready (texture, framebuffer). Main render thread only, like every cached
+/// target here; `init_gl` clears it, so a fresh GL context never sees a stale name.
+static mut WARM_TARGET: Option<Option<(c_uint, c_uint)>> = None;
+
+/// Delete a texture created by upload_rgba (0 = no-op). Main-thread only.
+///
+/// **The real call is `cfg(not(any(test, feature = "test-support")))`, and that is a boundary this module already had, only
+/// nowhere written down as code.** `poster.rs`'s own comments call this out twice — `lookup`
+/// "cannot be called from a host test binary (it reaches `gfx::delete_tex`, and nothing here
+/// links GL)" — which was true of every caller UNTIL `screens::login`'s `unmount_frees_the_qr_texture`
+/// passed a nonzero id through the real `Unmount` arm to prove the leak fix actually zeroes
+/// `qr_tex`. `build.rs` links `OpenGL.framework` for the host test binary (has to, since other
+/// tests make `gfx`'s `extern "C"` block reachable at link time), so the symbol resolves — but no
+/// host test ever creates a window or a GL context, so the driver's per-thread dispatch table is
+/// still a null vtable, and `glDeleteTextures` dereferences a fixed offset into it: an immediate
+/// SIGSEGV, not a graceful error, and it took the whole test binary down with it (confirmed under
+/// lldb — `EXC_BAD_ACCESS` inside `libGL.dylib`, not anywhere in this crate). The device and the
+/// simulator both keep the real delete (`cfg(not(test))` is false for both — the ARM cross build
+/// doesn't run `cargo test`, and `make sim` boots through a live SDL/GL context before anything
+/// calls this), so nothing about actual texture lifetime on either target changes. Removing this
+/// guard resurrects the crash the moment a host test calls `delete_tex` with a nonzero id again.
+pub fn delete_tex(tex: c_uint) {
+    if tex != 0 {
+        tex_ledger::deleted(tex);
+        #[cfg(not(any(test, feature = "test-support")))]
+        unsafe {
+            glDeleteTextures(1, &tex)
+        };
+    }
+}
+
+/// The card-composite draw. `(x,y,w,h)` is the CARD rect; the quad is inflated by `pad` (more below
+/// once `dy`>0 — see [`draw_tex_impl`]) so the shadow penumbra fits, and `FS_IMG` remaps the texture
+/// back to the card. `rimw`/`rimcol` = the 1px edge sheen; `pad`/`shblur`/`shcol` = the soft
+/// drop-shadow (all zero ⇒ a plain rounded texture).
+/// The UV sub-rect `(offset.xy, scale.zw)` that maps a quad — inflated by `left`/`top` on those two
+/// edges and sized `qw`×`qh` overall — back onto its `w`×`h` card, i.e. "map the texture onto the
+/// card, not onto the shadow ring around it". `left`/`top` need not be half of `qw - w`/`qh - h`:
+/// that is only the symmetric case (every caller before the risen shadow, and still every side but
+/// the vertical one today).
+///
+/// Pure, and split out because it is the identity `vs_img.vert` used to hard-code as a scale about
+/// 0.5: `(a_pos - 0.5) * s + 0.5` is `a_pos * s + (0.5 - 0.5 * s)`, the symmetric case's own
+/// `offset = -pad/size`. Keeping the algebra here (with a test) is what let the vertex shader take
+/// a general offset for [`draw_blur_backdrop`] without anyone having to re-derive the card path's
+/// numbers, and what now lets the shadow's asymmetric inflation reuse the exact same derivation.
+#[inline]
+fn uv_rect_padded(w: f32, h: f32, left: f32, top: f32, qw: f32, qh: f32) -> [f32; 4] {
+    let sx = if w > 0.0 { qw / w } else { 1.0 };
+    let sy = if h > 0.0 { qh / h } else { 1.0 };
+    let ox = if w > 0.0 { -left / w } else { 0.0 };
+    let oy = if h > 0.0 { -top / h } else { 0.0 };
+    [ox, oy, sx, sy]
+}
+
+/// The whole texture as a UV window `(offset.xy, scale.zw)` — the crop every textured draw took
+/// before pictures carried one, and still the right one for any texture made at its box's aspect.
+pub const UV_FULL: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+
+/// `inner` (quad → card, [`uv_rect_padded`]) followed by `crop` (card → texture, the window a
+/// cover crop keeps — `ui::Rect::cover_uv`): one `(offset, scale)` pair, because the vertex shader
+/// applies exactly one. Both are affine, so `crop.xy + (inner.xy + a·inner.zw)·crop.zw` folds to
+/// `(crop.xy + inner.xy·crop.zw) + a·(inner.zw·crop.zw)`. [`UV_FULL`] is its identity on either side.
+#[inline]
+fn uv_compose(crop: [f32; 4], inner: [f32; 4]) -> [f32; 4] {
+    [
+        crop[0] + inner[0] * crop[2],
+        crop[1] + inner[1] * crop[3],
+        inner[2] * crop[2],
+        inner[3] * crop[3],
+    ]
+}
+
+/// Card corner coordinates and a conservative d<-2 interior threshold, folded off the GPU.
+/// For radii below two pixels, the negative threshold also excludes the antialiased fringe.
+fn image_card_geometry(half_w: f32, half_h: f32, radius: f32) -> [f32; 4] {
+    [half_w - radius, half_h - radius, radius, (radius - 2.0).min(0.0)]
+}
+
+/// Whether `fs_img.frag` leaves EVERY fragment of a draw with this corner `radius` through its first
+/// exit, plain texture x tint, before any card math runs: `u_card.z < 0.5`, and the packed `u_card.z`
+/// is the radius itself ([`image_card_geometry`]). The rim, the shadow and the pad around the quad
+/// play no part in the rule — a square-cornered draw with all three set still leaves there, so it
+/// draws no rim and no shadow at all. That is NOT a free pad: the exit masks nothing, so the pad's
+/// fragments are rasterized and run it like the card's own, one texture fetch and a tint each in
+/// either program. A NaN radius compares false on the CPU as it would on the GPU, and so keeps the
+/// full program it always had.
+#[inline]
+fn takes_plain_exit(radius: f32) -> bool {
+    radius < 0.5
+}
+
+/// `plain` (the plain texture program, if it linked) when a draw, or one piece of a split card,
+/// with corner `radius` is better shaded by it than by the image program: it [`takes_plain_exit`]
+/// and carries no `overridden` program of its own. The focus specialization's `u_card.z < 0.5` exit
+/// IS the plain `vec4(tex, ta)` (it sits before all `PLX_FOCUS` code), so it is not excluded for a
+/// different exit; a focused draw stays on its program for the fragments past that exit, the lit
+/// edge, glare and risen shadow that are what a focus draw is for. Only the still specialization's
+/// exit differs (`stillOver`, not the plain write), and `overridden` does not say which of the two
+/// it carries, so both keep their program. `None` leaves the draw on the image program ([`IPROG`],
+/// or the override), which for a draw that takes the exit is the same picture from the larger
+/// program.
+#[inline]
+fn plain_texture_program<P>(plain: Option<P>, overridden: bool, radius: f32) -> Option<P> {
+    plain.filter(|_| !overridden && takes_plain_exit(radius))
+}
+
+/// Bind the plain texture program for one quad and send it everything it reads that changes from
+/// draw to draw: the quad, the source window and the tint (its screen size and sampler unit were
+/// set at link time). Uniforms persist per program, so all three go on every call.
+#[inline]
+unsafe fn bind_plain_image(program: c_uint, loc: PlainUniforms, tint: *const f32, uv: [f32; 4], quad: [f32; 4]) {
+    use_prog(program);
+    glUniform4fv(loc.tint, 1, tint);
+    glUniform4f(loc.uvrect, uv[0], uv[1], uv[2], uv[3]);
+    glUniform4f(loc.rect, quad[0], quad[1], quad[2], quad[3]);
+}
+
+/// `u_focus`, the focused tile's lit-glass edge AND its risen shadow (see `fs_img.frag`'s FOCUS
+/// note): `(f, 1/gloss-gradient-length, shadow y-offset px)`. The gradient length is the card's own
+/// `w×h` box projected onto the 160deg CSS direction ([`tokens::CARD_GLOSS_DIR`]) — the
+/// one CPU-folded term the shader cannot derive from its already-packed `u_card`, since that only
+/// carries the HALF-size minus the radius. `dy` is the caller's own downward shadow shift (0 for
+/// every draw but a focused card's — `ui::Painter::tex_carded` and its still specialization
+/// are the only nonzero callers),
+/// carried through unconditionally rather than folded into an expression, since the shader gates its
+/// own shifted-SDF branch on it directly (`u_focus.z > 0.0`). `f <= 0.0` (the whole card except at
+/// most one on screen) makes the shader take the identical path it always has; the divide only ever
+/// runs once per draw, never per fragment, and a degenerate `w*h == 0` box (never a real tile) leaves
+/// it at 0 rather than `inf`.
+fn image_focus_geometry(focus: f32, half_w: f32, half_h: f32, dy: f32) -> [f32; 3] {
+    let f = focus.max(0.0);
+    if f <= 0.0 {
+        return [0.0, 0.0, 0.0];
+    }
+    use crate::gfx::tokens::CARD_GLOSS_DIR;
+    let grad_len = half_w * 2.0 * CARD_GLOSS_DIR[0] + half_h * 2.0 * CARD_GLOSS_DIR[1];
+    [f, if grad_len > 0.0 { 1.0 / grad_len } else { 0.0 }, dy.max(0.0)]
+}
+
+/// The IPROG draw (or [`PLAIN_IMAGE`]'s, for a draw that [`takes_plain_exit`]), with every term
+/// already in the shader's own units: `q*` is the QUAD (shadow inflation included), `uv` the source
+/// sub-rect it samples, `ch` the CARD half-size the SDF is measured against. [`draw_tex_impl`] folds
+/// a card's parameters into these; the blur backdrop supplies its own, because its UV window is a
+/// screen-space rect rather than a card.
+#[allow(clippy::too_many_arguments)]
+fn draw_tex_core(
+    class: Class,
+    tex: c_uint,
+    qx: f32,
+    qy: f32,
+    qw: f32,
+    qh: f32,
+    uv: [f32; 4],
+    radius: f32,
+    tint: *const f32,
+    rimw: f32,
+    rimcol: *const f32,
+    chw: f32,
+    chh: f32,
+    shinv: f32,
+    shcol: *const f32,
+    focus: f32,
+    dy: f32,
+    image: Option<(c_uint, ImageUniforms)>,
+) {
+    draw_tex_core_in(
+        class, tex, qx, qy, qw, qh, uv, radius, tint, rimw, rimcol, chw, chh, shinv, shcol, focus, dy,
+        image, CardCut::None,
+    );
+}
+
+/// [`draw_tex_core`], and `card` = what [`draw_tex_impl`] decided about a `Class::Card` draw
+/// ([`card_cut`]). A resting card ([`CardCut::Pieces`], with the card's own rect `(x, y, w, h)`) is
+/// drawn in pieces when it has an interior ([`card_boxes`]): the SAME quad is drawn five times, each
+/// under its own scissor box ([`card_plan`]) - once for the interior, as plain texture x tint (the
+/// plain texture program, [`PLAIN_IMAGE`], and failing that the image program's `u_card.z < 0.5`
+/// exit), and once for each of the four bands of the ring (the part with rim, anti-aliased edge and
+/// shadow) through the full card math. A still-fused card ([`draw_tex_carded_still`], an `image`
+/// override) is split the same way, but its interior is not plain texture x tint: it stays on the
+/// still program and leaves through that program's `u_card.z < 0.5` exit, `stillOver`, which adds
+/// the label ground ([`plain_texture_program`] refuses an override for exactly that). The vertices
+/// are the whole quad's every time, so `v_cuv` and the texture's derivatives are the very numbers
+/// the single draw interpolates, and the picture is the same pixel for pixel; the fragment shader
+/// just stops evaluating the card's SDF where its answer is "plain". A whole draw with a square
+/// corner ([`takes_plain_exit`]) is that same plain
+/// texture and takes the same program ([`plain_texture_program`]). The ledger and the cull above
+/// book and test the whole quad once, as before, and the program is chosen after them; the
+/// card-path ledger ([`note_card_path`]) books which way each card went.
+///
+/// DEV: a `drawmask` leg can refuse one PART of this work ([`CardPart`]; [`card_plan`],
+/// [`card_whole_refused`] and [`masked_part`] say how).
+#[allow(clippy::too_many_arguments)]
+fn draw_tex_core_in(
+    class: Class,
+    tex: c_uint,
+    qx: f32,
+    qy: f32,
+    qw: f32,
+    qh: f32,
+    uv: [f32; 4],
+    radius: f32,
+    tint: *const f32,
+    rimw: f32,
+    rimcol: *const f32,
+    chw: f32,
+    chh: f32,
+    shinv: f32,
+    shcol: *const f32,
+    focus: f32,
+    dy: f32,
+    image: Option<(c_uint, ImageUniforms)>,
+    card: CardCut,
+) {
+    if tex == 0 || culled(qx, qy, qw, qh) || gate(class, qx, qy, qw, qh) {
+        return;
+    }
+    unsafe {
+        let quad = [qx, qy, qw, qh];
+        let (program, loc) = image.unwrap_or((IPROG, ImageUniforms {
+            rect: IL_RECT, tint: IL_TINT, uvrect: IL_UVRECT, card: IL_CARD,
+            rimw: IL_RIMW, rimcol: IL_RIMCOL, shinv: IL_SHINV, shcol: IL_SHCOL, focus: IL_FOCUS,
+        }));
+        // The plain texture program takes the whole draw when the image program would leave every
+        // fragment through its `u_card.z < 0.5` exit (a square-cornered picture), and a split
+        // card's interior piece below. It is chosen here, after `gate` has booked the quad and
+        // before the card-path ledger below books the card, and neither depends on it: the
+        // ledger counts the same draws with either program behind them.
+        let plain = std::ptr::addr_of!(PLAIN_IMAGE).read();
+        if let Some((program, loc)) = plain_texture_program(plain, image.is_some(), radius) {
+            bind_plain_image(program, loc, tint, uv, quad);
+        } else {
+            use_prog(program); // fixed screen size and sampler unit are initialized per program
+            if loc.tint >= 0 { glUniform4fv(loc.tint, 1, tint); }
+            glUniform4f(loc.uvrect, uv[0], uv[1], uv[2], uv[3]);
+            glUniform4fv(loc.card, 1, image_card_geometry(chw, chh, radius).as_ptr());
+            glUniform1f(loc.rimw, rimw);
+            glUniform4fv(loc.rimcol, 1, rimcol);
+            glUniform1f(loc.shinv, shinv);
+            glUniform4fv(loc.shcol, 1, shcol);
+            if loc.focus >= 0 {
+                let uf = image_focus_geometry(focus, chw, chh, dy);
+                glUniform3f(loc.focus, uf[0], uf[1], uf[2]);
+            }
+            glUniform4f(loc.rect, qx, qy, qw, qh);
+        }
+        glBindTexture(GL_TEXTURE_2D, tex);
+        let boxes = match card {
+            CardCut::None => None,
+            CardCut::Whole(path) => {
+                note_card_path(path, qx, qy, qw, qh);
+                if card_whole_refused(path, masked_part) {
+                    return;
+                }
+                None
+            }
+            CardCut::Pieces(rect) => match card_boxes([qx, qy, qw, qh], rect, radius, rimw) {
+                Ok(boxes) => {
+                    note_card_path(CardPath::Split, qx, qy, qw, qh);
+                    Some(boxes)
+                }
+                Err(path) => {
+                    note_card_path(path, qx, qy, qw, qh);
+                    None
+                }
+            },
+        };
+        let Some(boxes) = boxes else {
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4, straighten::Extent::Quad(quad));
+            return;
+        };
+        let plan = card_plan(&boxes, LIVE_SCISSOR, masked_part);
+        // A card wholly outside the clip the caller holds, or whose every piece a `drawmask` leg
+        // refuses, shades nothing: leave the scissor alone.
+        if plan.pieces.iter().all(Option::is_none) {
+            return;
+        }
+        glEnable(GL_SCISSOR_TEST);
+        for piece in plan.pieces.iter().flatten() {
+            // The ring first, under the real `u_card` the uniforms above carry; the interior is the
+            // last piece. It is the plain texture: through the plain texture program when it
+            // linked (the image program is never bound again by this draw, so nothing is put back),
+            // else through the image program with a `u_card.z` of 0, the shader's own plain exit.
+            // A still-fused card's interior is neither: its override keeps it on the still program
+            // (`plain_texture_program` refuses it), whose `u_card.z` of 0 exits through `stillOver`.
+            if piece.interior {
+                match plain_texture_program(plain, image.is_some(), 0.0) {
+                    Some((program, loc)) => bind_plain_image(program, loc, tint, uv, quad),
+                    None => glUniform4fv(loc.card, 1, image_card_geometry(chw, chh, 0.0).as_ptr()),
+                }
+            }
+            let b = piece.scissor;
+            glScissor(b[0], b[1], b[2] - b[0], b[3] - b[1]);
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4, straighten::Extent::Quad(quad));
+        }
+        // The clip the caller had (a scrolling list's, a source pass's box) is theirs: put it back,
+        // through the two functions that keep `LIVE_SCISSOR` honest.
+        match plan.restore {
+            Some(b) => scissor_box(b[0], b[1], b[2] - b[0], b[3] - b[1]),
+            None => scissor_off(),
+        }
+    }
+}
+
+/// A scissor box in window pixels, `[x0, y0, x1, y1]`: GL's bottom-left origin, the far edges
+/// exclusive.
+type PxBox = [c_int; 4];
+
+/// `b` cut down to the clip `live` (`None` = no clip), or `None` when nothing of it is left.
+fn clip_px(b: PxBox, live: Option<PxBox>) -> Option<PxBox> {
+    let c = match live {
+        Some(l) => [b[0].max(l[0]), b[1].max(l[1]), b[2].min(l[2]), b[3].min(l[3])],
+        None => b,
+    };
+    (c[2] > c[0] && c[3] > c[1]).then_some(c)
+}
+
+/// A resting card's picture cut into the part `fs_img.frag` writes as plain texture x tint and the
+/// ring around it, as the five scissor boxes that tile the whole viewport: the four of the ring (the
+/// rows above and below the interior, then the columns left and right of it) and the interior. No
+/// two share a pixel and none leaves one out, so a quad drawn once under each puts every pixel of
+/// itself through exactly one of them. Boxes may be empty (a card at the edge of the viewport).
+struct CardBoxes {
+    ring: [PxBox; 4],
+    interior: PxBox,
+}
+
+/// What [`draw_tex_impl`] decided about how a draw may be cut, from [`card_cut`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CardCut {
+    /// Not a card (`Class::Card` is the art tiles): nothing to cut, nothing to book.
+    None,
+    /// A card drawn whole, and the reason ([`CardPath`], booked by the card-path ledger).
+    Whole(CardPath),
+    /// A resting card that may be drawn in pieces if it has an interior: the card's own rect
+    /// `(x, y, w, h)`, which the quad is symmetric about.
+    Pieces([f32; 4]),
+}
+
+/// How a draw of `class` (with this corner `radius`, focus pop `focus` and shadow rise `dy`) is cut,
+/// for the card whose rect is `rect` - given the split `enabled` (the dev A/B switch, always on in
+/// release). Only the card compositor (`Class::Card`, i.e. an art tile with a shadow pad) is ever cut,
+/// and only a ROUNDED one (`radius < 0.5` is the shader's own whole-quad plain branch already) AT
+/// REST: a focused or risen card is drawn by the focus program with its asymmetric quad, whose SDF
+/// centre is not the quad's centre, and is never split.
+#[inline]
+fn card_cut(class: Class, radius: f32, focus: f32, dy: f32, enabled: bool, rect: [f32; 4]) -> CardCut {
+    if class != Class::Card {
+        CardCut::None
+    } else if wants_focus_program(focus, dy) {
+        CardCut::Whole(CardPath::Focus)
+    } else if takes_plain_exit(radius) {
+        CardCut::Whole(CardPath::Plain)
+    } else if !enabled {
+        CardCut::Whole(CardPath::Off)
+    } else {
+        CardCut::Pieces(rect)
+    }
+}
+
+/// The part of a resting card's `quad` (symmetric about `card` = `(x, y, w, h)`) that `fs_img.frag`
+/// certainly shades as plain texture x tint, as its edges `[x0, y0, x1, y1]` in authored px on the
+/// pixel grid of `scale` ([`snap_inner`]); `None` when there is no such part. It is the card inset on
+/// every side by its corner `radius` + the rim's width `rimw` + 2 px, then shrunk onto the grid. The
+/// shader's own early-out is `max(|p| - (half - radius)) < min(radius - 2, 0)`: a rect inset by
+/// `radius` from the card edge lies inside it, the 2 px and the rim are margin for float error, and
+/// the rounded corners (where `d` is a `length()`, not a box distance) are outside the inset
+/// altogether. (The rim itself is pure margin: `fs_img.frag` only reaches it after that early-out.)
+/// The host test `every_interior_pixel_takes_the_plain_exit` replays the shader's tests over every
+/// pixel centre of the rect.
+fn card_interior(quad: [f32; 4], card: [f32; 4], radius: f32, rimw: f32, scale: f32) -> Option<[f32; 4]> {
+    let k = radius + rimw.max(0.0) + 2.0;
+    let rect = [card[0] + k, card[1] + k, card[2] - 2.0 * k, card[3] - 2.0 * k];
+    if !(rect[2] > 0.0 && rect[3] > 0.0) {
+        return None;
+    }
+    snap_inner(quad, rect, scale)
+}
+
+/// [`CardBoxes`] for the interior `hole` (edges, authored px, on the pixel grid) of a drawable whose
+/// authored canvas starts at window pixel `(view[0], view[1])`, is `s` pixels per authored px, and
+/// whose viewport is the window box `view`. The same edge arithmetic as [`clip_set`] ([`win_x`],
+/// [`win_y`]): each edge is rounded in physical space on its own, so the seams the grid put on whole
+/// pixels come out as whole pixels and the neighbours' shared edges are the same number. Every box
+/// is inside `view`, which is where a quad's fragments can be: a band that lies wholly off the
+/// viewport is empty and draws nothing.
+fn card_pixel_boxes(hole: [f32; 4], view: PxBox, s: f32) -> CardBoxes {
+    let [vx0, vy0, vx1, vy1] = view;
+    let (x0, x1) = (win_x(hole[0], vx0, s).clamp(vx0, vx1), win_x(hole[2], vx0, s).clamp(vx0, vx1));
+    let (top, bottom) = (win_y(hole[1], vy0, s).clamp(vy0, vy1), win_y(hole[3], vy0, s).clamp(vy0, vy1));
+    CardBoxes {
+        ring: [[vx0, top, vx1, vy1], [vx0, vy0, vx1, bottom], [vx0, bottom, x0, top], [x1, bottom, vx1, top]],
+        interior: [x0, bottom, x1, top],
+    }
+}
+
+/// The scissor boxes to draw a resting card's `quad` in pieces, or why it is drawn whole
+/// ([`CardPath::Clipped`]: in any target [`CLIP_TARGET`] names - a reduced-resolution source pass,
+/// whose quarter-size pixels have no shading to save and no draw calls to spare, and equally a
+/// [`FrameCache::render_region`] fill, whose cards are drawn whole once per key rather than split
+/// every frame; [`CardPath::NoInterior`]: the card leaves no certainly-plain part).
+fn card_boxes(quad: [f32; 4], card: [f32; 4], radius: f32, rimw: f32) -> Result<CardBoxes, CardPath> {
+    if unsafe { CLIP_TARGET }.is_some() {
+        return Err(CardPath::Clipped);
+    }
+    let (vx, vy, s) = target_map();
+    let (.., vw, vh) = plx_base::surface::viewport();
+    let hole = card_interior(quad, card, radius, rimw, s).ok_or(CardPath::NoInterior)?;
+    Ok(card_pixel_boxes(hole, [vx, vy, vx + vw, vy + vh], s))
+}
+
+/// One draw of a split card: the scissor box it runs under and whether it is the interior (drawn
+/// with the plain-texture `u_card`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Piece {
+    scissor: PxBox,
+    interior: bool,
+}
+
+/// What [`draw_tex_core_in`] does to GL for a split card, as data so it can be tested without a
+/// context: the draws in order - the ring's bands, then the interior, so `u_card` changes once - each
+/// cut to the clip `live` the caller had (a piece outside it draws nothing and is left out), and the
+/// scissor state to put back afterwards, which is exactly `live` (`None`: the test was off).
+struct CardPlan {
+    pieces: [Option<Piece>; 5],
+    restore: Option<PxBox>,
+}
+
+/// DEV: `refused` says which [`CardPart`] a `drawmask` leg refuses (`overdraw::masked_part`; always
+/// `false` in release): a refused part's pieces are left out of the plan like a piece the clip
+/// misses, and the rest of the plan - their order, their boxes, the scissor to put back - is what it
+/// would have been.
+fn card_plan(boxes: &CardBoxes, live: Option<PxBox>, refused: impl Fn(CardPart) -> bool) -> CardPlan {
+    let mut pieces = [None; 5];
+    let ring = boxes.ring.iter().map(|b| (*b, CardPart::Ring));
+    for (slot, (b, part)) in pieces.iter_mut().zip(ring.chain([(boxes.interior, CardPart::Interior)])) {
+        if refused(part) {
+            continue;
+        }
+        *slot = clip_px(b, live).map(|scissor| Piece { scissor, interior: part == CardPart::Interior });
+    }
+    CardPlan { pieces, restore: live }
+}
+
+/// Whether a card drawn WHOLE by `path` is refused by a `drawmask` part: only the focus program's
+/// cards are a part of their own (`card.focus`); a card that is whole for any other reason (a circle,
+/// a source pass, a square corner, the split switched off) has no part to refuse and is only ever
+/// removed by the whole `card` class ([`gate`]).
+#[inline]
+fn card_whole_refused(path: CardPath, refused: impl Fn(CardPart) -> bool) -> bool {
+    path == CardPath::Focus && refused(CardPart::Focus)
+}
+
+/// Whether a draw is focused or risen enough to need [`FOCUS_IMAGE`] rather than the plain
+/// program — the entire reason that split exists, so it is its own named, tested predicate rather
+/// than an inline `||` at the one call site.
+#[inline]
+pub fn wants_focus_program(focus: f32, dy: f32) -> bool {
+    focus > 0.0 || dy.max(0.0) > 0.0
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_tex_impl(
+    tex: c_uint,
+    crop: [f32; 4],
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    tint: *const f32,
+    rimw: f32,
+    rimcol: *const f32,
+    pad: f32,
+    shblur: f32,
+    shcol: *const f32,
+    focus: f32,
+    dy: f32,
+    image: Option<(c_uint, ImageUniforms)>,
+) {
+    let class = if pad > 0.0 { Class::Card } else { Class::Image };
+    // The risen shadow's inflation is ASYMMETRIC once `dy`>0: `pad` (the caller's `blur+dy+1`, see
+    // `ui::Painter::tex_carded`) is already exactly the BOTTOM figure, so the sides only need
+    // `blur+1` (`pad - dy`) and the top only `blur-dy+1` (`pad - 2*dy`) — proven never negative
+    // because `card_shadow_params` never lets `blur < dy`. `dy == 0` collapses all three back to
+    // plain symmetric `pad`, so a resting card's quad/UV are bit-for-bit what they were before this
+    // shadow shape existed.
+    let dy = dy.max(0.0);
+    let (sides, top, bottom) = (pad - dy, pad - 2.0 * dy, pad);
+    let (qx, qy, qw, qh) = (x - sides, y - top, w + 2.0 * sides, h + top + bottom);
+    // CPU-fold the uniform-only terms (Midgard has no uniform pre-shader): card half-size, the
+    // quad→card UV rect (identity when pad==0), and the shadow's 0.5/blur normaliser.
+    // …then the picture's own crop on top: the card maps onto `crop`'s window of the texture,
+    // never onto all of it unless that is what `crop` says (a cover crop keeps the aspect).
+    let uv = uv_compose(crop, uv_rect_padded(w, h, sides, top, qw, qh));
+    let shinv = if shblur > 0.0 { 0.5 / shblur } else { 0.0 };
+    // An explicit `image` override (the still-fusion program) always wins — it is a whole different
+    // specialization, never the plain/focus choice below. Otherwise, only a draw that is actually
+    // focused or risen reaches for `FOCUS_IMAGE`; every other draw passes `None`, which
+    // `draw_tex_core_in` resolves. A rounded resting card keeps drawing through the smaller `IPROG`
+    // exactly as before this program existed, and a square-cornered draw (the blur reductions,
+    // `warm_tex`, the `FrameCache` quads and the `field_kick` chain enter `draw_tex_core` that way
+    // directly) and a split card's interior go to `PLAIN_IMAGE` (`takes_plain_exit`) — see
+    // `FOCUS_IMAGE`'s own comment for why the focus split exists.
+    let image = image.or_else(|| if wants_focus_program(focus, dy) { unsafe { FOCUS_IMAGE } } else { None });
+    // A resting card's quad is symmetric about the card (`sides == top == bottom == pad`), which is
+    // what lets its interior be drawn apart from its ring; see `draw_tex_core_in`.
+    let card = card_cut(class, radius, focus, dy, card_split(), [x, y, w, h]);
+    draw_tex_core_in(
+        class,
+        tex,
+        qx,
+        qy,
+        qw,
+        qh,
+        uv,
+        radius,
+        tint,
+        rimw,
+        rimcol,
+        w * 0.5,
+        h * 0.5,
+        shinv,
+        shcol,
+        focus,
+        dy,
+        image,
+        card,
+    );
+}
+
+const NO_RIM: [f32; 4] = [0.0, 0.0, 0.0, 0.0]; // rim/shadow disabled: alpha 0 ⇒ shader skips it
+
+pub fn draw_tex(tex: c_uint, x: f32, y: f32, w: f32, h: f32, radius: f32, tint: *const f32) {
+    draw_tex_uv(tex, UV_FULL, x, y, w, h, radius, tint);
+}
+
+/// [`draw_tex`] sampling only the `crop` window of the texture (`(offset.xy, scale.zw)`, see
+/// [`uv_compose`]) — how a picture of another aspect is drawn into its box uncropped by stretching.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_tex_uv(
+    tex: c_uint,
+    crop: [f32; 4],
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    tint: *const f32,
+) {
+    draw_tex_impl(
+        tex,
+        crop,
+        x,
+        y,
+        w,
+        h,
+        radius,
+        tint,
+        0.0,
+        NO_RIM.as_ptr(),
+        0.0,
+        0.0,
+        NO_RIM.as_ptr(),
+        0.0,
+        0.0,
+        None,
+    );
+}
+
+/// The tint [`draw_tex_premultiplied`] gives the shader for a STRAIGHT-alpha `tint` `[r, g, b, a]`:
+/// `[r * a, g * a, b * a, a]`. The texel is `(rgb * A, A)`, so texel x tint is `(rgb * A * r * a, A * a)`:
+/// the colour a straight draw of the straight texel `(rgb, A)` blends in `r * a * A`, and the alpha it
+/// blends with, `A * a`. A fade (`a` below 1) and an ink (`r`, `g`, `b` below 1) therefore dim a
+/// premultiplied picture exactly as they dim a straight one; scaling the colour alone would leave the
+/// picture as opaque as before.
+pub fn premultiplied_tint(tint: [f32; 4]) -> [f32; 4] {
+    [tint[0] * tint[3], tint[1] * tint[3], tint[2] * tint[3], tint[3]]
+}
+
+/// **Draw a texture that holds PREMULTIPLIED RGBA** (`(rgb * a, a)` per texel, no channel above its
+/// alpha) as one square-cornered quad: `(x, y, w, h)` in logical px, `tint` the STRAIGHT ink and fade
+/// `[r, g, b, a]` every other primitive takes ([`premultiplied_tint`] turns it into the shader's).
+/// It blends `(ONE, ONE_MINUS_SRC_ALPHA)` and restores the ordinary blend, so the framebuffer comes out
+/// as a straight-alpha draw of the same picture would have left it (the unit test
+/// `a_premultiplied_draw_leaves_the_framebuffer_a_straight_draw_would` pins that to one code value)
+/// without the texture ever being converted to straight alpha, and bilinear filtering of it
+/// averages colour weighted by coverage, so a soft edge is not darkened by its transparent neighbours.
+///
+/// This is the draw for a producer that composes in premultiplied space (the libass facade's regions,
+/// `src/ass.c`); an image or glyph texture uploaded straight (PGS and VobSub bitmaps, the glyph cache)
+/// stays on [`draw_tex`]. A premultiplied texture drawn there is too dark at every soft edge.
+pub fn draw_tex_premultiplied(tex: c_uint, x: f32, y: f32, w: f32, h: f32, tint: [f32; 4]) {
+    let tint = premultiplied_tint(tint);
+    let _blend = PremultipliedBlend::enter();
+    draw_tex_uv(tex, UV_FULL, x, y, w, h, 0.0, tint.as_ptr());
+}
+
+/// Two equally sized images through the ordinary card compositor. One coverage/opacity
+/// calculation follows the image mix. A failed optional shader leaves the caller's static image.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_tex_carded_blend(tex: c_uint, next: c_uint, mix: f32, crop: [f32; 4],
+    x: f32, y: f32, w: f32, h: f32, radius: f32, tint: *const f32,
+    rimw: f32, rimcol: *const f32, pad: f32, blur: f32, shcol: *const f32) -> bool {
+    // SAFETY: the same render-thread-only lifecycle as the other image specializations.
+    unsafe {
+        if !DISSOLVE_TRIED {
+            DISSOLVE_TRIED = true;
+            let link = |source: &CStr| link_optional_program(VS_IMG.as_ptr(), source.as_ptr()).map(|program| {
+                let loc = |name: &CStr| glGetUniformLocation(program, name.as_ptr());
+                let uniforms = ImageUniforms {
+                    rect: loc(c"u_trect"), tint: loc(c"u_tint"), uvrect: loc(c"u_uvrect"),
+                    card: loc(c"u_card"), rimw: loc(c"u_rimw"), rimcol: loc(c"u_rimcol"),
+                    shinv: loc(c"u_shinv"), shcol: loc(c"u_shcol"), focus: loc(c"u_focus"),
+                };
+                use_prog(program);
+                glUniform2f(loc(c"u_tscreen"), SCR_W, SCR_H);
+                glUniform1i(loc(c"u_tex"), 0);
+                glUniform1i(loc(c"u_next"), 1);
+                (program, uniforms, loc(c"u_mix"))
+            });
+            DISSOLVE_IMAGE = link(FS_DISSOLVE);
+            DISSOLVE_PLAIN = link(FS_DISSOLVE_PLAIN);
+            if std::ptr::addr_of!(DISSOLVE_IMAGE).read().is_none() || std::ptr::addr_of!(DISSOLVE_PLAIN).read().is_none() {
+                log("image dissolve specialization unavailable — keeping static artwork there");
+            }
+        }
+        let image = if takes_plain_exit(radius) { std::ptr::addr_of!(DISSOLVE_PLAIN).read() }
+            else { std::ptr::addr_of!(DISSOLVE_IMAGE).read() };
+        let Some((program, uniforms, blend)) = image else { return false };
+        use_prog(program);
+        glUniform1f(blend, mix.clamp(0.0, 1.0));
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, next);
+        glActiveTexture(GL_TEXTURE0);
+        draw_tex_impl(tex, crop, x, y, w, h, radius, tint, rimw, rimcol, pad, blur,
+            shcol, 0.0, 0.0, Some((program, uniforms)));
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glActiveTexture(GL_TEXTURE0);
+        true
+    }
+}
+
+/// Run `draw` with the simulator's compositor blend ([`straighten::UNDER`]) set and the app's own put
+/// back after.
+#[cfg(feature = "hostsim")]
+fn under_blend(draw: impl FnOnce()) {
+    let [src_rgb, dst_rgb, src_a, dst_a] = straighten::UNDER.gl();
+    unsafe {
+        glBlendFuncSeparate(src_rgb, dst_rgb, src_a, dst_a);
+        draw();
+        glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    }
+}
+
+/// **Simulator only: composite `tex` UNDER everything drawn so far this frame** — the television
+/// compositor's arithmetic for its hardware video plane beneath our UI plane, which is STRAIGHT alpha:
+/// `panel = ui.rgb * ui.a + video * (1 - ui.a)`, measured on the dev set. The factors are
+/// [`straighten::UNDER`], `(ONE_MINUS_DST_ALPHA, DST_ALPHA)` for colour, and they leave the surface
+/// opaque. This is the compositor, not the intended picture: a premultiplied frame handed to it comes
+/// out darker by its own alpha, which is the television's fault and exactly what the straighten pass
+/// ([`straighten::straighten_surface`], run first) removes, so the simulator shows both. Used by
+/// `app::adapters::hostsim::sim_video` for the screenshot pipeline's player figure and, with no
+/// picture, by [`draw_under_black`]; restores the app's blend.
+#[cfg(feature = "hostsim")]
+pub fn draw_under(tex: c_uint, x: f32, y: f32, w: f32, h: f32) {
+    under_blend(|| draw_tex(tex, x, y, w, h, 0.0, [1.0f32; 4].as_ptr()));
+}
+
+/// **Simulator only: the same compositor over an empty plane** — black. A bound-plane frame is
+/// straightened (the pass has no simulator switch), so it has to go through the compositor model
+/// whether or not the simulator holds a decoded picture, or a screenshot would read the straight
+/// buffer itself.
+#[cfg(feature = "hostsim")]
+pub fn draw_under_black() {
+    let black = [0.0f32, 0.0, 0.0, 1.0];
+    under_blend(|| draw_rect(0.0, 0.0, SCR_W, SCR_H, 0.0, 0.0, black.as_ptr(), black.as_ptr(), 0.0, 1.0));
+}
+
+/// **A texture the renderer fills once and serves as one quad**, in one of two modes. They share the
+/// texture, its FBO and the draw path, and differ in WHAT the texture holds and so in how it is drawn:
+///
+/// * **Whole-viewport snapshot** ([`capture`](Self::capture), [`render_into`](Self::render_into)): the
+///   viewport's size, a straight copy of the frame (opaque, over the app ground), bottom-up. Drawn
+///   with [`draw`](Self::draw) / [`draw_alpha`](Self::draw_alpha), which lift [`page_frozen`] and
+///   blend it straight. This is the modal hosts' and the page transitions' snapshot, below.
+/// * **Rect** ([`render_region`](Self::render_region), through [`region_paint`]): a texture of exactly
+///   one rect of the canvas, drawn onto a TRANSPARENT clear, so it holds PREMULTIPLIED colour. Drawn
+///   ONLY by [`draw_region`](Self::draw_region), which blends it premultiplied and does not lift
+///   [`page_frozen`]; never by `draw`/`draw_alpha`, which would composite it as an opaque snapshot.
+///
+/// Whole-viewport snapshot, in more words: this is deliberately a renderer primitive rather than an Account-menu special case. A modal
+/// may freeze a page's *state* and still accidentally redraw its hero, shelves and text on every
+/// swap because double buffering needs complete pixels. `FrameCache` makes the lifecycle explicit:
+/// capture the completed host once, draw one textured quad while the modal owns input, invalidate
+/// on dismissal. The modal's own scrim and controls remain live layers above it.
+///
+/// Main-render-thread only, like every other GL resource in this module.
+// Host protocol tests substitute CPU copies; the GL backend is shipping-only in that build.
+#[cfg_attr(test, allow(dead_code))]
+pub struct FrameCache {
+    tex: c_uint,
+    w: c_int,
+    h: c_int,
+    valid: bool,
+    checked: bool,
+    off: bool,
+    /// The framebuffer object over [`tex`](Self::tex) that [`render_into`](Self::render_into) and
+    /// [`render_region`](Self::render_region) draw through; 0 until first asked for, and dropped
+    /// with the texture it names.
+    fbo: c_uint,
+    /// The FBO came back incomplete once: [`render_into`](Self::render_into) and
+    /// [`render_region`](Self::render_region) decline from then on, and a whole-viewport capture
+    /// falls back to [`capture`](Self::capture)'s copy.
+    fbo_off: bool,
+    /// **The retained second slot**: a copy of an earlier frame that [`draw_prev`](Self::draw_prev)
+    /// fades away over the new capture (a glass menu's look before and after its page reflowed).
+    /// A texture of its own, made on [`capture_prev`](Self::capture_prev) and deleted on
+    /// [`release_prev`](Self::release_prev): it costs 8.3 MB only for the length of the fade.
+    prev: c_uint,
+    prev_w: c_int,
+    prev_h: c_int,
+    /// **The canvas rect this texture holds** (`x, y, w, h`, whole logical px) while it was filled by
+    /// [`render_region`](Self::render_region) rather than as the whole viewport; all zero otherwise.
+    /// The texture is then exactly that rect's size, [`draw_region`](Self::draw_region) puts it back
+    /// where it was drawn, and the pixels are PREMULTIPLIED (the frame is drawn onto a transparent
+    /// clear, so what the blend leaves is `(rgb * a, a)`).
+    region: [c_int; 4],
+}
+
+#[cfg_attr(test, allow(dead_code))]
+impl FrameCache {
+    pub const fn new() -> Self {
+        Self {
+            region: [0; 4],
+            tex: 0,
+            w: 0,
+            h: 0,
+            valid: false,
+            checked: false,
+            off: false,
+            fbo: 0,
+            fbo_off: false,
+            prev: 0,
+            prev_w: 0,
+            prev_h: 0,
+        }
+    }
+
+    /// Copy the framebuffer into the retained second slot. `false` (nothing retained) in a blur
+    /// source pass, on a video-plane frame and when the cache is off.
+    pub fn capture_prev(&mut self) -> bool {
+        if self.off || blur_source_pass() || video_plane_refuses("FrameCache::capture_prev") {
+            return false;
+        }
+        let (vx, vy, vw, vh) = plx_base::surface::viewport();
+        if vw <= 0 || vh <= 0 {
+            return false;
+        }
+        unsafe {
+            if self.prev == 0 || self.prev_w != vw || self.prev_h != vh {
+                delete_tex(self.prev);
+                self.prev = cap_tex(vw, vh);
+                self.prev_w = vw;
+                self.prev_h = vh;
+            }
+            glBindTexture(GL_TEXTURE_2D, self.prev);
+            plx_base::diag::spans::span("capprev", || glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, vx, vy, vw, vh));
+        }
+        true
+    }
+
+    /// Whether the second slot holds a copy.
+    pub fn has_prev(&self) -> bool {
+        self.prev != 0
+    }
+
+    /// Give the second slot's texture back.
+    pub fn release_prev(&mut self) {
+        if self.prev != 0 {
+            delete_tex(self.prev);
+            self.prev = 0;
+        }
+    }
+
+    /// Give the main texture (and its framebuffer) back: whatever it held is gone, the next
+    /// [`render_into`](Self::render_into) / [`render_region`](Self::render_region) makes it again.
+    pub fn release(&mut self) {
+        if self.fbo != 0 {
+            // SAFETY: render thread, current context, like every GL resource here.
+            unsafe { glDeleteFramebuffers(1, &self.fbo) };
+            self.fbo = 0;
+        }
+        delete_tex(self.tex);
+        self.tex = 0;
+        self.w = 0;
+        self.h = 0;
+        self.valid = false;
+        self.checked = false;
+        self.region = [0; 4];
+    }
+
+    /// Draw the second slot across the canvas at `alpha`, over what is drawn so far.
+    pub fn draw_prev(&self, alpha: f32) -> bool {
+        if self.prev == 0 {
+            return false;
+        }
+        let was = set_page_frozen(false);
+        let tint = tokens::with_a(CAP_TINT, alpha);
+        draw_tex_core(
+            Class::Image, self.prev, 0.0, 0.0, SCR_W, SCR_H, frame_cache_uv(), 0.0, tint.as_ptr(), 0.0,
+            NO_RIM.as_ptr(), SCR_W * 0.5, SCR_H * 0.5, 0.0, NO_RIM.as_ptr(), 0.0, 0.0, None,
+        );
+        set_page_frozen(was);
+        true
+    }
+
+    /// Rendering needs an initialized image shader and a usable FBO backend. Host logic tests
+    /// construct dispatchers without a GL context; they must take the live fallback.
+    pub fn render_available(&self) -> bool {
+        let (x, y, w, h) = plx_base::surface::viewport();
+        unsafe { IPROG != 0 && !self.off && !self.fbo_off && x == 0 && y == 0 && w > 0 && h > 0 }
+    }
+
+    pub fn invalidate(&mut self) {
+        self.valid = false;
+    }
+
+    /// The captured texture, while it holds a capture: the drawable's viewport as
+    /// `glCopyTexSubImage2D` left it (bottom-up, full size). A rect-mode fill
+    /// ([`render_region`](Self::render_region)) is premultiplied and rect-sized, not this: it is
+    /// only ever drawn through [`draw_region`](Self::draw_region), and a caller of `tex()` meaning a
+    /// whole-viewport snapshot must not be handed one.
+    pub fn tex(&self) -> Option<c_uint> {
+        (self.valid && self.tex != 0).then_some(self.tex)
+    }
+
+    /// Copy the authored viewport from framebuffer 0. Call after the host page and before the
+    /// modal scrim: the cache is the stationary page, while the scrim is part of the live modal.
+    pub fn capture(&mut self) -> bool {
+        if self.off || blur_source_pass() {
+            return false;
+        }
+        if video_plane_refuses("FrameCache::capture") {
+            return false;
+        }
+        let (vx, vy, vw, vh) = plx_base::surface::viewport();
+        if vw <= 0 || vh <= 0 {
+            return false;
+        }
+        unsafe {
+            self.ensure_tex(vw, vh);
+            glBindTexture(GL_TEXTURE_2D, self.tex);
+            plx_base::diag::spans::span("cap", || glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, vx, vy, vw, vh));
+            if !self.checked {
+                self.checked = true;
+                let e = glGetError();
+                if e != GL_NO_ERROR {
+                    log(&format!(
+                        "frame cache: CopyTexSubImage error=0x{e:x} — cache off"
+                    ));
+                    self.off = true;
+                    self.valid = false;
+                    return false;
+                }
+            }
+        }
+        self.valid = true;
+        SNAPSHOT_THIS_FRAME.store(true, Ordering::Relaxed);
+        true
+    }
+
+    /// A texture of the size asked for (the viewport's for a whole-viewport snapshot, the rect's for
+    /// a region), re-made (and its FBO with it) when that size changed.
+    unsafe fn ensure_tex(&mut self, vw: c_int, vh: c_int) {
+        if self.tex == 0 || self.w != vw || self.h != vh {
+            if self.fbo != 0 {
+                glDeleteFramebuffers(1, &self.fbo);
+                self.fbo = 0;
+            }
+            delete_tex(self.tex);
+            self.tex = cap_tex(vw, vh);
+            self.w = vw;
+            self.h = vh;
+            self.checked = false;
+        }
+    }
+
+    /// The framebuffer object over [`tex`](Self::tex), made once per texture. `false` once it has
+    /// come back incomplete (latched: the cache then declines and the caller copies or draws live).
+    unsafe fn ensure_fbo(&mut self) -> bool {
+        if self.fbo != 0 {
+            return true;
+        }
+        let (w, h) = (self.w, self.h);
+        let mut f: c_uint = 0;
+        glGenFramebuffers(1, &mut f);
+        glBindFramebuffer(GL_FRAMEBUFFER, f);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, self.tex, 0);
+        let st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        glBindFramebuffer(GL_FRAMEBUFFER, plx_base::surface::default_fb());
+        if st != GL_FRAMEBUFFER_COMPLETE {
+            log(&format!("frame cache: FBO {w}x{h} incomplete (status=0x{st:x}) — copying instead"));
+            glDeleteFramebuffers(1, &f);
+            self.fbo_off = true;
+            return false;
+        }
+        self.fbo = f;
+        true
+    }
+
+    /// **Draw one RECT of the canvas into the cache**, a texture of exactly that rect's size, rather
+    /// than the whole viewport ([`render_into`](Self::render_into)). `rect` is `x, y, w, h` in whole
+    /// logical px. Whatever is then drawn lands in the texture at the position it would have on the
+    /// canvas: the target is reached with the mechanism the blur's direct source pass uses
+    /// ([`blur_snapshot_direct`]) at scale 1 - a NEGATIVE-ORIGIN viewport the size of the canvas, the
+    /// scissor box and [`CLIP_TARGET`] of the target (so a `Painter::clip` inside lands on the very
+    /// texels), and [`CULL_RECT`] (so a primitive outside it is refused) - and no shader changes.
+    /// The texture is cleared to TRANSPARENT black first, so it keeps what the frame's own blend
+    /// leaves over a transparent clear: premultiplied colour ([`draw_region`](Self::draw_region)
+    /// composites it as such).
+    ///
+    /// The guard puts back the viewport, the clip target, the cull rect, the scissor box and the clear
+    /// colour the frame held, and rebinds the frame's framebuffer; [`finish_region`](Self::finish_region)
+    /// closes the fill. `None` (the caller draws live): inside a blur source pass, on a video-plane
+    /// frame, with another page target already bound (a page being drawn into the modal host's
+    /// snapshot: `PageTarget`s do not nest), on a drawable that is not the canvas at scale 1, and
+    /// once the FBO has proved incomplete.
+    pub fn render_region(&mut self, rect: [c_int; 4]) -> Option<RegionTarget> {
+        if self.off || self.fbo_off || blur_source_pass() || backdrop::discovering() {
+            return None;
+        }
+        if video_plane_refuses("FrameCache::render_region") {
+            return None;
+        }
+        let (vx, vy, vw, vh) = plx_base::surface::viewport();
+        let [x, y, w, h] = rect;
+        if w <= 0 || h <= 0 || vx != 0 || vy != 0 || plx_base::surface::scale() != 1.0 {
+            return None;
+        }
+        if vw != SCR_W as c_int || vh != SCR_H as c_int || plx_base::surface::default_fb() != plx_base::surface::frame_fb() {
+            return None;
+        }
+        unsafe {
+            self.ensure_tex(w, h);
+            if !self.ensure_fbo() {
+                return None;
+            }
+            self.valid = false;
+            self.region = rect;
+            let page = plx_base::surface::PageTarget::enter(self.fbo);
+            let guard = RegionTarget {
+                _page: page,
+                scissor: LIVE_SCISSOR,
+                clip_target: CLIP_TARGET,
+                cull: CULL_RECT,
+                clear: CLEAR_COLOR,
+            };
+            // Authored y counts down from the canvas top and GL's rows count up, so the rect's bottom
+            // edge sits `vh - y - h` rows above the canvas bottom, which must land on the target's row 0.
+            let (ox, oy) = (-x, -(vh - y - h));
+            glViewport(ox, oy, vw, vh);
+            scissor_box(0, 0, w, h);
+            CLIP_TARGET = Some((ox, oy, 1.0, w, h));
+            CULL_RECT = Some([x as f32, y as f32, w as f32, h as f32]);
+            set_clear_color(0.0, 0.0, 0.0, 0.0);
+            glClear(GL_COLOR_BUFFER_BIT);
+            Some(guard)
+        }
+    }
+
+    /// Close a [`render_region`](Self::render_region): the frame's state is back and the texture
+    /// holds the rect.
+    pub fn finish_region(&mut self, target: RegionTarget) {
+        drop(target);
+        self.valid = true;
+    }
+
+    /// The rect a [`render_region`](Self::render_region) filled, `[x, y, w, h]` logical px (all zero
+    /// for a whole-viewport cache).
+    pub fn region(&self) -> [c_int; 4] {
+        self.region
+    }
+
+    /// Put the region on the frame as ONE textured quad with its top-left at `at`, `tint` being the
+    /// PREMULTIPLIED group tint `[g, g, g, a]` (`g` = the colour gain times the alpha): the texture
+    /// holds `(rgb * a, a)`, so the blend is `(ONE, ONE_MINUS_SRC_ALPHA)` ([`PremultipliedBlend`]) and the
+    /// tint scales colour AND alpha. Unlike [`draw_alpha`](Self::draw_alpha) this is page CONTENT, not
+    /// the page itself: it does not lift [`page_frozen`], so a frozen host refuses it as it refuses
+    /// every other primitive.
+    pub fn draw_region(&self, at: [f32; 2], tint: [f32; 4]) -> bool {
+        if !self.valid || self.tex == 0 || self.region[2] <= 0 {
+            return false;
+        }
+        let (w, h) = (self.region[2] as f32, self.region[3] as f32);
+        let _blend = PremultipliedBlend::enter();
+        draw_tex_core(
+            Class::Image, self.tex, at[0], at[1], w, h, frame_cache_uv(), 0.0, tint.as_ptr(), 0.0,
+            NO_RIM.as_ptr(), w * 0.5, h * 0.5, 0.0, NO_RIM.as_ptr(), 0.0, 0.0, None,
+        );
+        true
+    }
+
+    /// **Draw the page INTO the cache rather than copying it out afterwards.** Binds an FBO over
+    /// the cache's texture as the page's target ([`plx_base::surface::PageTarget`]) and returns the
+    /// guard; the page is then drawn exactly as it would be to the frame, and
+    /// [`rendered`](Self::rendered) closes it and puts it on the frame as one quad.
+    ///
+    /// Why, when [`capture`](Self::capture) already works: a `glCopyTexSubImage2D` of framebuffer 0
+    /// in the MIDDLE of a frame makes a tiler resolve the whole frame to memory so it can be read,
+    /// and then reload every tile of it when the modal draws on top. Drawn into the texture, the
+    /// page is written once, where it is needed, and the frame gets it back as the same quad every
+    /// later frame of the modal is served with.
+    ///
+    /// `None` — the caller copies instead — inside a blur source pass, on a video-plane frame, on
+    /// a letterboxed drawable (the texture is the viewport's size and would not line up with a
+    /// viewport that does not start at the origin), and once the FBO has proved incomplete.
+    pub fn render_into(&mut self) -> Option<plx_base::surface::PageTarget> {
+        if self.off || self.fbo_off || blur_source_pass() {
+            return None;
+        }
+        if video_plane_refuses("FrameCache::render_into") {
+            return None;
+        }
+        let (vx, vy, vw, vh) = plx_base::surface::viewport();
+        if vw <= 0 || vh <= 0 || vx != 0 || vy != 0 {
+            return None;
+        }
+        unsafe {
+            self.ensure_tex(vw, vh);
+            if !self.ensure_fbo() {
+                return None;
+            }
+            self.valid = false;
+            self.region = [0; 4];
+            let target = plx_base::surface::PageTarget::enter(self.fbo);
+            // A fresh pass over the texture: a clear is what tells a tiler it need not load the
+            // previous capture's tiles first. The page's own `frame_clear` lays its ground next.
+            set_clear_color(0.0, 0.0, 0.0, 0.0);
+            glClear(GL_COLOR_BUFFER_BIT);
+            Some(target)
+        }
+    }
+
+    /// Close a [`render_into`](Self::render_into): the frame's framebuffer is bound again, the
+    /// texture holds the page, and the page goes onto the frame from it as one quad.
+    pub fn rendered(&mut self, target: plx_base::surface::PageTarget) {
+        self.finish_render(target);
+        self.draw();
+    }
+
+    /// Finish a capture without compositing it yet. Page transitions clear the app ground and
+    /// apply their alpha only to this texture, never to the page rendered into it.
+    pub fn finish_render(&mut self, target: plx_base::surface::PageTarget) {
+        drop(target);
+        self.valid = true;
+        SNAPSHOT_THIS_FRAME.store(true, Ordering::Relaxed);
+    }
+
+    pub fn resident_bytes(&self) -> usize {
+        let one = |t: c_uint, w: c_int, h: c_int| if t == 0 { 0 } else { w as usize * h as usize * 4 };
+        one(self.tex, self.w, self.h) + one(self.prev, self.prev_w, self.prev_h)
+    }
+
+    /// Draw the cached viewport across the authored canvas. A framebuffer copy is bottom-up;
+    /// [`frame_cache_uv`] is the one orientation rule shared by every future owner. For a
+    /// whole-viewport snapshot ONLY: a rect-mode fill ([`render_region`](Self::render_region)) is
+    /// drawn by [`draw_region`](Self::draw_region), never this.
+    ///
+    /// **It lifts [`page_frozen`] around its own quad.** This is the one draw in the app that
+    /// exists BECAUSE the page is frozen, so it cannot be subject to the refusal — and lifting it
+    /// here rather than relying on the caller arming the freeze afterwards removes an ordering trap
+    /// that would show up as a blank screen with no error anywhere.
+    pub fn draw(&self) -> bool {
+        self.draw_alpha(1.0)
+    }
+
+    pub fn draw_alpha(&self, alpha: f32) -> bool {
+        if !self.valid || self.tex == 0 {
+            return false;
+        }
+        let was = set_page_frozen(false);
+        let uv = frame_cache_uv();
+        let tint = tokens::with_a(CAP_TINT, alpha);
+        draw_tex_core(
+            Class::Image,
+            self.tex,
+            0.0,
+            0.0,
+            SCR_W,
+            SCR_H,
+            uv,
+            0.0,
+            tint.as_ptr(),
+            0.0,
+            NO_RIM.as_ptr(),
+            SCR_W * 0.5,
+            SCR_H * 0.5,
+            0.0,
+            NO_RIM.as_ptr(),
+            0.0,
+            0.0,
+            None,
+        );
+        set_page_frozen(was);
+        true
+    }
+}
+
+#[inline]
+fn frame_cache_uv() -> [f32; 4] {
+    [0.0, 1.0, 1.0, -1.0]
+}
+
+/// A [`FrameCache::render_region`] in progress: dropping it puts back everything the fill borrowed
+/// (the viewport, [`CLIP_TARGET`], [`CULL_RECT`], the scissor box, the clear colour) and rebinds the
+/// frame's framebuffer. `BLUR_IN_PASS` is never touched: the region is drawn at full resolution, as
+/// the frame is.
+pub struct RegionTarget {
+    _page: plx_base::surface::PageTarget,
+    scissor: Option<[c_int; 4]>,
+    clip_target: Option<(c_int, c_int, f32, c_int, c_int)>,
+    cull: Option<[f32; 4]>,
+    clear: [f32; 4],
+}
+
+impl Drop for RegionTarget {
+    fn drop(&mut self) {
+        // SAFETY: render thread, current context, like every other restore in this module.
+        unsafe {
+            CLIP_TARGET = self.clip_target;
+            CULL_RECT = self.cull;
+            let (vx, vy, vw, vh) = plx_base::surface::viewport();
+            glViewport(vx, vy, vw, vh);
+            match self.scissor {
+                Some(b) => scissor_box(b[0], b[1], b[2] - b[0], b[3] - b[1]),
+                None => scissor_off(),
+            }
+            let [r, g, b, a] = self.clear;
+            set_clear_color(r, g, b, a);
+        }
+    }
+}
+
+/// **The one texture slot behind [`region_paint`]**, as a pure table: no GL, so the rule is pinned on
+/// the host by the very function the renderer calls ([`serve`](Self::serve)). It remembers the key of
+/// the picture the texture holds. Both Under posters pages ask for the SAME picture (a page whose art
+/// is still dissolving has no key and draws live, it never asks for a different one), so one slot
+/// serves a push and a pop; a picture that changes is a new key and one fill.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RegionSlot {
+    key: Option<u64>,
+}
+
+impl RegionSlot {
+    pub const fn new() -> Self {
+        Self { key: None }
+    }
+
+    /// **The slot step.** `key` is the picture asked for. The key the slot holds is `draw`n from the
+    /// texture; any other `fill`s the texture first (`fill` returns whether it landed) and then
+    /// `draw`s. `state` is whatever the two touch (the texture), lent to each in turn. A fill that did
+    /// not land leaves the slot empty, so the next ask fills again rather than serving a texture that
+    /// holds something else. Returns whether the picture was drawn.
+    pub fn serve<S>(
+        &mut self,
+        state: &mut S,
+        key: u64,
+        fill: impl FnOnce(&mut S) -> bool,
+        draw: impl FnOnce(&S) -> bool,
+    ) -> bool {
+        if self.key != Some(key) {
+            self.key = None;
+            if !fill(state) {
+                return false;
+            }
+            self.key = Some(key);
+        }
+        draw(state)
+    }
+
+    /// The slot gave its texture back: it holds nothing now.
+    pub fn forget(&mut self) {
+        self.key = None;
+    }
+}
+
+/// The slot and its texture, on the render thread (a GL resource, like [`FrameCache`] itself).
+struct RegionSet {
+    slot: RegionSlot,
+    cache: FrameCache,
+    /// Did any page ask for the region since the last frame end? A frame that asked for none gives the
+    /// texture back ([`region_frame_end`]).
+    asked: bool,
+}
+
+thread_local! {
+    static REGION: std::cell::RefCell<RegionSet> = const {
+        std::cell::RefCell::new(RegionSet { slot: RegionSlot::new(), cache: FrameCache::new(), asked: false })
+    };
+    #[cfg(any(test, feature = "test-support"))]
+    static REGION_ASKS: std::cell::Cell<(u32, u32)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+/// Test-support: the asks [`region_paint`] has had on this thread, ever, as `(keyed, unkeyed)`. Counted
+/// at the door, before any gate, so a host test (no GL: every ask declines) can still say what a
+/// caller ASKED for - a picture it named, or one it was not ready to name. Two readings bracket a span.
+#[cfg(any(test, feature = "test-support"))]
+pub fn region_asks() -> (u32, u32) {
+    REGION_ASKS.with(|n| n.get())
+}
+
+/// The whole-pixel canvas rect a region of `rect` (`x, y, w, h` logical px) is drawn into: the rect
+/// grown by [`REGION_SLACK`] on every side, outward to whole pixels.
+fn region_extent(rect: [f32; 4]) -> [c_int; 4] {
+    let x0 = (rect[0] - REGION_SLACK).floor();
+    let y0 = (rect[1] - REGION_SLACK).floor();
+    let x1 = (rect[0] + rect[2] + REGION_SLACK).ceil();
+    let y1 = (rect[1] + rect[3] + REGION_SLACK).ceil();
+    [x0 as c_int, y0 as c_int, (x1 - x0) as c_int, (y1 - y0) as c_int]
+}
+
+/// The margin a region keeps around the rect it was asked for: the anti-aliasing bleed and rim of a
+/// primitive painted just outside its nominal rect, and a transparent texel for the bilinear taps of
+/// a quad drawn at a fractional position to read at its edge.
+const REGION_SLACK: f32 = 4.0;
+
+#[inline]
+fn region_mix(key: u64, extent: [c_int; 4]) -> u64 {
+    extent.iter().fold(key, |h, v| (h ^ (*v as u32 as u64)).wrapping_mul(0x0000_0100_0000_01b3))
+}
+
+/// **Paint a rect of the page once, then serve it as one textured quad.** `key` names the picture:
+/// it must change with everything `paint` draws (`None`: the picture is not settled, draw it live).
+/// `rect` is where the picture stands on the PAGE (`x, y, w, h` logical px), `shift` the painter's
+/// translation of the page this frame, and `tint` the group tint ([`FrameCache::draw_region`]).
+///
+/// The key the texture holds is one quad. Another key draws `paint` into the texture ONCE
+/// ([`FrameCache::render_region`]; `paint` then draws as if for the canvas, with an identity painter)
+/// and puts that on the frame. Every call, keyed or not, counts as the frame asking for the region:
+/// a frame that asks for none gives the texture back ([`region_frame_end`]). Returns whether the region
+/// was drawn: `false` means `paint` did NOT run and the caller draws it live - with the cache switched
+/// off, with no key, with no GL, on a frozen page, in a blur or discovery pass, in another page target,
+/// under a clip the caller holds (a scissor is up), or when the fill declined.
+///
+/// **`paint` must draw no glass and no blur.** A glass or blur pass ends by rebinding
+/// [`plx_base::surface::default_fb`] and resetting the viewport, [`CLIP_TARGET`] and the scissor to the
+/// frame's: that would pull the rest of `paint` out of the region's texture and onto the frame. A
+/// plain page's rects, rings, textures, cards and text are fine; the fill asserts (debug builds) that
+/// no such pass ran inside it.
+pub fn region_paint(
+    key: Option<u64>,
+    rect: [f32; 4],
+    shift: [f32; 2],
+    tint: [f32; 4],
+    paint: &mut dyn FnMut(),
+) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    REGION_ASKS.with(|n| {
+        let (keyed, unkeyed) = n.get();
+        n.set(if key.is_some() { (keyed + 1, unkeyed) } else { (keyed, unkeyed + 1) });
+    });
+    REGION.with(|cell| {
+        let Ok(mut set) = cell.try_borrow_mut() else { return false };
+        set.asked = true;
+        let Some(key) = key else { return false };
+        if !region_cache() || page_frozen() || blur_source_pass() || backdrop::discovering() {
+            return false;
+        }
+        // A clip the caller holds (a scrolling list's `ClipScope`, a bare `Painter::clip`) is a scissor on
+        // the frame: the fill would intersect it into the texture's own box and bake a clip that is then
+        // served at every offset. Both spellings go through `clip_set`, so `LIVE_SCISSOR` sees them.
+        if unsafe { LIVE_SCISSOR }.is_some() {
+            return false;
+        }
+        // No image shader, no GL context (a host test): nothing here may call GL.
+        if unsafe { IPROG } == 0 || plx_base::surface::default_fb() != plx_base::surface::frame_fb() {
+            return false;
+        }
+        let extent = region_extent(rect);
+        let key = region_mix(key, extent);
+        let mut at = [extent[0] as f32 + shift[0], extent[1] as f32 + shift[1]];
+        if region_snap() {
+            at = [snap(at[0]), snap(at[1])];
+        }
+        let set = &mut *set;
+        set.slot.serve(
+            &mut set.cache,
+            key,
+            |cache| {
+                let Some(target) = cache.render_region(extent) else { return false };
+                let passes = region_glass_passes();
+                paint();
+                debug_assert_eq!(passes, region_glass_passes(), "a region fill drew a glass or blur pass");
+                cache.finish_region(target);
+                log(&format!(
+                    "region cache: fill key {key:016x} {}x{} at ({}, {})",
+                    extent[2], extent[3], extent[0], extent[1]
+                ));
+                true
+            },
+            |cache| cache.draw_region(at, tint),
+        )
+    })
+}
+
+/// A frame ended: if no page asked for the region during it, the texture goes back to the driver
+/// (1.4 MiB that nothing is showing), and the next ask fills again. Called once per presented frame,
+/// beside the other frame-end hooks. A push, a pop and a transition between the two pages ask on every
+/// frame (one page or the other always draws), so it never frees mid-transition.
+pub fn region_frame_end() {
+    REGION.with(|cell| {
+        let Ok(mut set) = cell.try_borrow_mut() else { return };
+        if !std::mem::replace(&mut set.asked, false) && set.cache.resident_bytes() > 0 {
+            let set = &mut *set;
+            set.cache.release();
+            set.slot.forget();
+        }
+    });
+}
+
+/// Bytes the region's texture holds right now, for the render set's ledger.
+pub fn region_resident_bytes() -> usize {
+    REGION.with(|cell| cell.try_borrow().map_or(0, |set| set.cache.resident_bytes()))
+}
+
+/// Glass and blur passes begun since boot, read by the region fill's debug check.
+fn region_glass_passes() -> u32 {
+    BLUR_SNAPSHOTS.load(Ordering::Relaxed)
+}
+
+/// [`draw_tex`] plus the focus edge-sheen baked into the same pass (rim only, no shadow), and now
+/// the same lit-glass edge every other tile gets: `f` is the caller's pop factor (0 at rest). Used
+/// for the profile chip avatar.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_tex_stroked(
+    tex: c_uint,
+    crop: [f32; 4],
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    tint: *const f32,
+    rimw: f32,
+    rimcol: *const f32,
+    f: f32,
+) {
+    draw_tex_impl(
+        tex,
+        crop,
+        x,
+        y,
+        w,
+        h,
+        radius,
+        tint,
+        rimw,
+        rimcol,
+        0.0,
+        0.0,
+        NO_RIM.as_ptr(),
+        f,
+        0.0,
+        None,
+    );
+}
+
+/// The full card composite: texture + edge sheen (`rimw`/`rimcol`) + soft drop-shadow
+/// (`pad`/`shblur`/`shcol`, shifted down by `dy` past `f == 0` — see `fs_img.frag`'s FOCUS note) +
+/// the focused tile's lit-glass edge (`f`, the same pop factor the shadow already grows with), one
+/// pass. Posters and circles use this entry point; episode stills can also fold their label ground
+/// through [`draw_tex_carded_still`]. Both share the compositor.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_tex_carded(
+    tex: c_uint,
+    crop: [f32; 4],
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    tint: *const f32,
+    rimw: f32,
+    rimcol: *const f32,
+    pad: f32,
+    shblur: f32,
+    shcol: *const f32,
+    f: f32,
+    dy: f32,
+) {
+    note_card(x, y, w, h, pad, dy);
+    draw_tex_impl(tex, crop, x, y, w, h, radius, tint, rimw, rimcol, pad, shblur, shcol, f, dy, None);
+}
+
+/// `pad`/`dy` mirror [`draw_tex_impl`]'s own asymmetric-inflation formula so this diagnostic checks
+/// the actual drawn edges, not the (bigger, symmetric) `pad` alone — otherwise a risen shadow whose
+/// narrower top/side margins in fact clear the screen would still be counted as a cull-miss.
+fn note_card(x: f32, y: f32, w: f32, h: f32, pad: f32, dy: f32) {
+    // Not during a blur source pass: these are read once a frame by the framedrop tool as "cards
+    // the panel composited", and a second page draw would report twice the real number.
+    if !blur_source_pass() {
+        CARD_CT.fetch_add(1, Ordering::Relaxed);
+    }
+    let dy = dy.max(0.0);
+    let (sides, top, bottom) = (pad - dy, pad - 2.0 * dy, pad);
+    // the inflated (shadow) quad crossing a screen edge ⇒ some shadow fragments are drawn off-screen
+    // (viewport-clipped, but still rasterized). Counts partial+full; fully-off-screen ⇒ a cull miss.
+    if x - sides < 0.0 || y - top < 0.0 || x + w + sides > SCR_W || y + h + bottom > SCR_H {
+        if !blur_source_pass() {
+            CARD_OFF.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+fn still_fusion_eligible(tex: c_uint, tint: [f32; 4], available: bool) -> bool {
+    tex != 0 && tint == [1.0; 4] && available
+}
+
+/// The blend of a draw whose fragment colour is already PREMULTIPLIED: `(ONE, ONE_MINUS_SRC_ALPHA)`.
+/// The still program emits premultiplied RGB, a region cache's quad ([`FrameCache::draw_region`])
+/// samples a texture that holds `(rgb * a, a)`, and so does any texture [`draw_tex_premultiplied`] is
+/// handed. Restore the ordinary blend even during unwinding; no caller and no following text/overlay
+/// draw inherits this primitive's private state.
+struct PremultipliedBlend;
+impl PremultipliedBlend {
+    fn enter() -> Self {
+        unsafe { glBlendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA); }
+        Self
+    }
+}
+impl Drop for PremultipliedBlend {
+    fn drop(&mut self) {
+        unsafe { glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA); }
+    }
+}
+
+/// Fold an opaque still's label ground into its card pass. False preserves the two-pass path.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_tex_carded_still(
+    tex: c_uint, crop: [f32; 4], x: f32, y: f32, w: f32, h: f32, radius: f32, tint: [f32; 4],
+    rimw: f32, rimcol: [f32; 4], pad: f32, shblur: f32, shcol: [f32; 4],
+    band: f32, scrim: [f32; 4], f: f32, dy: f32,
+) -> bool {
+    let image = unsafe { STILL_IMAGE };
+    // `STILL_IMAGE` (`VS_STILL`/`FS_STILL`) never carries `PLX_FOCUS` — only `PLX_STILL_GROUND` —
+    // so it has no lit-glass/risen-shadow code at all, on purpose: a THIRD program crossing focus
+    // with still-fusion was rejected in favour of two passes for the (at most one) card that is
+    // both. `f > 0.0` therefore returns false here so the caller keeps its ordinary card path
+    // (which reaches for `FOCUS_IMAGE`) plus a separate still-ground pass, rather than silently
+    // drawing a focused still with no glow/shadow at all.
+    if !still_fusion_eligible(tex, tint, image.is_some()) || band <= 0.0 || w <= 0.0 || h <= 0.0
+        || radius < 0.5 || f > 0.0
+        || crate::overdraw::masked(Class::Card) || crate::overdraw::masked(Class::Grad) {
+        return false;
+    }
+    let (program, uniforms, loc_band, loc_col) = image.expect("eligible specialization");
+    use_prog(program);
+    let band = band.min(h);
+    unsafe {
+        glUniform2f(loc_band, 1.0 / band, h * 0.5 - band);
+        glUniform4fv(loc_col, 1, scrim.as_ptr());
+    }
+    note_card(x, y, w, h, pad, dy);
+    let _blend = PremultipliedBlend::enter();
+    draw_tex_impl(tex, crop, x, y, w, h, radius, tint.as_ptr(), rimw, rimcol.as_ptr(), pad,
+        shblur, shcol.as_ptr(), f, dy, Some((program, uniforms)));
+    true
+}
+
+use plx_base::eventlog::log;
+
+// ============================== backdrop blur ================================
+// The frosted ground under a popover panel: a blurred snapshot of what the frame had drawn BEHIND
+// it, sampled through the panel's own rounded rect. `track_menu.rs` carried "no true backdrop blur
+// on the GLES plane" as a standing assumption for a year; this is what replaces it.
+//
+// Four facts shape the whole design.
+//
+// 1. **Snapshots are cached.** A popover over a still page captures on open and then costs one
+//    textured quad per drawn frame. A surface over a MOVING page opts into
+//    `widgets::Glass::DYNAMIC_BACKDROP`; the frame's layer/region mechanism refreshes its
+//    source on every changed present and otherwise reuses it.
+// 2. **The capture is MID-FRAME.** `Painter`'s primitives are immediate GL calls, so the default
+//    framebuffer already holds exactly the prepared page with its page-drawn overlay scrim
+//    at the moment the panel is about to draw.
+//    That is the only reason no render-target restructuring is needed: the "background" is a
+//    definition of *when*, not of *what*.
+//    **A tested and REJECTED hypothesis lives here**, recorded because it is the obvious next idea
+//    and it is wrong on this part: that a mid-frame framebuffer read is expensive *because it is
+//    mid-frame* — a tiler must resolve the frame's deferred passes before the copy can see them,
+//    so moving the snapshot beside `capture::tick` (after the last draw, where the swap pays that
+//    flush anyway) should have been free. Built and measured on the dev set: **48.1 ms deferred vs
+//    45.3 ms mid-frame** — no difference, so the position costs nothing and the simpler code is the
+//    one to keep. The cost is elsewhere; see the measurements on [`blur_snapshot`].
+// 3. **Passes are a large part of the budget.** Two exact-2x reductions, two quarter-size Kawase
+//    passes and one half-size up-filter make five render passes. Region limiting cuts their
+//    fragments, but it does not make a small glass ornament free. The blur radius comes mostly
+//    from the downsample rather than from kernel width; `fs_blur.frag` argues the tap count.
+//    **Those figures are the 1:1 television**; every size here is derived from
+//    `surface::viewport()` at first use, not written down. The simulator found out why within an
+//    hour of this landing: its drawable is HALF the authored canvas, and a chain hard-coded to
+//    1920x1080 grabbed a rect that does not exist, then sampled a UV window that mapped to no part
+//    of the screen. On a 1:1 surface both bugs are invisible — which is the whole class of thing
+//    the desktop simulator is for. The chain is built once because the drawable never changes
+//    after `surface::probe` (no resize on either platform); a surface that could would owe this an
+//    invalidation.
+// 4. **Every Midgard trap the capture chain documents applies here**, because it is the same
+//    machinery: NPOT targets REQUIRE CLAMP_TO_EDGE + LINEAR (core ES2 samples them opaque black
+//    under the defaults, with no GL error), `glClear` before each pass spares the tile
+//    preserve-load, and RGBA FBO renderability is implementation-defined so completeness is
+//    checked and the feature LATCHES OFF rather than crashing. A latched-off blur draws nothing at
+//    all and the panel keeps its own opaque ground — the fallback is the old look, not a hole.
+//
+// Deliberately NOT used by the player's panels (track/chapters/info/overflow). There the frame
+// behind the popover is mostly alpha-0 punch-through to the hardware video plane, which GL cannot
+// read: blurring it would smear transparency, not video. `docs/` and the player HUD's own notes
+// say why that plane is unreachable; nothing here changes it.
+
+/// How many exact halvings the CAPTURE path takes before the blur taps — and it is not a knob. It
+/// is [`BLUR_DIRECT_SCALE`] written as a count of halvings, asserted below.
+///
+/// **One material, two paths.** The direct path renders the page at 1/4; the capture path has to
+/// arrive at the same place. They publish into one snapshot and one shader samples it, and which
+/// path served a given surface is not a property of its material: an independent band uses
+/// the direct prefix, while a band over lower glass captures that glass's visible composite.
+/// The source scale belongs to the material, not to a path — a surface whose blur depends on who took the snapshot
+/// is not a material at all.
+///
+/// **They drifted, and closing that is what this constant is for.** It went 2 -> 1 the day after the
+/// direct path became the shipping one, in a commit whose subject and every measurement was the tab
+/// BAR — which by then rendered its own source at 1/4 and did not read this at all. What it actually
+/// changed was every CACHED popover: a half-resolution source, tap offsets that are in TEXELS and so
+/// halved with it, and no up-filter at all, because the up pass was gated on `BLUR_REDUCTIONS >= 2`.
+/// That is not a lighter blur. It is a 2x bilinear magnification of a half-res image with the
+/// reconstruction pass switched off, and it reads as exactly what it is — measured on the
+/// `checker:24` ground with the item menu over it, the pattern came through the panel as a lattice
+/// of dots, and through the direct path's chain, same frame and same shader, it is gone.
+///
+/// Why 1/4 is the matched sampling rate for this kernel is on [`BLUR_DIRECT_SCALE`]. STRUCTURE —
+/// how much of the page survives, which is the design question this constant used to carry — is
+/// owned by [`BLUR_TAPS`], which both paths read at the same source scale and which sweeps without
+/// a rebuild. Measured on `hbars` through this chain: a 24px period keeps 9% of the page's
+/// modulation, 48px 17%, 128px 65%.
+const BLUR_REDUCTIONS: usize = 2;
+/// The capture path's halvings must land on the direct path's source scale — see
+/// [`BLUR_REDUCTIONS`]. A compile-time equality rather than a comment, because the failure it
+/// guards has no symptom that points at it: two surfaces wearing one material, blurred differently,
+/// according to which path happened to take the snapshot.
+const _: () = assert!(
+    1usize << BLUR_REDUCTIONS == BLUR_DIRECT_SCALE as usize,
+    "the capture path must halve down to the direct path's source scale",
+);
+/// Kawase tap offsets, in TEXELS of the final target, one per pass. Widening between passes is
+/// what buys a wide penumbra from four taps. In texels rather than pixels on purpose — the target
+/// scales with the drawable, so the blur covers the same FRACTION of the screen on a half-size
+/// surface instead of shrinking.
+///
+/// **They were 1.5/3.5 and were laddered on the television rather than inherited.** Three rungs
+/// over the same static hero — a shelf of captioned boxes, which is a page of small high-contrast
+/// TEXT and therefore the hardest thing a backdrop can be asked to pass. What the ladder showed is
+/// the finding this whole material turned on: **the bar's own labels are equally legible at every
+/// rung**. Legibility is bought by the SCRIM, not by the blur — so the wide taps were paying for
+/// nothing and spending the material, and heavy blur *plus* heavy scrim is precisely how a glass
+/// bar collapses into a featureless grey slab sitting on top of the page.
+///
+/// At 0.7/1.5 the shelf's verticals read through the interior and the cap visibly squeezes a box
+/// caption into its arc; at 1.5/3.5 both are gone.
+///
+/// **Then 0.7/1.5 was narrowed again to 0.35/0.75, and the reason is that the first comparison was
+/// against the wrong reference.** The scale-matched measurement that blessed 0.7/1.5 was taken
+/// against the macOS 26 tab bar through GlassLab, and matched it almost exactly (0.264 of a stripe
+/// period against its 0.281). But this app's idiom is the TELEVISION, and the references that
+/// matter are iOS and tvOS, where the material is plainly lighter: a phone number is readable
+/// through the Phone app's tab bar, and a tvOS pill leaves the window mullion behind it clearly
+/// visible. Those are two different materials wearing one name, and matching the desktop one is
+/// matching the wrong half.
+///
+/// Priced at the scale that decides it — a letter stem at 1080p is a period of roughly 12–16px, so
+/// that is where "can you read the page through the glass" is actually settled. Laddered over one
+/// hero, held identical across all four boots (asserted, not assumed — the Home hero rotates on its
+/// own clock and had already invalidated one comparison this day):
+///
+/// | taps | 12px | 16px | 24px |
+/// |---|---|---|---|
+/// | 0.7/1.5 | 0.5% | 15.0% | 26.1% |
+/// | **0.35/0.75** | 9.2% | **30.5%** | 40.8% |
+/// | 0.22/0.5 | 15.3% | 39.2% | 43.2% |
+///
+/// 0.22/0.5 is the floor rather than the target: there the hero's individual hairs and the star
+/// field behind it come through, and the bar stops reading as a frosted material and becomes
+/// tinted glass. `/tmp/plxnative-blurtaps` walks the ladder without a rebuild. Note the offsets are no longer half-texel
+/// aligned, which the previous version of this note called for so GL_LINEAR would resolve each tap
+/// as an exact 2x2 box — a real property, and a smaller one than what it costs: the alignment buys
+/// a marginally cleaner kernel, and structure at the scale of a letterform is the entire effect.
+const BLUR_TAPS: [f32; 2] = [0.35, 0.75];
+/// `/tmp/plxnative-blurtaps=<a>,<b>` — those offsets, swept.
+///
+/// The taps are now the WHOLE of "how much structure survives" that anyone gets to tune — the
+/// source scale is pinned to the direct path's, see [`BLUR_REDUCTIONS`] — and until this existed
+/// neither half could be moved without a rebuild, so a ladder of blur weights cost one
+/// cross-compile and one deploy per rung. That is why these were inherited rather than chosen for
+/// as long as they were. Read once at boot, like every other sweep here.
+///
+/// Widening is asserted by the chain's own shape test, so a rung that narrows the second tap past
+/// the first is refused rather than silently reordered.
+#[cfg(feature = "devtriggers")]
+fn blur_taps() -> [f32; 2] {
+    static SEEN: std::sync::OnceLock<[f32; 2]> = std::sync::OnceLock::new();
+    *SEEN.get_or_init(|| {
+        let Some(v) = plx_base::devtrig::read("blurtaps") else {
+            return BLUR_TAPS;
+        };
+        let mut it = v.split(',').map(|t| t.trim().parse::<f32>());
+        match (it.next(), it.next()) {
+            (Some(Ok(a)), Some(Ok(b))) if a > 0.0 && b > a => {
+                plx_base::eventlog::log(&format!("glass: blur taps swept to {a},{b}"));
+                [a, b]
+            }
+            _ => {
+                plx_base::eventlog::log("glass: blurtaps ignored (want <a>,<b> with 0 < a < b)");
+                BLUR_TAPS
+            }
+        }
+    })
+}
+#[cfg(not(feature = "devtriggers"))]
+fn blur_taps() -> [f32; 2] {
+    BLUR_TAPS
+}
+/// The UP pass's tap offset, in texels of the target it writes.
+///
+/// **This pass is what stops the result looking like enlarged pixels rather than like blur**, and
+/// its absence was visible on the television before anything else was. Reducing to a quarter and
+/// then letting the panel draw magnify that in ONE bilinear tap is not a blur at all: bilinear
+/// magnification is piecewise linear, so the texel lattice survives as faint facets and creases,
+/// and the eye reads those as an upscaled image. No number of extra passes DOWN fixes it — the
+/// artefact is created by the magnification, after all of them.
+///
+/// So the chain ends by going back UP one level through the same 4-tap filter (this is the "dual
+/// filter" half that was missing). The stored snapshot is then half-res and genuinely smooth, and
+/// the per-frame panel draw stays exactly one bilinear tap — the up-filter cost is paid only when
+/// the cached snapshot is refreshed, not while that snapshot is reused.
+///
+/// **"Of the target" is load-bearing arithmetic, and it held by accident for a day.** `u_texel` is
+/// a UV offset into the SOURCE, and both passes spell this `BLUR_UP_TAP / c.mw` — the target's
+/// width — which is the documented radius only because the source is exactly HALF the target
+/// (quarter-res `a` into half-res `mid`): 1.25 target texels is 0.625 source texels is the same
+/// distance on screen. While [`BLUR_REDUCTIONS`] was 1 the tap targets were allocated at half
+/// canvas, i.e. the same size as `mid`, and the identity broke silently: the direct path's up pass
+/// ran at 1.25 SOURCE texels — twice this — so the tab bar was softer than this constant says, and
+/// the tap ladder that shipped on 2026-08-20 was judged through it. The const assertion beside
+/// [`BLUR_REDUCTIONS`] is what now makes the half-of-target relation impossible to break. If the
+/// bar ever wants that extra softness back, it is this number that moves, deliberately: 2.5.
+const BLUR_UP_TAP: f32 = 1.25;
+const BLUR_PASS_TINT: [f32; 4] = [1.0, 1.0, 1.0, 1.0]; // untinted blit between targets
+
+/// How many passes the capture chain runs, and therefore which way up the snapshot is stored: every
+/// pass flips row order once. The two reductions, the taps, and the up pass back to half res.
+///
+/// **One expression, deliberately.** It was inlined in two places and they disagreed the instant the
+/// up pass was added — one said four passes, the other five — which inverted the lens's v axis while
+/// leaving the sampling window correct. Nothing warns, and on a symmetric backdrop nothing shows.
+#[inline]
+const fn blur_passes() -> usize {
+    BLUR_REDUCTIONS + BLUR_TAPS.len() + 1 // the reductions, the taps, then back up one level
+}
+
+/// The same count for [`blur_snapshot_direct`], which shares the taps and the up pass but replaces
+/// the grab and every reduction with one scene render. That render is the chain's ORIGIN, not a
+/// pass over an existing texture, and it lands bottom-up like the grab it stands in for — so this
+/// counts what happens AFTER it, and both paths' parities are read the same way.
+#[inline]
+const fn blur_direct_passes() -> usize {
+    BLUR_TAPS.len() + 1 // the taps, then always back up one level
+}
+/// Is the CAPTURE path's finished snapshot stored bottom-up?
+///
+/// **The parity of [`blur_passes`], counting from the grab.** `glCopyTexSubImage2D` leaves the grab
+/// bottom-up (framebuffer row 0 is the screen's bottom), and every pass in the chain turns the image
+/// over exactly once, so an EVEN number of passes hands the snapshot back the way it arrived.
+///
+/// **Every pass, including the taps — that is the part worth reading twice.** It is tempting to
+/// argue that only the reductions flip, because they go through `draw_tex_core` in AUTHORED
+/// coordinates while the taps "just blit a unit quad". They do not: `BPROG` is linked against
+/// `VS_IMG` (see [`blur_lazy_init`]) with `u_trect = (0, 0, SCR_W, SCR_H)` and a POSITIVE
+/// `u_uvrect.w`, which is geometrically the same authored full-screen quad the reductions draw, and
+/// `vs_img.vert` ends in `gl_Position.y = -ndc.y` unconditionally. The taps carry the flip too.
+///
+/// **[`blur_snapshot_direct`] is the proof, not this comment.** That path is the shipping one and is
+/// device-verified, it runs two taps and one up pass over a scene render that lands bottom-up, and
+/// it states the result is top-down. Three flips from bottom-up is top-down only if the taps flip.
+///
+/// This function briefly read `BLUR_REDUCTIONS % 2 == 1` instead. The two models agree at
+/// `BLUR_REDUCTIONS = 2` and disagree at 1, and the knob had just been moved to 1 — so the capture
+/// path called a top-down snapshot bottom-up and [`blur_uv_rect`] mirrored every cached backdrop.
+/// It was masked in ordinary use by a second defect: `blur_snapshot_direct` left `c.out` at `mid`,
+/// which made the capture path run a FOURTH pass it was never meant to run, and four flips really
+/// are bottom-up. The two had to be fixed together, and the mask is why fixing either one alone
+/// looked like a regression. What it left unmasked was a fresh boot before any direct pass, and
+/// every frame after `BLUR_DIRECT_OFF` latches.
+#[inline]
+const fn blur_is_bottom_up() -> bool {
+    blur_bottom_up(blur_passes())
+}
+
+/// The rule itself, over a pass count: a chain that starts bottom-up (both origins do — a window
+/// copy and a scene render alike) is handed back the way it arrived after an EVEN number of flips.
+///
+/// One function because the two paths were each spelling `% 2 == 0` for themselves, which is the
+/// same shape `blur_passes`' own doc was written against: two places that can disagree, silently,
+/// about an axis nobody can see on a blurred backdrop.
+#[inline]
+const fn blur_bottom_up(passes: usize) -> bool {
+    passes % 2 == 0
+}
+
+/// The chain's two target sizes, from the drawable's canvas rect: the half-res level the up pass
+/// comes back to, and the quarter-res level the taps run at.
+///
+/// Exact halvings, not fitted — bilinear minification is a clean 2x2 box only at exactly 2x, and
+/// [`blur_snapshot`]'s own note records what a single 4x pass costs instead. Odd dimensions floor,
+/// which loses at most a pixel column off a blurred backdrop and is not worth a second code path.
+/// Pure, so the halving and the floor are host-gradeable.
+#[inline]
+fn blur_dims(vw: c_int, vh: c_int) -> ((c_int, c_int), (c_int, c_int)) {
+    let mid = ((vw / 2).max(1), (vh / 2).max(1));
+    (mid, ((mid.0 / 2).max(1), (mid.1 / 2).max(1)))
+}
+
+#[derive(Clone)]
+struct BlurChain {
+    grab: c_uint, // the canvas rect of the drawable, copied verbatim
+    gw: c_int,
+    gh: c_int,
+    gx: c_int, // where that rect starts in the drawable (letterbox offset)
+    gy: c_int,
+    mid: c_uint,
+    mid_fbo: c_uint,
+    mw: c_int,
+    mh: c_int,
+    a: c_uint, // quarter-size ping — and where the finished snapshot lands (even pass count)
+    a_fbo: c_uint,
+    b: c_uint, // pong, same size as `a`
+    b_fbo: c_uint,
+    sw: c_int,
+    sh: c_int,
+    /// The texture the finished snapshot lands in, and its size — `mid` after the up pass, or `a`
+    /// when there was no level to come back up to. Held rather than re-derived so the draw has one
+    /// thing to sample and no copy of the chain's shape.
+    out: c_uint,
+    /// Is the finished snapshot stored bottom-up (like the `glCopyTexSubImage2D` it started as)?
+    ///
+    /// Every pass flips row order once, so this is the parity of the pass count — and it is stored
+    /// rather than asserted because the two paths do not run the same NUMBER of passes: five for
+    /// the capture chain, three for the direct one, which both happen to be odd today and have not
+    /// always been. The first version of this hard-coded "even" in a test, which was a fact about
+    /// the shape of that day. A wrong answer here draws the page upside down under the panel.
+    bottom_up: bool,
+    /// The AUTHORED region the live snapshot holds — what [`blur_region_covers`] tests a panel
+    /// against, and the space [`blur_uv_rect`] maps screen coordinates out of.
+    reg: [f32; 4],
+    /// That region in drawable px, a multiple of 4, sitting at the bottom-left of every target.
+    ///
+    /// **The targets are NOT resized to it**, and that is measured rather than assumed: with the
+    /// full-size allocations kept and only the viewports shrunk to a quarter of the area, the chain
+    /// went 9.54 → 5.62 ms on the dev set (2026-08-16). Midgard does not resolve tiles nothing drew
+    /// into, so a region costs its own area and not the framebuffer's — which is what makes this a
+    /// UV-and-viewport change instead of an allocator that has to guess a worst-case panel.
+    rw: c_int,
+    rh: c_int,
+}
+/// A z band's retained output. All bands share the reduction scratch chain; only the compact
+/// half-resolution result survives. A higher band may sample this while scratch is its target.
+pub struct BackdropImage {
+    chain: BlurChain,
+    texture: std::rc::Rc<BackdropTexture>,
+    alpha_invariant: bool,
+    /// The replay that filled this image left the band's dim out ([`backdrop::dim_deferred`]),
+    /// so the composite owes it ([`backdrop::deferred_dim`]). An inline framebuffer capture
+    /// never does: the dim is already on the framebuffer it copies.
+    dim_excluded: bool,
+}
+impl BackdropImage {
+    pub fn dim_excluded(&self) -> bool { self.dim_excluded }
+    pub fn covers(&self, r: Rect) -> bool { blur_region_covers(self.chain.reg,r.x,r.y,r.w,r.h) }
+    pub fn bytes(&self) -> usize { self.chain.mw as usize * self.chain.mh as usize * 4 }
+}
+/// A GL-less image for the walk's tests: a band holding `reg` at `mw x mh` texels.
+#[cfg(test)]
+impl BackdropImage {
+    pub(crate) fn for_test(reg: [f32; 4], mw: c_int, mh: c_int) -> Self {
+        let chain = BlurChain {
+            grab: 0, gw: 1920, gh: 1080, gx: 0, gy: 0, mid: 0, mid_fbo: 0, mw, mh, a: 0, a_fbo: 0, b: 0,
+            b_fbo: 0, sw: 0, sh: 0, out: 0, bottom_up: false, reg, rw: mw * 2, rh: mh * 2,
+        };
+        Self { chain, texture: std::rc::Rc::new(BackdropTexture(0)), alpha_invariant: false, dim_excluded: false }
+    }
+}
+struct BackdropTexture(c_uint);
+impl Drop for BackdropTexture {
+    fn drop(&mut self) { delete_tex(self.0); }
+}
+pub fn retain_backdrop(z: backdrop::Z) -> bool {
+    unsafe {
+        if !BLUR_VALID { return false; }
+        let Some(c) = (*std::ptr::addr_of!(BLURST)).as_ref() else { return false; };
+        let (w,h) = ((c.rw/2).max(1), (c.rh/2).max(1));
+        let previous = backdrop::image(z);
+        let texture = previous.as_ref().filter(|p| p.chain.mw == w && p.chain.mh == h)
+            .map(|p| p.texture.clone()).unwrap_or_else(|| std::rc::Rc::new(BackdropTexture(cap_tex(w,h))));
+        glBindFramebuffer(GL_FRAMEBUFFER, c.mid_fbo);
+        glBindTexture(GL_TEXTURE_2D, texture.0);
+        glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, w, h);
+        glBindFramebuffer(GL_FRAMEBUFFER, plx_base::surface::default_fb());
+        if glGetError() != GL_NO_ERROR { return false; }
+        let mut chain = c.clone();
+        chain.out=texture.0; chain.mid=texture.0; chain.mw=w; chain.mh=h;
+        let alpha_invariant = backdrop::source_alpha(z).is_some();
+        // Asked of the walk this is called in: the direct job's own (ceiling `z`) right after its
+        // replay, or the visible one for an inline capture, which never defers.
+        let dim_excluded = backdrop::dim_deferred();
+        backdrop::captured(z, BackdropImage { chain, texture, alpha_invariant, dim_excluded });
+        true
+    }
+}
+
+/// Snapshots actually taken since the last heartbeat — the REFRESH RATE, measured rather than
+/// assumed.
+///
+/// It exists because "check your cadence actually is what you think" is rule 7 of this
+/// investigation's methodology and every other way of checking it needs a profiler armed, which
+/// changes the frame rate being measured. A counter costs one relaxed increment on a path that
+/// already does a framebuffer copy, and it turns "the blur refreshed every changed present" from a
+/// claim about the code into a number in the log.
+/// A configured cadence and the cadence that RAN are different claims: an invalidation only
+/// schedules a capture, and a containment miss can take one no clock asked for.
+pub static BLUR_SNAPSHOTS: AtomicU32 = AtomicU32::new(0);
+
+/// Take and clear the snapshot count, for the once/sec heartbeat.
+pub fn take_blur_snapshots() -> u32 {
+    BLUR_SNAPSHOTS.swap(0, Ordering::Relaxed)
+}
+
+static mut BLURST: Option<BlurChain> = None;
+/// Latched off: no FBO, no program, or a failed copy. Callers draw no backdrop and keep their own
+/// ground — checked before every snapshot so a failure costs one log line, not a frame loop.
+static mut BLUR_OFF: bool = false;
+/// A snapshot exists AND still describes what is behind the panel.
+static mut BLUR_VALID: bool = false;
+static mut BPROG: c_uint = 0;
+static mut BL_RECT: c_int = 0;
+static mut BL_SCREEN: c_int = 0;
+static mut BL_UVRECT: c_int = 0;
+static mut BL_TEX: c_int = 0;
+static mut BL_TEXEL: c_int = 0;
+
+/// How far in from the panel's edge the lens reaches, in authored px. Wider reads as a thicker
+/// slab; past ~40 the "glass" starts to look like a vignette, because the ramp then covers enough
+/// of the panel to be seen as shading rather than as an edge.
+const GLASS_BEVEL: f32 = 28.0;
+/// Peak displacement at the rim, in authored px — how hard the edge bends what is behind it.
+///
+/// **Large on purpose, and it was three times smaller in the first version.** The source is a
+/// quarter-res blur with only coarse structure left in it, so a displacement small enough to
+/// "preserve detail" moves nothing an eye can find: the bend has to slide whole light and dark
+/// regions to be seen at all. The first attempt compensated with a sharper source at the rim,
+/// which reads as the panel getting thinner rather than as refraction — `fs_glass.frag` records
+/// why that was removed and this raised instead.
+const GLASS_LENS: f32 = 38.0;
+/// The standing container's chamfer, in authored px — see [`GlassRim::Standing`].
+const STANDING_BEVEL: f32 = 12.0;
+/// The standing container's peak displacement at the rim, in authored px. TWICE the ramp, which is
+/// what puts the compression ON the rim instead of spreading it over the chamfer.
+const STANDING_LENS: f32 = 24.0;
+/// How much the standing container's rim shows the page UNBLURRED, 0..1 — the weight of the second
+/// source in `fs_glass.frag`. See [`GlassRim::sharp`].
+///
+/// **It is 0, and the whole second source is therefore dormant** — the copy that feeds it is
+/// skipped, the texture unit is left alone, and the shader takes its single-source path. It is kept
+/// rather than deleted because it costs exactly nothing while off and because the judgement it
+/// encodes belongs to whoever is looking at the television: `/tmp/plxnative-tracksharp` brings it
+/// back at any weight without a rebuild.
+///
+/// The source existed for one stated reason — "a quarter-res blur has nothing left to compress, so
+/// the lens must borrow structure from somewhere" — and narrowing [`BLUR_TAPS`] to 0.35/0.75
+/// retired that reason: there is structure in the blurred source itself now. (This also credited
+/// lowering [`BLUR_REDUCTIONS`] to 1, which never reached the track at all — the track's source has
+/// come off the direct path at 1/4 since the day before that change — and has since been reverted.)
+/// Laddered on the television at 0.85 / 0.4 / 0 over one static hero, what 0.85 adds at the
+/// cap is a hard bright SLIVER of unblurred page at the very edge, which reads as a seam and as the
+/// slab being thinner there — the same failure `fs_glass.frag`'s note records for the first version
+/// of this idea, arrived at from the opposite direction. At 0 the same cap still visibly bends the
+/// page around its arc, because the lens finally has something to bend.
+const STANDING_SHARP: f32 = 0.0;
+/// How much of the container's SCRIM the chamfer sheds at the very rim, 0..1 — `u_rimclear` in
+/// `fs_glass.frag`, where the physical argument for it is written out.
+///
+/// It exists because the reference's rim is COLOURED BY ITS SURROUNDINGS and ours could not be: the
+/// density solve raises the scrim as high as `ui::theme::TAB_TRACK_A_TOP` (.72) over a
+/// bright hero, and a uniform .72 paints out the very band the lens and the sharp source exist to
+/// fill. Shedding it at the edge costs the interior nothing — the ramp is zero where the bevel
+/// meets the flat middle, so the density the labels were solved against is untouched.
+const STANDING_RIMCLEAR: f32 = 0.6;
+/// `/tmp/plxnative-rimclear=<w>` — that shed, swept. `0` is the uniform scrim.
+#[cfg(feature = "devtriggers")]
+fn rimclear_sweep() -> Option<f32> {
+    static SEEN: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    *SEEN.get_or_init(|| {
+        let v = plx_base::devtrig::read("rimclear")?.trim().parse::<f32>().ok()?;
+        plx_base::eventlog::log(&format!("glass: rim scrim shed swept to {v}"));
+        Some(v.clamp(0.0, 1.0))
+    })
+}
+#[cfg(not(feature = "devtriggers"))]
+fn rimclear_sweep() -> Option<f32> {
+    None
+}
+/// `/tmp/plxnative-tracksharp=<w>` — that weight, swept. `0` is the single-source material.
+#[cfg(feature = "devtriggers")]
+fn sharp_sweep() -> Option<f32> {
+    static SEEN: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    *SEEN.get_or_init(|| {
+        let v = plx_base::devtrig::read("tracksharp")?.trim().parse::<f32>().ok()?;
+        plx_base::eventlog::log(&format!("glass: rim sharp source swept to {v}"));
+        Some(v.clamp(0.0, 1.0))
+    })
+}
+#[cfg(not(feature = "devtriggers"))]
+fn sharp_sweep() -> Option<f32> {
+    None
+}
+/// `/tmp/plxnative-paneldeep=<px>` — the panel's extra sample radius, swept. `0` is the bar's own
+/// single-fetch material.
+#[cfg(feature = "devtriggers")]
+fn deep_sweep() -> Option<f32> {
+    static SEEN: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    *SEEN.get_or_init(|| {
+        let v = plx_base::devtrig::read("paneldeep")?.trim().parse::<f32>().ok()?;
+        plx_base::eventlog::log(&format!("glass: panel deep-sample radius swept to {v}"));
+        Some(v.max(0.0))
+    })
+}
+#[cfg(not(feature = "devtriggers"))]
+fn deep_sweep() -> Option<f32> {
+    None
+}
+
+/// The lit chamfer's colour. A weight on the overlay ramp rather than a hue, per the theme rule —
+/// it is white light, and its ALPHA is the only thing tuned.
+const GLASS_EDGE: [f32; 4] = [1.0, 1.0, 1.0, 0.14];
+/// Direction TO the light in panel-local space (`+y` is DOWN, so a negative y is above), plus the
+/// shading applied to the chamfer facing away from it.
+///
+/// Up and a little to the left — the direction every drop shadow in this app is already cast from,
+/// so the panel is lit by the same imaginary lamp as the cards under it.
+///
+/// **The counter-shade is 0, and it was 0.45 until it was measured.** The argument for it was that
+/// "a ring bright all the way round is a stroke, and a bevel bright on one side and dark on the
+/// other is an object" — which is true of a bevel and false of this one, because the two halves are
+/// not the same kind of term. The lit side ADDS on the lamp side; the shaded side MULTIPLIES, and
+/// what it multiplies is the refracted ground the lens just bent into that band. Swept over
+/// synthetic grounds and measured rather than looked at:
+///
+/// * it is CONTENT-DEPENDENT where the rest of the material is not — along one continuous bottom
+///   edge over two-dimensional ground it swings between 1.8 and 16.3 codes (sd 5–7), while the lit
+///   side holds to within 0.1 of a code on every ground;
+/// * it destroys 14–16% of the lens's own horizontal signal in exactly the band the lens works in,
+///   where the lit side costs 0.00%;
+/// * it weakens the container's own bottom rim against the ground from 138% to 88% Weber — visible
+///   as the rim closing the capsule with the shade off and dissolving along the lower right with it
+///   on, which is the opposite of what an edge treatment is for;
+/// * and it is anti-adaptive: 15.5 retinal codes on a bright ground where the boundary already
+///   steps 46, and 6.2 on the dark page where the container has nothing else.
+///
+/// **Do not re-derive this from the macOS reference.** A real system container has no chamfer at
+/// all — one transitional pixel, then dead flat — and it can afford that because its material ADDS
+/// light: measured on the floating tab bar over a near-black page, .071 → .098, i.e. +38% Weber and
+/// *lighter* than the page. A black scrim cannot do that. Ours over the same kind of ground is
+/// −28% (page .188, face .135), which is the same order — but on a page at L\*0 it is **0%**, face
+/// and page both black, and the bar exists by its rim alone. So the flatness does not transfer
+/// as-is: copy it without asking what carries the silhouette and the bar disappears at the bottom
+/// of the range. That is why the LIT side stays at [`GLASS_EDGE`]'s .14; it costs the lens nothing
+/// and it is what the container has left where the scrim has nothing.
+///
+/// (An earlier version of this note said 4% and *lighter*, from a judging panel's measurement. Held
+/// against the landed build on a glyph-free strip it is 28% and darker, on every neutral rung. The
+/// case against the counter-shade above does not rest on that number and is unchanged; the case for
+/// keeping the lit side is weaker than the panel put it, and it is still the status quo.)
+const GLASS_LIGHT: [f32; 3] = [-0.35, -0.94, 0.0];
+/// The rim's SPECULAR: `(axis.x, axis.y, tightness, strength)`.
+///
+/// The axis is the panel's diagonal, and the shader takes `abs` of the normal's projection onto it,
+/// so the reflection catches at **two opposite corners** — top-left and bottom-right — while the
+/// other two stay dark. That two-lobe asymmetry is the reading a single lobe cannot give: one lobe
+/// is a light source, two are a reflection of one, which is what a glass rim actually shows.
+///
+/// The tightness sets how far the catch RUNS along the perimeter either side of a corner, and it
+/// is the parameter that was wrong first. A rounded rect's normal is constant along each straight
+/// side, so the power is the only thing shaping the falloff: at 8 the term is 0.06 on a side
+/// against 1.0 on the corner arc, which is two bright dots and nothing else — measured at 265
+/// changed pixels on the panel. 3 gives ~0.35 on the sides, i.e. a highlight that travels along the
+/// edge and gathers at the corner, which is what a rim reflection looks like.
+const GLASS_SPEC: [f32; 4] = [-0.7071, -0.7071, 3.0, 0.80];
+/// How wide a surface's rim is — the ONE thing about the material that is not the same for every
+/// glass surface, and the only per-draw material parameter.
+///
+/// The design system states it as a rule rather than a number: a SHEET takes "a perimeter line, a
+/// specular hairline along the top edge, a chamfer shade along the bottom, and a 28px ramp inside
+/// each so a sheet reads as THICK rather than outlined", and then — "the track takes the line and
+/// the hairline and no ramp: at 76px tall the chamfer would eat the 20px of interior it has."
+///
+/// **That second clause was arithmetic, and the arithmetic was about 28.** A 76px bar carries a
+/// ~30px label row, which leaves 23px of clear interior above and below it — so a 28px ramp does
+/// eat the bar, and a 16px one stops seven pixels short of the labels. The container gets a
+/// chamfer and a lens now, at [`STANDING_BEVEL`]/[`STANDING_LENS`] — 12/24; what it does not get is
+/// the sheet's 28/38. See [`GlassRim::Standing`].
+///
+/// It is the same lamp, the same weights and the same shader either way. Only the DISTANCE the
+/// chamfer and the lens are given to work over changes, which is why this is two floats and not a
+/// second material: [`GLASS_EDGE`]'s alpha is .14 and the design's own `--glass-rim` is white .14,
+/// arrived at from opposite ends.
+#[derive(Clone, Copy)]
+pub enum GlassRim {
+    /// A sheet: the full 28px chamfer ramp and the 38px lens. The loading screen's panels.
+    Bevelled,
+    /// A standing container — the tab track, a popover, the loading capsule: a SHALLOW chamfer and
+    /// a LONG lens, [`STANDING_BEVEL`] and [`STANDING_LENS`] — 12px and 24px — and no shader
+    /// specular. (This opened "16px and 20px" while the constants said 12/24, and the paragraphs
+    /// below already argued for 12/24 and against 20/20 — so the sentence a tuner reads first named
+    /// a rung the sweep had rejected, and named the ordering backwards with it.)
+    ///
+    /// **This variant was called `Line` and its claim was "no ramp and no bend".** That was the
+    /// right answer to the sheet's 28/38 — a 38px displacement squeezed into a two-pixel band is a
+    /// smear, and the track's edges did carry a wide gradient where the mock draws a single
+    /// `inset 0 1px 0` — and it is the wrong answer to the question underneath, which is whether a
+    /// bar can read as a slab with thickness. Held against the reference (iOS 26's tab bar and its
+    /// search button, filmed over moving content), what a container does at its edge is BEND the
+    /// page around the arc; a drawn line bends nothing, and no weight of line ever will. So the
+    /// geometry was swept — `plxnative-tracklens`, against synthetic grounds — and 12/24 chosen by
+    /// looking at the ladder.
+    ///
+    /// **The ramp is SHORT and the pull is LONG, and that ordering is the whole result.** Nine
+    /// rungs were photographed against the same grounds; the ones where the two are equal (20/20,
+    /// 24/24) turn the cap into a soft gradient that reads as a vignette on the bar rather than as
+    /// an edge of it, while the ones where the displacement is roughly twice the ramp (12/24,
+    /// 10/28) put a narrow band of compressed page right at the rim and leave the interior alone.
+    /// The reference shows the same shape: measured on its search button, the disturbed annulus is
+    /// about 28% of the radius with the content inside it squeezed to something like half its true
+    /// width.
+    ///
+    /// **16 would be the ceiling in any case.** The chamfer ramps over `bevel` px in from each long
+    /// edge, and the bar is 76 tall with a ~30px label row centred in it, i.e. clear interior from
+    /// y=23 to y=53. At 24 the shading lands ON the labels; 12 stops eleven pixels short.
+    ///
+    /// **And why 24px of displacement is larger than the reference's own ratio.** The lens can only
+    /// bend what survives the blur, and ours survives far less than iOS's: measured on `hbars`
+    /// through the quarter-res chain, a 24px period keeps 9% of the page's modulation under the
+    /// bar, a 48px period 17%, a 128px period 65%. Fine detail is simply not there to bend — the
+    /// reference is legible enough through its glass to read blurred TEXT — so the bend has to be
+    /// carried by the coarse structure that does survive, which is what a poster is made of.
+    ///
+    /// **The shader's specular stays off** (`spec.w = 0`), and it was re-swept here rather than
+    /// assumed: the 16,20,0.5 rung draws a bright line along the top arc that reads as moulded
+    /// plastic, which is the same failure the note below records measuring — the hairline is part
+    /// of the backdrop, so over a bright ground it clips to white before the scrim gets to it.
+    Standing,
+    /// A popover's panel (DS6): the standing container's chamfer and lens, plus the sharp second
+    /// source switched ON — the rim refracts the captured host page, unblurred, through the same
+    /// rounded-rect SDF displacement. A menu draws it on frozen ground ([`draw_glass_frozen`]),
+    /// where that source is the host snapshot and costs nothing per frame. `Standing` (sharp 0)
+    /// takes no sharp source; measured on the standing container, a per-frame band copy was +2.7%
+    /// GPU_ACTIVE, which is why no menu draws over live ground any more. Numbers: `tokens::MENU_*`.
+    Menu,
+}
+
+impl GlassRim {
+    /// `(bevel, lens, spec)` — the shader's `u_bevel` / `u_lens` / `u_spec`.
+    ///
+    /// A bevel is never 0: `fs_glass.frag` divides by `u_bevel` to build its ramp and its interior
+    /// early-out is `d < -u_bevel`, so zero would be a division by zero on every fragment of every
+    /// glass surface.
+    ///
+    /// The standing container's SPECULAR is off entirely (`w = 0`), and that is not a
+    /// simplification. The shader's
+    /// hairline is part of the backdrop, so the material's own darkening lands on top of it: over a
+    /// bright hero the term clips to pure white and the scrim then brings it down to whatever it
+    /// happens to bring it down to — measured pre-scrim at (255.4, 255.4, 255.4) 1.5px in from both
+    /// caps, where the design asks for white .14. A container's rim is drawn OVER its material
+    /// instead ([`theme::GLASS_RIM`]), which is where the design puts it and what makes .14 a weight
+    /// rather than a starting point. A SHEET keeps the shader's version: its frost is .72 neutral
+    /// rather than a black scrim, and the two-lobe catch on the corner arcs is the reading that
+    /// says "reflection" rather than "stroke" — it was tuned on the panel and it stays.
+    /// How much of the rim mixes toward the SHARP page — see `fs_glass.frag`'s note on the second
+    /// source. Only the standing container takes it: a sheet's 28px band is wide enough that a
+    /// clarity ramp across it reads as the panel getting thinner, which is the failure that note
+    /// records; 12px does not have room to read as anything but an edge.
+    fn sharp(self) -> f32 {
+        match self {
+            Self::Bevelled => 0.0,
+            Self::Standing => sharp_sweep().unwrap_or(STANDING_SHARP),
+            Self::Menu => tokens::MENU_SHARP,
+        }
+    }
+
+    /// How much of the scrim this surface's chamfer sheds — see [`STANDING_RIMCLEAR`]. A SHEET
+    /// takes none: its frost is a separate quad drawn over the backdrop rather than this shader's
+    /// scrim block, so there is nothing here for it to shed.
+    fn rimclear(self) -> f32 {
+        match self {
+            Self::Bevelled => 0.0,
+            Self::Standing => rimclear_sweep().unwrap_or(STANDING_RIMCLEAR),
+            Self::Menu => tokens::MENU_RIMCLEAR,
+        }
+    }
+
+    fn params(self) -> (f32, f32, [f32; 4]) {
+        let base = match self {
+            Self::Bevelled => (GLASS_BEVEL, GLASS_LENS, GLASS_SPEC),
+            Self::Standing => (STANDING_BEVEL, STANDING_LENS, [0.0, 0.0, 1.0, 0.0]),
+            Self::Menu => (tokens::MENU_BEVEL, tokens::MENU_LENS, [0.0, 0.0, 1.0, 0.0]),
+        };
+        match self {
+            Self::Standing => standing_sweep().unwrap_or(base),
+            Self::Bevelled | Self::Menu => base,
+        }
+    }
+}
+
+/// **`/tmp/plxnative-tracklens=<bevel>,<lens>,<spec>[,<edge_a>,<shade>]` — the container, swept.**
+///
+/// [`GlassRim::Standing`] was for a while the one material parameter in this app decided by an
+/// argument rather than by looking at a ladder: a 38px lens in a 2px band is a smear, so the lens
+/// was set to zero and the chamfer collapsed onto the perimeter. That is right about 38 and says
+/// nothing about 8, and the thing the container has to do — read as a slab with thickness rather
+/// than as a rectangle of darker picture — is exactly what a lens does and what a drawn line
+/// cannot.
+///
+/// So this exists for the same reason `ui::widgets::tab_glass_stops`'s density override
+/// does: the values are a judgement about a picture, and a judgement about a picture is made by
+/// putting the ladder side by side. Absent, the returned params are byte-identical to the variant's
+/// own. Read once per process, so a simulator instance is one capture of one rung —
+/// `tools/glass-patterns.py --lens "off:2,0,0 b:12,12,0 c:12,24,0"` launches one per rung and
+/// drives them in lockstep over the same grounds, which is how 12/24 was picked — over
+/// `checker:96`, `hbars:64` and `edge`, the three grounds coarse enough to survive the blur.
+#[cfg(feature = "devtriggers")]
+fn swept() -> Option<(f32, f32, [f32; 4], Option<f32>, Option<f32>)> {
+    static SEEN: std::sync::OnceLock<Option<(f32, f32, [f32; 4], Option<f32>, Option<f32>)>> =
+        std::sync::OnceLock::new();
+    *SEEN.get_or_init(|| {
+        let v = plx_base::devtrig::read("tracklens")?;
+        let mut it = v.split(',').map(|t| t.trim().parse::<f32>().ok());
+        let (b, l, w) = (it.next()??, it.next()??, it.next()??);
+        // The chamfer's two weights are OPTIONAL: three fields is the geometry alone, five adds the
+        // lighting, and a rung that omits them must be byte-identical to one written before they
+        // existed — the earlier sheets are still the comparison.
+        let (edge_a, shade) = (it.next().flatten(), it.next().flatten());
+        // The bevel divides in the shader and bounds its early-out, so zero is a division by zero on
+        // every glass fragment in the frame — the same floor the variant itself keeps.
+        let out = (
+            b.max(1.0),
+            l.max(0.0),
+            [GLASS_SPEC[0], GLASS_SPEC[1], GLASS_SPEC[2], w.max(0.0)],
+            edge_a.map(|v| v.clamp(0.0, 1.0)),
+            shade.map(|v| v.clamp(0.0, 1.0)),
+        );
+        plx_base::eventlog::log(&format!(
+            "glass: track swept to bevel={} lens={} spec={} edge={:?} shade={:?}",
+            out.0, out.1, w, out.3, out.4
+        ));
+        Some(out)
+    })
+}
+#[cfg(not(feature = "devtriggers"))]
+fn swept() -> Option<(f32, f32, [f32; 4], Option<f32>, Option<f32>)> {
+    None
+}
+
+fn standing_sweep() -> Option<(f32, f32, [f32; 4])> {
+    swept().map(|(b, l, s, _, _)| (b, l, s))
+}
+
+/// The chamfer's LIGHTING, as the shader is given it: `(u_edge, u_light)`.
+///
+/// These are process-lifetime uniforms — set once at program link, because they describe the lamp
+/// and not the surface — so the sweep applies here rather than per draw, and it reaches the sheet
+/// variant too. That is fine for a ladder and would not be fine for a shipped difference; if these
+/// ever need to differ per surface they go into [`GlassRim::params`] with the rest.
+///
+/// Why they are swept at all: measured against the reference with GlassLab, a real system container
+/// has NO chamfer. Its cross-edge profile over a flat ground is `.489 → .190/.199 (a 2px rim) →
+/// .174 held dead flat → .190 → .494`. Ours ramps: the scrim's own top-to-bottom gradient, and then
+/// the bottom chamfer multiplying down to .247 from .345 over 12px. The lens is the part that
+/// earns its keep; this is the part that might just be weight.
+fn chamfer() -> ([f32; 4], [f32; 3]) {
+    let (mut edge, mut light) = (GLASS_EDGE, GLASS_LIGHT);
+    if let Some((_, _, _, a, shade)) = swept() {
+        if let Some(a) = a {
+            edge[3] = a;
+        }
+        if let Some(s) = shade {
+            light[2] = s;
+        }
+    }
+    (edge, light)
+}
+
+static mut GPROG: c_uint = 0;
+static mut GL_RECT: c_int = 0;
+static mut GL_SCREEN: c_int = 0;
+static mut GL_UVRECT: c_int = 0;
+static mut GL_TEX: c_int = 0;
+static mut GL_TINT: c_int = 0;
+static mut GL_RADIUS: c_int = 0;
+static mut GL_CH: c_int = 0;
+static mut GL_UVPX: c_int = 0;
+static mut GL_BEVEL: c_int = 0;
+static mut GL_LENS: c_int = 0;
+static mut GL_EDGE: c_int = 0;
+static mut GL_LIGHT: c_int = 0;
+static mut GL_SPEC: c_int = 0;
+static mut GL_DITHER_AMT: c_int = 0;
+static mut GL_SCRIM_TOP: c_int = 0;
+static mut GL_SCRIM_BOT: c_int = 0;
+static mut GL_RIMCOL_G: c_int = 0;
+static mut GL_RIMLIT_G: c_int = 0;
+static mut GL_RIMW_G: c_int = 0;
+static mut GL_SHARP: c_int = 0;
+static mut GL_SHARP_RECT: c_int = 0;
+static mut GL_SHARP_PX: c_int = 0;
+static mut GL_SHARPW: c_int = 0;
+static mut GL_RIMCLEAR: c_int = 0;
+static mut GL_DEEP: c_int = 0;
+static mut GL_SOURCE_ALPHA: c_int = 0;
+static mut GL_SOURCE_GROUND: c_int = 0;
+static mut GL_DIM: c_int = 0;
+static mut GL_DIM_UV: c_int = 0;
+static mut GL_DIM_FIELD: c_int = 0;
+static mut GL_DIM_TEX: c_int = 0;
+static mut GL_DIM_SHARP: c_int = 0;
+static mut GL_WASH_ON: c_int = 0;
+static mut GL_WASH_UV: c_int = 0;
+/// `u_wash_tl`, `u_wash_tr`, `u_wash_br`, `u_wash_bl`.
+static mut GL_WASH_K: [c_int; 4] = [0; 4];
+static mut GL_WASH_W: c_int = 0;
+
+/// Invalidate the scratch snapshot used by the synthetic load dial and navigation experiments.
+/// Live surfaces own separate retained outputs through the frame's layer/region registry.
+pub fn blur_invalidate() {
+    unsafe { BLUR_VALID = false };
+    // A popover's GROUND snapshot contains that popover's frost, composited from the very snapshot
+    // being dropped here, and the host that owns it sits above this layer — so callers outside
+    // `gfx` go through `ui::popover::host::blur_invalidate`, which calls this and then drops the
+    // ground. The PAGE stage is untouched — it is below all of this and cannot have changed.
+}
+
+/// How far outside a panel's own rect the snapshot must actually contain pixels, in authored px.
+///
+/// Two things reach out past the edge and both are drawn FROM outside it. The lens displaces its
+/// sample by up to [`GLASS_LENS`] (38) along the outward normal, so the rim shows what is beside the
+/// panel, not under it. And the chain's own kernel spreads: the taps are 0.35 and 0.75 texels at
+/// quarter res (4 authored px each) = 4.4, the up pass 1.25 at half res = 2.5, the reductions' box
+/// ~3 — about 10 together, where the wider taps of the day this was chosen cost 24.5. 38 + 10 is
+/// 48, so the margin carries ~20px of slack today. It stays: too SHORT shows as the glass smearing
+/// one colour outward at the rim, the region's area is what it costs, and [`BLUR_TAPS`] is
+/// sweepable — a rung that widens them must not also have to move this.
+///
+/// Short of this the rim samples clamped edge texels, which reads as the glass smearing one colour
+/// outward — subtle, and exactly the kind of thing that looks like a shader bug rather than a
+/// too-small grab.
+const BLUR_REACH: f32 = 68.0;
+/// The largest `rise` any popover slides through (`ui::popover::Popover::painter`'s second
+/// argument). It is 20 everywhere today; the assertion in the tests is what makes raising one a
+/// visible decision rather than a silent loss of margin.
+const POPOVER_MAX_RISE: f32 = 20.0;
+/// What the snapshot actually grabs beyond the panel: [`BLUR_REACH`] plus the slide.
+///
+/// **The slack keeps the appear slide from forcing extra snapshots.** A popover's first draw is at
+/// `appear == 0`, so the region is established while the panel sits a full `rise` away from where it
+/// comes to rest; every later frame moves it back INTO that region. Cache hits are therefore
+/// containment tests — key on equality, or grab only `BLUR_REACH`, and even a cached popover would
+/// recapture on every frame of its appear.
+///
+/// **Only for a glass that RISES.** A glass that stays at its rest rect is grabbed [`BLUR_REACH`] out
+/// and no more ([`blur_region_for`]); `BLUR_MARGIN` is the figure for the ones that slide
+/// (`ui::hold_hint`). The top band never rises and has no budget priced at it since 2026-10-30;
+/// only the hold hint's separation test still grades the band at this margin, as an upper bound.
+pub const BLUR_MARGIN: f32 = BLUR_REACH + POPOVER_MAX_RISE;
+
+/// The region area a MOVING host can carry at 60 fps, in authored px² — the design system's
+/// `--glass-region-budget`. Past it the rate STEPS (45, 36, 30), because a refresh frame buys whole
+/// 16.7 ms slots; a STILL host, which modality guarantees for a panel, is free.
+/// Measured, not chosen: `docs/glass-hardware-budget.md` derives it from the `fps = 60 x 3 / (2 + N)`
+/// region law. It exists so a surface can be held to it by a TEST rather than by a comment — see
+/// the hold hint's and the library scroll capsule's region tests (`ui::hold_hint`,
+/// `ui::scroll_capsule`) — which is also why it is `cfg(test)`: nothing at runtime decides anything
+/// from it, and a number the shipping build never reads should not pretend to. (The top bar's
+/// track used to be held to it too, as a width cap, until 2026-10-30: the budget was measured on the
+/// capture path, the bar's width must never decide its material, and
+/// `docs/glass-hardware-budget.md` §11 is why the direct path prices differently.)
+#[cfg(any(test, feature = "test-support"))]
+pub const GLASS_REGION_BUDGET: f32 = 300_000.0;
+
+/// The region a panel at `(x,y,w,h)` needs snapshotted, in authored coords, clamped to the screen.
+///
+/// Clamping is not a special case: past the edge there is nothing to sample and `CLAMP_TO_EDGE`
+/// already gives the only answer available, so a panel against the frame simply gets a shorter
+/// margin on that side.
+///
+/// `pub` for the readers outside this module, and for the reason the whole file keeps
+/// repeating: the hold hint's and the scroll capsule's budget tests grade a region against
+/// [`GLASS_REGION_BUDGET`], and while the top bar's width test modelled that region with its own
+/// copy of this arithmetic the copy was WRONG — it omitted this clamp and so priced the tab track
+/// at 281k px^2 where the real region is 223k, a 26% over-estimate that sat under a passing test
+/// for as long as the limit existed. The graded expression is this one.
+#[inline]
+pub fn blur_region(x: f32, y: f32, w: f32, h: f32) -> [f32; 4] {
+    blur_region_for(true, x, y, w, h)
+}
+
+/// [`blur_region`] for a glass that is KNOWN not to rise (`rises == false`): the panel plus
+/// [`BLUR_REACH`] and nothing more.
+///
+/// [`POPOVER_MAX_RISE`] exists for one reason: a rising glass's first draw sits a full `rise` away
+/// from where it settles, and the region is grabbed around the rest rect, so the slide has to stay
+/// inside the grab (see [`BLUR_MARGIN`]). A glass that never moves from its rest rect has no slide
+/// to carry, so those 20 px would only widen what the retained source depends on: any draw in the
+/// band between `BLUR_REACH` and `BLUR_MARGIN` of the panel is outside everything the lens and the
+/// kernel can read for a pixel of the panel, yet it would still invalidate the source.
+#[inline]
+pub fn blur_region_for(rises: bool, x: f32, y: f32, w: f32, h: f32) -> [f32; 4] {
+    let m = if rises { BLUR_MARGIN } else { BLUR_REACH };
+    let x0 = (x - m).max(0.0);
+    let y0 = (y - m).max(0.0);
+    let x1 = (x + w + m).min(SCR_W);
+    let y1 = (y + h + m).min(SCR_H);
+    [x0, y0, (x1 - x0).max(1.0), (y1 - y0).max(1.0)]
+}
+
+/// The smallest region holding both — how a frame with more than one glass surface is served by ONE
+/// snapshot instead of two.
+///
+/// Either side may be the empty marker (a zero-width region), which is what the first frame after a
+/// reset carries; the union with it is the other side unchanged rather than a box anchored at the
+/// origin.
+///
+/// `pub` alongside [`blur_region`]: a BAND of glass surfaces is priced as the union it actually
+/// converges on, not as either surface alone.
+#[inline]
+pub fn blur_region_union(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    if a[2] <= 0.0 || a[3] <= 0.0 {
+        return b;
+    }
+    if b[2] <= 0.0 || b[3] <= 0.0 {
+        return a;
+    }
+    let x0 = a[0].min(b[0]);
+    let y0 = a[1].min(b[1]);
+    let x1 = (a[0] + a[2]).max(b[0] + b[2]);
+    let y1 = (a[1] + a[3]).max(b[1] + b[3]);
+    [x0, y0, x1 - x0, y1 - y0]
+}
+
+/// What every glass surface drawn in the PREVIOUS frame asked for, unioned — the region this frame's
+/// first snapshot is taken at, so a frame holding two of them takes ONE.
+///
+/// **The previous frame, not this one, and that is the whole trick.** A snapshot has to be taken by
+/// the first caller, before anything downstream has had a chance to say what it needs; the only
+/// honest predictor of the rest of the frame is what the last one contained. A tab bar plus a row of
+/// controls therefore costs two snapshots on the single frame the set CHANGES and one on every frame
+/// after — it converges in one frame and, just as importantly, SHRINKS in one frame when a surface
+/// goes away, which a monotonically growing union never would.
+static mut BLUR_WANT_PREV: [f32; 4] = [0.0; 4];
+/// The same union, accumulating over the frame in progress. Rolled into [`BLUR_WANT_PREV`] by
+/// [`blur_frame_end`].
+static mut BLUR_WANT_CUR: [f32; 4] = [0.0; 4];
+
+/// Close the frame's region accounting. Called once per DRAWN frame, beside `profile::frame_end` —
+/// inside the idle gate, because a frame the gate skipped drew no glass and must not be allowed to
+/// forget what the last drawn one needed.
+pub fn blur_frame_end() {
+    unsafe {
+        BLUR_WANT_PREV = *std::ptr::addr_of!(BLUR_WANT_CUR);
+        BLUR_WANT_CUR = [0.0; 4];
+    }
+}
+
+/// Does a cached `reg` still serve a panel at `(x,y,w,h)` — i.e. does it hold every pixel the rim
+/// will reach for? Containment, never equality: see [`BLUR_MARGIN`].
+#[inline]
+fn blur_region_covers(reg: [f32; 4], x: f32, y: f32, w: f32, h: f32) -> bool {
+    let need = [
+        (x - BLUR_REACH).max(0.0),
+        (y - BLUR_REACH).max(0.0),
+        (x + w + BLUR_REACH).min(SCR_W),
+        (y + h + BLUR_REACH).min(SCR_H),
+    ];
+    reg[0] <= need[0] + 0.5
+        && reg[1] <= need[1] + 0.5
+        && reg[0] + reg[2] >= need[2] - 0.5
+        && reg[1] + reg[3] >= need[3] - 0.5
+}
+
+/// The authored region in DRAWABLE pixels, offset from the canvas rect's top-left, with the size
+/// rounded to a multiple of 4.
+///
+/// Four, because the chain halves twice and a target derived by integer division from an unaligned
+/// size does not tile back onto its source — the second reduction would sample half a texel off and
+/// the snapshot would creep sideways as a panel moved. Rounding is OUTWARD on the origin and the
+/// far edge, then the size is trimmed back to a multiple of 4, which can only ever give away a
+/// pixel or three of the margin.
+#[inline]
+fn blur_region_px(reg: [f32; 4], gw: c_int, gh: c_int) -> (c_int, c_int, c_int, c_int) {
+    blur_region_px_align(reg, gw, gh, 4)
+}
+
+/// The same rounding, to an arbitrary power-of-two `align`.
+///
+/// The capture path needs 4 because it halves twice and both halvings must stay registered. The
+/// direct path renders the scene straight in at 1/`scale`, so its region has to divide by `scale`
+/// exactly or the viewport offset below lands on a fraction of a target pixel and the backdrop
+/// creeps sideways as the panel moves.
+fn blur_region_px_align(
+    reg: [f32; 4],
+    gw: c_int,
+    gh: c_int,
+    align: c_int,
+) -> (c_int, c_int, c_int, c_int) {
+    let mask = !(align - 1);
+    let slack = align - 1;
+    let sx = gw as f32 / SCR_W;
+    let sy = gh as f32 / SCR_H;
+    // **The surface's own aligned extent bounds the ORIGIN as well as the size**, and that is the
+    // half this used to miss. The size clamp read `.clamp(align, (gw - x0).max(align))`, whose
+    // `.max` was there to keep the bounds ordered — but when `gw - x0 < align` it raises the upper
+    // bound back to `align` while the lower bound is also `align`, so the result is `align` and
+    // `x0 + rw` runs off the surface. That is every origin in the last `align` px of a drawable
+    // whose size is not itself a multiple of `align`, and it reaches `glCopyTexSubImage2D` as a
+    // read outside the framebuffer (undefined texels, no GL error) and the direct path as a
+    // viewport derived from a rect that does not exist. Pulling the origin back to the last
+    // aligned position that still admits a minimum region is the ordered form.
+    let (gwa, gha) = (gw & mask, gh & mask);
+    let x0 = (((reg[0] * sx).floor() as c_int).max(0) & mask).min((gwa - align).max(0));
+    let y0 = (((reg[1] * sy).floor() as c_int).max(0) & mask).min((gha - align).max(0));
+    let x1 = (((reg[0] + reg[2]) * sx).ceil() as c_int + slack).clamp(0, gwa);
+    let y1 = (((reg[1] + reg[3]) * sy).ceil() as c_int + slack).clamp(0, gha);
+    // `.max(align).min(...)` rather than `.clamp`: on a surface too small to hold one aligned block
+    // the two bounds cross, and `clamp` PANICS on that where this yields an empty region the
+    // callers already treat as nothing to grab.
+    // Every term is already a multiple of `align` — `x1`/`y1` are clamped to the aligned extent and
+    // `x0`/`y0` are masked — so the result needs no final mask and the origins need no upper clamp:
+    // `.min(gwa - align)` is strictly tighter than `gw`. Both were load-bearing only while the
+    // bounds were the UNALIGNED `gw`/`gh`, which is the shape that let a region run off the surface.
+    let rw = ((x1 - x0) & mask).max(align).min(gwa - x0);
+    let rh = ((y1 - y0) & mask).max(align).min(gha - y0);
+    (x0, y0, rw, rh)
+}
+
+/// The UV window into the snapshot that a screen-space rect samples.
+///
+/// **The v axis may run backwards, and which way is not a constant.** Every target in the chain is
+/// rendered through `vs_img.vert`, which flips row order once per pass, so the snapshot's storage
+/// order is the parity of the pass count — bottom-up (like the `glCopyTexSubImage2D` it started as)
+/// after an even number, top-down after an odd one, and the two paths run different counts. The
+/// caller passes what the chain actually did. Pure, and tested: an inverted backdrop is the failure
+/// this shape hides, and it looks deliberate enough to survive a glance.
+///
+/// `reg` is the authored region the snapshot holds and `span` the FRACTION of the output texture it
+/// occupies — the chain writes into the bottom-left corner of full-size targets rather than into
+/// resized ones, so a region is never the whole texture. With the whole screen grabbed and a span of
+/// 1 this is exactly the expression it always was, which is what the first test here pins.
+#[inline]
+fn blur_uv_rect(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    reg: [f32; 4],
+    span: [f32; 2],
+    bottom_up: bool,
+) -> [f32; 4] {
+    let fx = (x - reg[0]) / reg[2];
+    let fw = w / reg[2];
+    let fy = (y - reg[1]) / reg[3];
+    let fh = h / reg[3];
+    if bottom_up {
+        return [
+            fx * span[0],
+            (1.0 - fy) * span[1],
+            fw * span[0],
+            -fh * span[1],
+        ];
+    }
+    [fx * span[0], fy * span[1], fw * span[0], fh * span[1]]
+}
+
+/// Build the chain at BOOT, beside [`init_image`].
+///
+/// Measured, and the reason this is not left lazy: the first menu opening paid **48.1 ms** against
+/// **33.4 ms** for every one after it — a shader link plus ~11 MB of texture allocation, landing on
+/// a frame the user is looking at. Worse, it lands on the WORST one: a first open also drops the
+/// appear animation to 19 presented frames where a later open holds 28. Everything else here is
+/// deliberately paid on demand; this part is not, because "on demand" means "while something is
+/// animating".
+///
+/// It is still safe to call nothing at all: [`draw_blur_backdrop`] builds the chain itself if this
+/// never ran, which is what keeps the host tests and any future entry point honest.
+pub fn init_blur() {
+    if !blur_lazy_init() {
+        log("blur: chain unavailable — panels keep their opaque ground");
+    }
+}
+
+fn blur_lazy_init() -> bool {
+    unsafe {
+        if BLUR_OFF {
+            return false;
+        }
+        if (*std::ptr::addr_of!(BLURST)).is_some() {
+            return true;
+        }
+        BPROG = match link_program(VS_IMG.as_ptr(), FS_BLUR.as_ptr()) {
+            Some(p) => p,
+            None => {
+                log("blur: prog link failed — backdrop blur off");
+                BLUR_OFF = true;
+                return false;
+            }
+        };
+        BL_RECT = glGetUniformLocation(BPROG, c"u_trect".as_ptr());
+        BL_SCREEN = glGetUniformLocation(BPROG, c"u_tscreen".as_ptr());
+        BL_UVRECT = glGetUniformLocation(BPROG, c"u_uvrect".as_ptr());
+        BL_TEX = glGetUniformLocation(BPROG, c"u_tex".as_ptr());
+        BL_TEXEL = glGetUniformLocation(BPROG, c"u_texel".as_ptr());
+        // Per-program constant uniforms, set once (uniforms are per-program state): this program
+        // only ever draws one full-target quad, so its rect and UV window never change either.
+        use_prog(BPROG);
+        glUniform2f(BL_SCREEN, SCR_W, SCR_H);
+        glUniform1i(BL_TEX, 0);
+        glUniform4f(BL_RECT, 0.0, 0.0, SCR_W, SCR_H);
+        glUniform4f(BL_UVRECT, 0.0, 0.0, 1.0, 1.0);
+
+        GPROG = match link_program(VS_IMG_DITHERED.as_ptr(), FS_GLASS.as_ptr()) {
+            Some(p) => p,
+            None => {
+                log("blur: glass prog link failed — backdrop blur off");
+                BLUR_OFF = true;
+                return false;
+            }
+        };
+        GL_RECT = glGetUniformLocation(GPROG, c"u_trect".as_ptr());
+        GL_SCREEN = glGetUniformLocation(GPROG, c"u_tscreen".as_ptr());
+        GL_UVRECT = glGetUniformLocation(GPROG, c"u_uvrect".as_ptr());
+        GL_TEX = glGetUniformLocation(GPROG, c"u_tex".as_ptr());
+        GL_TINT = glGetUniformLocation(GPROG, c"u_tint".as_ptr());
+        GL_RADIUS = glGetUniformLocation(GPROG, c"u_iradius".as_ptr());
+        GL_CH = glGetUniformLocation(GPROG, c"u_ch".as_ptr());
+        GL_UVPX = glGetUniformLocation(GPROG, c"u_uvpx".as_ptr());
+        GL_BEVEL = glGetUniformLocation(GPROG, c"u_bevel".as_ptr());
+        GL_LENS = glGetUniformLocation(GPROG, c"u_lens".as_ptr());
+        GL_EDGE = glGetUniformLocation(GPROG, c"u_edge".as_ptr());
+        GL_LIGHT = glGetUniformLocation(GPROG, c"u_light".as_ptr());
+        GL_SPEC = glGetUniformLocation(GPROG, c"u_spec".as_ptr());
+        GL_DITHER_AMT = dither_uniforms(GPROG);
+        GL_SCRIM_TOP = glGetUniformLocation(GPROG, c"u_scrim_top".as_ptr());
+        GL_SCRIM_BOT = glGetUniformLocation(GPROG, c"u_scrim_bot".as_ptr());
+        GL_RIMCOL_G = glGetUniformLocation(GPROG, c"u_rimcol".as_ptr());
+        GL_RIMLIT_G = glGetUniformLocation(GPROG, c"u_rimlit".as_ptr());
+        GL_RIMW_G = glGetUniformLocation(GPROG, c"u_rimw".as_ptr());
+        GL_SHARP = glGetUniformLocation(GPROG, c"u_sharp".as_ptr());
+        GL_SHARP_RECT = glGetUniformLocation(GPROG, c"u_sharp_rect".as_ptr());
+        GL_SHARP_PX = glGetUniformLocation(GPROG, c"u_sharp_px".as_ptr());
+        GL_SHARPW = glGetUniformLocation(GPROG, c"u_sharpw".as_ptr());
+        GL_RIMCLEAR = glGetUniformLocation(GPROG, c"u_rimclear".as_ptr());
+        GL_DEEP = glGetUniformLocation(GPROG, c"u_deep".as_ptr());
+        GL_SOURCE_ALPHA = glGetUniformLocation(GPROG, c"u_source_alpha".as_ptr());
+        GL_SOURCE_GROUND = glGetUniformLocation(GPROG, c"u_source_ground".as_ptr());
+        GL_DIM = glGetUniformLocation(GPROG, c"u_dim".as_ptr());
+        GL_DIM_UV = glGetUniformLocation(GPROG, c"u_dim_uv".as_ptr());
+        GL_DIM_FIELD = glGetUniformLocation(GPROG, c"u_dim_field".as_ptr());
+        GL_DIM_TEX = glGetUniformLocation(GPROG, c"u_dim_tex".as_ptr());
+        GL_DIM_SHARP = glGetUniformLocation(GPROG, c"u_dim_sharp".as_ptr());
+        GL_WASH_ON = glGetUniformLocation(GPROG, c"u_wash_on".as_ptr());
+        GL_WASH_UV = glGetUniformLocation(GPROG, c"u_wash_uv".as_ptr());
+        GL_WASH_K = [c"u_wash_tl", c"u_wash_tr", c"u_wash_br", c"u_wash_bl"]
+            .map(|name| glGetUniformLocation(GPROG, name.as_ptr()));
+        GL_WASH_W = glGetUniformLocation(GPROG, c"u_wash_w".as_ptr());
+        use_prog(GPROG);
+        glUniform2f(GL_SCREEN, SCR_W, SCR_H);
+        glUniform1i(GL_TEX, 0);
+        // The composite-time dim's field, on unit 3 (0 is the snapshot, 1 the sharp grab, 2 the
+        // dither tile). Bound per draw, and only by a draw that owes a field dim.
+        glUniform1i(GL_DIM_TEX, 3);
+        // The rim's second source lives on unit 1 for the life of the program; only the texture
+        // bound there changes, and only when a chain is rebuilt.
+        glUniform1i(GL_SHARP, 1);
+        // Material constants and the orientation term: fixed for the life of the process, and
+        // uniforms are per-program state, so none of THESE belongs in the draw. `u_bevel`/`u_lens`
+        // are the exception and are set per draw — see [`GlassRim`], which is the one thing a
+        // surface gets to say about the material.
+        let (edge, light) = chamfer();
+        glUniform4fv(GL_EDGE, 1, edge.as_ptr());
+        glUniform3f(GL_LIGHT, light[0], light[1], light[2]);
+        // `GL_UVPX` is NOT set here. It was, back when the grab was always the whole screen and one
+        // authored pixel was therefore always `1/SCR_W` of the texture — but the snapshot is a
+        // REGION now and that ratio moves with it, so it belongs to the draw. `draw_blur_backdrop`
+        // says what goes wrong if it is left behind.
+        use_prog(PROG);
+
+        let (gx, gy, gw, gh) = plx_base::surface::viewport();
+        let ((mw, mh), (sw, sh)) = blur_dims(gw, gh);
+        let build = || -> Option<BlurChain> {
+            let grab = cap_tex(gw, gh);
+            let (mid, mid_fbo) = fbo_target(mw, mh, "blur")?;
+            let (a, a_fbo) = fbo_target(sw, sh, "blur")?;
+            let (b, b_fbo) = fbo_target(sw, sh, "blur")?;
+            // Both paths end with the up pass back to half res, so the finished snapshot always
+            // lands in `mid` — each still PUBLISHES where it left it, see [`blur_publish`].
+            Some(BlurChain {
+                grab,
+                gw,
+                gh,
+                gx,
+                gy,
+                mid,
+                mid_fbo,
+                mw,
+                mh,
+                a,
+                a_fbo,
+                b,
+                b_fbo,
+                sw,
+                sh,
+                out: mid,
+                bottom_up: blur_is_bottom_up(),
+                // No live snapshot yet; `BLUR_VALID` is what gates reading these, and the first
+                // `blur_snapshot` sets both to a real region before anything samples them.
+                reg: [0.0, 0.0, SCR_W, SCR_H],
+                rw: gw,
+                rh: gh,
+            })
+        };
+        match build() {
+            Some(c) => {
+                BLURST = Some(c);
+                true
+            }
+            None => {
+                BLUR_OFF = true; // fbo_target already logged the status
+                false
+            }
+        }
+    }
+}
+
+/// **What a finished snapshot IS, published by whichever path produced it.**
+///
+/// Five fields have to move together — the live region, its size, the texture the result landed in
+/// and which way up that texture is — and the two paths were each writing their own subset. That is
+/// how both halves of the orientation bug happened: `blur_snapshot` never wrote `out` at all (so it
+/// inherited `mid` from the direct path and silently ran a fourth pass), and `blur_snapshot_direct`
+/// wrote a hard-coded `bottom_up` that stopped being true when a reduction was removed from the
+/// OTHER path. Neither is expressible now: a caller states where it left the snapshot and how many
+/// flips it took to get there, and the parity, the region and the valid flag fall out here.
+///
+/// `passes_from_grab` counts the flipping passes since the chain's bottom-up ORIGIN — the window
+/// copy or the scene render, whichever this path used. `live_w`/`live_h` are the live area of the
+/// final target, for the profiler's read-out only.
+///
+/// The region is republished because [`blur_region_px_align`] aligns and clamps: the rect the draw
+/// maps out of has to be the ALIGNED one, or a panel's sampling window is off by up to three
+/// drawable pixels and the backdrop creeps sideways as the panel moves.
+#[allow(clippy::too_many_arguments)]
+fn blur_publish(
+    rx: c_int,
+    ry: c_int,
+    rw: c_int,
+    rh: c_int,
+    out: c_uint,
+    passes_from_grab: usize,
+    live_w: c_int,
+    live_h: c_int,
+) {
+    unsafe {
+        let Some(c) = (*std::ptr::addr_of_mut!(BLURST)).as_mut() else {
+            return;
+        };
+        let sx = c.gw as f32 / SCR_W;
+        let sy = c.gh as f32 / SCR_H;
+        let live = [
+            rx as f32 / sx,
+            ry as f32 / sy,
+            rw as f32 / sx,
+            rh as f32 / sy,
+        ];
+        profile::note_blur_config(
+            live, rx, ry, rw, rh, c.gw, c.gh, c.mw, c.mh, live_w, live_h,
+        );
+        c.reg = live;
+        c.rw = rw;
+        c.rh = rh;
+        c.out = out;
+        c.bottom_up = blur_bottom_up(passes_from_grab);
+        BLUR_VALID = true;
+    }
+}
+
+/// Grab the frame as drawn so far and reduce it to the small blurred snapshot.
+///
+/// Main-thread only, and it must run with the default framebuffer bound. Restores framebuffer 0,
+/// the viewport and blend exactly, for the same reason the capture chain does: whatever runs after
+/// it assumes all three.
+///
+/// # Device measurements (2026-08-16)
+///
+/// The original full-screen chain measured 9.54 ms. Limiting every pass to the requested panel
+/// region reduced a 630×790 Sort snapshot to **3.43 ms** (`copy=.71`, reductions `1.23`, two taps
+/// `.74` (now reported separately as `blur.tap1`/`blur.tap2`), up `.75`). The approved dynamic Account scene measured about **3.9 ms per refresh**.
+/// These are legacy `profile::phase` wall times with `glFinish` around every phase. They are not
+/// normal pipelined frame time or hardware GPU timestamps, so they are historical sizing clues,
+/// not the baseline for the direct-render experiment.
+///
+/// Two full-size reduction points once suggested a `0.49 ms/pass + 2.7 ns/fragment` sizing model.
+/// The final region measurement (`blur.taps=.74` for two passes) does not satisfy a global
+/// `0.49 ms/pass` floor, so that fit is deliberately not used as an invariant or as proof that no
+/// further pass fusion can help. Use measured regions and end-to-end A/Bs; `docs/liquid-glass.md`
+/// records the current envelope.
+fn blur_snapshot(reg: [f32; 4]) {
+    let taps = blur_taps();
+    blur_snapshot_with_taps(reg, &taps);
+}
+
+/// Capture-path implementation with an explicit two-pass kernel. The ordinary glass material uses
+/// [`blur_taps`]; Settings supplies a wider pair once for its frozen wallpaper ground. Keeping the
+/// difference here, in the cached chain, means the settled fullscreen draw remains one sample.
+fn blur_snapshot_with_taps(reg: [f32; 4], taps: &[f32]) {
+    debug_assert!(!taps.is_empty() && taps.len() % 2 == 0);
+    unsafe {
+        if !blur_lazy_init() {
+            return;
+        }
+        let Some(c) = (*std::ptr::addr_of!(BLURST)).as_ref() else {
+            return;
+        };
+        // Counted here rather than at the call site because the direct path has its own entry and
+        // its own fallbacks into this one: what the audit wants is chain executions, whichever
+        // door they came through — and only past the guard, so a direct attempt that fails and
+        // falls back here is counted once rather than twice. See [`BLUR_SNAPSHOTS`].
+        BLUR_SNAPSHOTS.fetch_add(1, Ordering::Relaxed);
+
+        // Drain first: `glGetError` reports the OLDEST error since it was last called, so checking
+        // it after the copy without clearing it attributes somebody else's (possibly harmless, and
+        // possibly from another module entirely) to this one — which is exactly how the first
+        // version of this turned itself off on a healthy driver.
+        while glGetError() != GL_NO_ERROR {}
+        // Split into exact phases for the asynchronous timer-query and serialized HWCNT diagnostic
+        // modes. The candidates are a framebuffer copy/resolve and five render-target passes.
+        // The phase wrapper is an inline passthrough in a release build.
+        use crate::gfx::profile::phase;
+        // The region, in drawable px and 4-aligned, landing at the BOTTOM-LEFT of every target. Each
+        // pass then draws a full quad into a viewport of the region's own size and samples the
+        // matching corner of its source, so the whole chain is the same shape it always was, one
+        // scale factor down. Targets keep their full allocation — measured, see `BlurChain::rw`.
+        let (rx, ry, rw, rh) = blur_region_px(reg, c.gw, c.gh);
+        // Source windows, per pass: the fraction of each texture the live region occupies.
+        let win = |uw: c_int, uh: c_int, tw: c_int, th: c_int| {
+            (uw as f32 / tw as f32, uh as f32 / th as f32)
+        };
+        let e = phase("blur.copy", || {
+            glBindTexture(GL_TEXTURE_2D, c.grab);
+            // `glCopyTexSubImage2D` reads the framebuffer bottom-left-origin while the region is
+            // measured from the canvas TOP, so the row has to be flipped into window space here.
+            // Getting this wrong grabs a strip from the other end of the screen — which under a
+            // blur looks like a plausible backdrop, just not the one behind the panel.
+            glCopyTexSubImage2D(
+                GL_TEXTURE_2D,
+                0,
+                0,
+                0,
+                c.gx + rx,
+                c.gy + c.gh - (ry + rh),
+                rw,
+                rh,
+            );
+            glGetError()
+        });
+        if e != GL_NO_ERROR {
+            // The same failure `capture` guards: a window config without alpha bits makes the copy
+            // a silent no-op, which would read as "the blur is black" rather than as a fault.
+            log(&format!(
+                "blur: CopyTexSubImage error=0x{e:x} — backdrop blur off"
+            ));
+            BLUR_OFF = true;
+            return;
+        }
+
+        glDisable(GL_BLEND);
+        // The exact-2x reductions (bilinear == a 2x2 box at exactly 2x, which is where most of the
+        // radius comes from), then the Kawase passes ping-ponging between the two small targets.
+        // The LAST reduction always lands in `a`, whatever `BLUR_REDUCTIONS` is, because that is
+        // where the tap loop below expects its input.
+        //
+        // A one-pass 4-tap 4x reduction was built against the old FULL-SCREEN chain and measured
+        // slower: 2.89 ms against the pair's 2.74. The idea is sound on paper and the filter
+        // is exactly identical (a target texel covers a 4x4 source block; four bilinear fetches
+        // placed on the four 2x2 sub-blocks' shared corners each return that sub-block's mean, so
+        // the four averaged are all sixteen texels at equal weight — which is what a 2x box
+        // followed by a 2x box produces).
+        //
+        // What the model misses is LOCALITY. The merged pass gathers a 4x4 footprint per output
+        // fragment out of a 1920-wide texture, and adjacent output fragments are four texels apart,
+        // so nothing is reused between them and the texture cache misses on essentially every
+        // fetch. The two-step version reads ADJACENT texels in both passes and streams. The gather
+        // costs more than the pass it removes — measured on the dev set 2026-08-16, and the whole
+        // reason `blur.reduce` is split into two phases is so a re-measurement is one log line away.
+        // The final region-limited viewport was never A/B'd against this alternative, so that old
+        // full-screen result is evidence for today's choice, not a universal rejection.
+        //
+        // Each entry is (target fbo, source tex, region size in the TARGET, source window). The
+        // source window is the only thing the region added: `draw_tex_core` takes an explicit uv
+        // rect, where the plain `draw_tex` these used to call hard-codes the whole texture — which
+        // with a region grabbed into a corner would stretch the entire (mostly stale) target across
+        // the pass and blur the region together with whatever the last panel left behind it.
+        let (r2w, r2h) = ((rw / 2).max(1), (rh / 2).max(1));
+        let (r4w, r4h) = ((rw / 4).max(1), (rh / 4).max(1));
+        let reductions: &[(c_uint, c_uint, c_int, c_int, (f32, f32))] = &[
+            (c.mid_fbo, c.grab, r2w, r2h, win(rw, rh, c.gw, c.gh)),
+            (c.a_fbo, c.mid, r4w, r4h, win(r2w, r2h, c.mw, c.mh)),
+        ];
+        // ONE PHASE PER PASS, deliberately: this split is what MEASURED the cost model above, and
+        // it is left in place because it is the only way to re-measure it. `phase` takes a
+        // `&'static str`, so the names are written out rather than indexed.
+        for (i, &(fbo, src, w, h, uv)) in reductions.iter().enumerate() {
+            let name = if i == 0 {
+                "blur.reduce1"
+            } else {
+                "blur.reduce2"
+            };
+            phase(name, || {
+                glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+                glViewport(0, 0, w, h);
+                glClear(GL_COLOR_BUFFER_BIT);
+                // NO_RIM, never a null pointer: `draw_tex_core` hands both colours straight to
+                // `glUniform4fv`, which dereferences them unconditionally — a null segfaults inside
+                // the driver with no Rust panic and no log line (caught by the simulator, 2026-08-16).
+                note_px(Class::Blur, (w as f64) * (h as f64));
+                draw_tex_core(
+                    Class::Blur,
+                    src,
+                    0.0,
+                    0.0,
+                    SCR_W,
+                    SCR_H,
+                    [0.0, 0.0, uv.0, uv.1],
+                    0.0,
+                    BLUR_PASS_TINT.as_ptr(),
+                    0.0,
+                    NO_RIM.as_ptr(),
+                    0.0,
+                    0.0,
+                    0.0,
+                    NO_RIM.as_ptr(),
+                    0.0,
+                    0.0,
+                    None,
+                );
+            });
+        }
+        // The taps run where the reductions ended — quarter res, which is the scale the direct path
+        // renders its source at. See [`BLUR_REDUCTIONS`] for why that equality is not optional.
+        let (tw, th) = (r4w, r4h);
+        let tap_uv = win(tw, th, c.sw, c.sh);
+        for (i, tap) in taps.iter().enumerate() {
+            let name = if i == 0 { "blur.tap1" } else { "blur.tap2" };
+            phase(name, || {
+                glViewport(0, 0, tw, th);
+                // even pass -> a into b, odd -> b into a; with an even tap count the finished
+                // snapshot lands back in `a`, which is what `draw_blur_backdrop` samples.
+                let (fbo, src) = if i % 2 == 0 {
+                    (c.b_fbo, c.a)
+                } else {
+                    (c.a_fbo, c.b)
+                };
+                glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+                glClear(GL_COLOR_BUFFER_BIT);
+                use_prog(BPROG); // already bound unless the reduction path ran `draw_tex`
+                glUniform4f(BL_UVRECT, 0.0, 0.0, tap_uv.0, tap_uv.1);
+                // Offsets stay in TEXELS of the texture, which the region does not change — the
+                // texture is the same size, only less of it is live.
+                note_px(Class::Blur, (tw as f64) * (th as f64));
+                // Supersampled, the chain's texels are `1/n` the authored size they are on a
+                // television; widening the offsets by `n` keeps the frosting's authored radius.
+                let tap = tap * plx_base::surface::render_scale() as f32;
+                glUniform2f(BL_TEXEL, tap / c.sw as f32, tap / c.sh as f32);
+                glBindTexture(GL_TEXTURE_2D, src);
+                glDrawArrays(GL_TRIANGLE_STRIP, 0, 4, straighten::Extent::Target);
+            });
+        }
+
+        // Back UP one level through the same filter — the half of a dual-filter blur that stops the
+        // result reading as enlarged pixels. See `BLUR_UP_TAP`. `mid` is free by now: it was the
+        // first reduction's target and nothing has read it since the second reduction.
+        phase("blur.up", || {
+            // UNCONDITIONAL, and it must never ask `c.out != c.a` to decide: `out` is written by
+            // whichever path ran LAST, and `blur_snapshot_direct` leaves it at `mid`, so that
+            // question silently added a FOURTH pass here on every frame after a direct one — a 1:1
+            // Kawase blit that both widened this path's blur past the direct path's and inverted
+            // the parity `bottom_up` is derived from.
+            glBindFramebuffer(GL_FRAMEBUFFER, c.mid_fbo);
+            glViewport(0, 0, r2w, r2h);
+            glClear(GL_COLOR_BUFFER_BIT);
+            use_prog(BPROG);
+            glUniform4f(BL_UVRECT, 0.0, 0.0, tap_uv.0, tap_uv.1);
+            note_px(Class::Blur, (r2w as f64) * (r2h as f64));
+            let up = BLUR_UP_TAP * plx_base::surface::render_scale() as f32;
+            glUniform2f(BL_TEXEL, up / c.mw as f32, up / c.mh as f32);
+            // The Settings kernel adds an even pair of extra passes, so both the ordinary and
+            // modal chains finish in `a`. The assertion at entry keeps that property structural.
+            glBindTexture(GL_TEXTURE_2D, c.a);
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4, straighten::Extent::Target);
+        });
+
+        glBindFramebuffer(GL_FRAMEBUFFER, plx_base::surface::default_fb());
+        let (vx, vy, vw, vh) = plx_base::surface::viewport();
+        glViewport(vx, vy, vw, vh);
+        glEnable(GL_BLEND);
+        // Publish what was actually grabbed, not what was asked for — see [`blur_publish`].
+        blur_publish(
+            rx,
+            ry,
+            rw,
+            rh,
+            c.mid,
+            BLUR_REDUCTIONS + taps.len() + 1,
+            c.sw,
+            c.sh,
+        );
+    }
+}
+
+/// Scale divisor for the direct backdrop path — the path, since 2026-08-19.
+///
+/// Quarter per axis, and not adjustable: the taps ping-pong between `a` and `b`, which are
+/// allocated at a quarter of the canvas, so 1/2 would need a second half-size target and 2 MB
+/// more — and it measured WORSE, because the Kawase tap offsets scale with the source while the
+/// bilinear box does not.
+const BLUR_DIRECT_SCALE: u32 = 4;
+/// Latched off for the rest of the process after a GL error inside the source pass, which is the
+/// one condition that can make the direct path unusable at RUNTIME rather than at boot.
+///
+/// It exists because the fallback is real and must stay reachable: the capture path serves every
+/// glass owner as well, so falling back costs a copy, not a picture. A latch rather than
+/// a per-frame retry, because a pass that errored once will error again and the log line would
+/// then repeat sixty times a second.
+static mut BLUR_DIRECT_OFF: bool = false;
+
+/// True only while [`blur_snapshot_direct`] is running the page draw as a blur SOURCE.
+///
+/// Three things in the tree must behave differently during that pass, and every one of them is a
+/// correctness issue rather than a nicety:
+///
+/// * `draw_blur_backdrop` must refuse outright. `home_draw` contains a glass owner of its own (the
+///   tab track), so without this the source pass re-enters
+///   `blur_snapshot`, which copies framebuffer 0 — reading the panel while an FBO is bound — and
+///   then rebinds framebuffer 0 and the full-resolution viewport in the middle of the pass.
+/// * `ui::profile::phase` must not select. The page's own phases (`hm.grid`, `main.ui`, …) would
+///   otherwise record twice per frame under one name, mixing a quarter-resolution sample into the
+///   full-resolution mean that the whole experiment is priced by.
+/// * the per-frame card counters must not accumulate, or the framedrop tool reports twice the
+///   composites the panel actually shows.
+static mut BLUR_IN_PASS: bool = false;
+
+/// Is the page currently being drawn as a low-resolution blur source rather than for the panel?
+#[inline]
+pub fn blur_source_pass() -> bool {
+    unsafe { BLUR_IN_PASS || backdrop::source_walk() }
+}
+
+/// **Sample the ground under `r`, at a low rate — from the band's own backdrop image.**
+///
+/// Five small boxes along the rect's centre line, at most every [`GROUND_SAMPLE_EVERY`] calls,
+/// through the asynchronous [`GroundProbe`]. It exists because a material whose density follows
+/// its ground needs to know the ground, and every cheaper source is the wrong colour: Plex's `UltraBlurColors` are a derived
+/// muted palette for an ambient wash — measured against the Luca hero, they give (0.30, 0.23, 0.18)
+/// where the top of the panel is actually (0.00, 0.68, 0.91) — and the wash's own corners lean only
+/// 26% toward the art. The pixels are the only honest answer.
+///
+/// **The pixels are the retained image of the band that draws `r`** ([`ground_taps`]), not
+/// framebuffer 0. The frame already builds that image before the visible page draws a pixel
+/// (`app::run`'s source jobs): the page prefix strictly below the band, blurred, which is exactly
+/// the ground the bar's labels sit on, and it holds the ground and not the bar. Reading it costs
+/// no mid-page copy: a copy of framebuffer 0 splits the frame's render pass on the Mali, and the
+/// five it used to make every thirtieth frame were the period-31 spike (`GPU_ACTIVE` p95 10.54M
+/// against 8.82M with the probe off, television 2026-10-31). The boxes are copied at the next
+/// frame boundary instead ([`GroundProbe::kick_queued`]), and read back at the one after.
+///
+/// A hero holds for 8 seconds and a scrim density has no business changing faster than the picture
+/// does, so twice a second is the rate. Each reading is a GPU-side copy queued on one call and read
+/// back between frames once the GPU has passed it ([`ProbeCadence`]), so it never waits on the
+/// frame — it used to be a synchronous `glReadPixels` that drained the GPU mid-page. Returns `None`
+/// until the first reading lands, and the last one whenever there is nothing to read: inside a
+/// source pass (the page being drawn is a source, not the panel), with no current image under the
+/// track (the glass is off — `flattabs` — or a video plane fills the screen, or the band's source
+/// refused this frame), or while a modal dim the composite owes is up.
+///
+/// **What the image does not hold is folded back in** ([`tap_composite`]): the glass composite adds
+/// the wash's delta while the page wash eases and mixes a layer's alpha toward the app ground, and
+/// the retained texels have neither. The reading is the colour the glass shows, which is the colour
+/// the framebuffer path read.
+///
+/// Counted in presented frames rather than milliseconds: discovery/source calls between swaps do
+/// not consume cadence. 30 is about twice a second at 60 presented frames per second.
+const GROUND_SAMPLE_EVERY: u32 = 30;
+/// How many places across the rect are sampled. Odd, so one of them is the middle.
+const GROUND_TAPS: usize = 5;
+/// **Each tap is a BOX at roughly the blur's own scale, and that size is the whole correctness of
+/// taking the worst one.**
+///
+/// The labels do not sit on the framebuffer; they sit on the BLURRED backdrop, which is a local
+/// average. So a tap has to be a local average too, or "the worst tap" means "the worst pixel",
+/// which is a different and wrong question: measured on the `checker:24` test ground, a single-pixel
+/// worst tap read a white square at L* 88 and asked for .568 of black, while what the labels
+/// actually sit on is the checker's mid-grey. A box at the blur's support answers for the region the
+/// blur will produce — the same answer on a smooth ground, and the honest one on a busy one.
+///
+/// The taps are now read from the band's retained backdrop image itself (see [`sample_ground`]), so
+/// the box is counted in that image's TEXELS: 13, odd so a tap has a middle. The image is half the
+/// drawable's resolution per axis, so a texel is two drawable pixels on the television and 13 of
+/// them are the 25 pixels the framebuffer box used to be — the same support in screen terms. The
+/// image is already the blurred backdrop, so the box is now an average of an average: it answers
+/// for the region under a tap and no longer has to approximate the blur. One copy per tap, 845
+/// texels in total.
+const GROUND_TAP_PX: c_int = 13;
+static mut GROUND_RGB: Option<[f32; 3]> = None;
+/// **The SPREAD across the taps, in CIE L\*, beside the mean.**
+///
+/// The mean is one scalar for a 940px bar, and a bar can straddle an edge: the synthetic `edge`
+/// ground puts L\* 10 under one half and L\* 90 under the other, and every material in the tree
+/// answers it with a single density that serves one half and abandons the other. Whether that is a
+/// curiosity or the common case is a question about real artwork, and it cannot be asked at all
+/// without publishing the span — so the sampler now reports how far apart its own taps were.
+static mut GROUND_SPAN: f32 = 0.0;
+pub fn ground_span() -> f32 {
+    unsafe { *std::ptr::addr_of!(GROUND_SPAN) }
+}
+/// What a [`GroundProbe`] call stood on — the bar's is `groundlog`'s `src=` word.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GroundSource {
+    /// The call was refused before it looked (`may_read` false, a blur source pass, a frozen page):
+    /// the answer is the last reading, and no source was asked for.
+    Held,
+    /// The call looked and found nothing to copy from — see [`ground_taps`] for why a call finds
+    /// none. The answer is the last reading (or none).
+    Absent,
+    /// The call found a source: for the bar, a current band image holding its rect.
+    Found,
+}
+
+impl GroundSource {
+    /// The word `groundlog` prints for the bar's: `src=held`, `src=none` or `src=image`.
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Held => "held",
+            Self::Absent => "none",
+            Self::Found => "image",
+        }
+    }
+}
+
+/// What the bar's latest [`sample_ground`] call stood on.
+pub fn ground_source() -> GroundSource {
+    unsafe { (*std::ptr::addr_of!(GROUND_PROBE)).source }
+}
+/// The bar's probe: its cadence, its target, and the reading in flight.
+static mut GROUND_PROBE: GroundProbe<GROUND_TAPS> = GroundProbe::new(GROUND_SAMPLE_EVERY, GROUND_TAP_PX);
+
+/// **ONE latch and ONE rate counter, for the whole process — so this has exactly one caller.**
+///
+/// `GROUND_RGB` is a single `Option`, and `GROUND_PROBE` a single cadence that admits a real reading
+/// once every [`GROUND_SAMPLE_EVERY`] presented frames. A second visible caller passing a different
+/// `r` would share that one admission and whichever call is due would clobber the other's answer
+/// with pixels from somewhere else on the screen. There is no per-caller state to key on.
+///
+/// **What adding one would cost is a number worth having right, because a decision was taken
+/// against it.** It is not "a second `glReadPixels` flush per frame" — this is rate-limited by
+/// PRESENT COUNT, so two callers each keeping their own counter would each read once every
+/// [`GROUND_SAMPLE_EVERY`] presents: one extra copy roughly twice a second, and only while the
+/// second surface is on screen (a queued copy now, not a flush). Two `Option`s and two probes. The
+/// reason to prefer one solve is therefore the MATERIAL's — one band, one density — and not the
+/// readback's price; do not re-derive the argument from a cost that is thirty times smaller than it
+/// reads here.
+///
+/// So the rule is that a BAND of surfaces solves once and shares the answer. The top bar is the
+/// case: the tab track samples, and the profile chip — a second surface of the same material,
+/// 800px to its left — takes the track's solved stops rather than reading its own ground
+/// (`ui::widgets`' `BarMaterial`). That is also what keeps the band one alpha; two solves over a
+/// non-uniform hero land on two densities and the seam is visible.
+///
+/// **And the rect is the whole contract, which is the trap here.** The consumer solves a scrim
+/// weight so its INK clears a contrast floor over these pixels; a surface that is not inside `r`
+/// gets a density answered for somewhere else. `BarMaterial`'s doc carries the measurement for the
+/// one surface in this app that is in that position. The rect also NAMES the band whose image is
+/// read: [`ground_taps`] matches it, exactly, against the rects the band's glass draws with, so it
+/// must be the rect the caller's glass is drawn at — AFTER the painter's placement (the cascade
+/// translate and zoom: `Painter::place`), which is the rect the band stores. A rect no band lists
+/// reads nothing and the answer stays the last reading.
+/// **May a ground sampler take a FRESH reading on this draw?** Not while the page is frozen.
+///
+/// Both samplers ([`sample_ground`], [`sample_control_ground`]) answered from a synchronous
+/// `glReadPixels` when this refusal was written, which returns only once the GPU has drawn
+/// everything submitted before it; they queue a [`GroundProbe`] copy now (the Hero row's a
+/// mid-frame copy of framebuffer 0, the bar's a frame-boundary copy of its band image), which is
+/// cheap but still pointless here. A frozen page is one served from the
+/// host snapshot under a modal — its draw produces no pixels, so the ground under its bar and its
+/// Hero row is by construction the one the last live reading already took, and a fresh read can
+/// only return that same answer. What it did cost was the stall: every thirtieth frame of a modal
+/// held over Home drew the page for 21 ms of `glReadPixels` wait, the one frame per cycle over
+/// budget in `fps:modal-100` once the open itself fitted (television, 2026-09-19). The last answer
+/// is kept, and the first live frame after the modal re-reads on its own cadence.
+#[inline]
+fn may_read_ground() -> bool {
+    !page_frozen()
+}
+
+/// What a ground probe does on one sampler call — [`ProbeCadence::step`]'s answer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ProbeStep {
+    /// Answer from the last reading.
+    Keep,
+    /// Queue a copy of the tap boxes into the probe's own target, and read nothing.
+    Kick,
+    /// The queued copy has been passed by the GPU: read the probe's target and latch the answer.
+    Collect,
+}
+
+/// **When a ground sampler reads, as a pure function** — the half of [`GroundProbe`] a host test
+/// can reach.
+///
+/// Both samplers used to answer a due call with `glReadPixels` on the frame being drawn. A read of
+/// the framebuffer is synchronous: it returns only once the GPU has drawn everything submitted
+/// before it, the previous frame included. On the Detail page that was one frame in every thirty
+/// at 27–29 ms (`clear` ~11 + ~15 ms of drain inside `page`), the steady-state frame that failed
+/// every Detail cycle of `fps:push-100` (television, 2026-09-19).
+///
+/// So a due call only QUEUES: the tap boxes are copied GPU-side into a small target and a fence is
+/// inserted after the copy ([`ProbeStep::Kick`]). A later call reads that target once at least one
+/// drawn frame has ended since (the swap is what flushes the copy) and the fence has signalled
+/// ([`ProbeStep::Collect`]) — a read of finished work, which does not wait. The answer lands one or
+/// two frames later than it used to; the cadence it keeps is the same. A probe that copies a band
+/// image rather than framebuffer 0 makes its copy at the frame boundary after the call, not on it
+/// ([`TapSource::Image`]), so its answer lands two or three frames later. The cadence counts from
+/// the collect, so a reading repeats every [`GROUND_SAMPLE_EVERY`] frames plus the ones it is in
+/// flight: one for a framebuffer copy, two for an image copy (made at one boundary, read at the next).
+///
+/// `at` counts PRESENTED frames, not calls. Discovery and source walks can invoke a sampler more
+/// than once between swaps, and those descriptive calls must not accelerate a GPU probe. `dirty`
+/// forces the next visible call to queue a reading whatever the count says, and is cleared only
+/// when one is collected.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ProbeCadence {
+    every: u32,
+    at: u32,
+    last_drawn: u32,
+    dirty: bool,
+    /// The drawn-frame count a queued reading was kicked in, while one is in flight.
+    pending: Option<u32>,
+}
+
+impl ProbeCadence {
+    pub const fn new(every: u32) -> Self {
+        Self {
+            every,
+            at: 0,
+            last_drawn: 0,
+            dirty: true,
+            pending: None,
+        }
+    }
+
+    /// One sampler call. `have`: a reading is latched. `drawn`: drawn frames so far
+    /// ([`drawn_frames`]). `finished`: the GPU has passed the queued copy (its fence signalled, or
+    /// there is no fence to ask). `can_kick`: the call has something to copy FROM — the Hero row's
+    /// framebuffer always does; the bar's band image may not (no current image under the track).
+    /// A due reading that cannot kick is not lost and not counted: it is owed, and the first call
+    /// that has a source queues it.
+    pub fn step(&mut self, have: bool, drawn: u32, finished: bool, can_kick: bool) -> ProbeStep {
+        if let Some(kicked) = self.pending {
+            if drawn.wrapping_sub(kicked) >= 1 && finished {
+                self.pending = None;
+                self.dirty = false;
+                self.at = 0; // the cadence counts from the reading, not from its kick
+                self.last_drawn = drawn;
+                return ProbeStep::Collect;
+            }
+            return ProbeStep::Keep;
+        }
+        self.at = self.at.wrapping_add(drawn.wrapping_sub(self.last_drawn));
+        self.last_drawn = drawn;
+        if !(self.dirty || !have || self.at % self.every == 0) {
+            return ProbeStep::Keep;
+        }
+        if !can_kick {
+            self.dirty = true;
+            return ProbeStep::Keep;
+        }
+        self.pending = Some(drawn);
+        ProbeStep::Kick
+    }
+
+    /// The pixels under the probe changed meaning (a new item behind the Hero row): drop any
+    /// reading in flight and queue a fresh one on the next call.
+    pub fn invalidate(&mut self) {
+        self.at = 0;
+        self.dirty = true;
+        self.pending = None;
+    }
+
+    /// A kick that could not be queued (no target): nothing is in flight after all.
+    fn abandon(&mut self) {
+        self.pending = None;
+    }
+}
+
+/// How a ground sampler answers a call: see [`probe_mode`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ProbeMode {
+    /// The product: queue a fenced copy on a cadence, collect it a frame later ([`ProbeCadence`]).
+    Cadenced,
+    /// Dump mode: copy and read inside the call, every call, so the answer is a function of the
+    /// frame being drawn and not of how many loop iterations went by (`crate::dump`).
+    Sync,
+}
+
+/// The mode, as a pure function of the dump switch (the half a host test can reach).
+#[inline(always)]
+pub fn probe_mode(dump_armed: bool) -> ProbeMode {
+    if dump_armed {
+        ProbeMode::Sync
+    } else {
+        ProbeMode::Cadenced
+    }
+}
+
+/// A band image's tap boxes, resolved by the sampler and waiting for the frame boundary.
+///
+/// `origins` are the boxes' corners in the image's own storage rows and columns. `composite` is
+/// what the glass composite does to the image after it is read, `colour * scale + offset` per tap
+/// (its source alpha and wash delta — [`tap_composite`]), so the reading is the colour the glass
+/// shows and not the colour the image happens to hold.
+struct ImageTaps<const N: usize> {
+    texture: std::rc::Rc<BackdropTexture>,
+    origins: [(c_int, c_int); N],
+    composite: (f32, [[f32; 3]; N]),
+}
+
+/// What a sampler hands [`GroundProbe::step`] to copy from (`None`: nothing to copy this call).
+enum TapSource<const N: usize> {
+    /// Boxes of framebuffer 0, lower-left origins in framebuffer pixels, already clamped. Copied on
+    /// the sampler's own call: a framebuffer holds the ground only while the page is being drawn.
+    Framebuffer([(c_int, c_int); N]),
+    /// A band's retained image under the track. A finished texture, so its copy waits for the
+    /// frame boundary ([`GroundProbe::kick_queued`]), where nothing of framebuffer 0 is pending.
+    Image(ImageTaps<N>),
+}
+
+/// **A ground sampler's asynchronous read-back**: `N` boxes of `px` square, copied side by side
+/// into one `N*px x px` target, fenced, and read once finished. See [`ProbeCadence`] for why.
+///
+/// The copy's SOURCE is the caller's ([`TapSource`]), and the source decides where the copy is
+/// made: the Hero row copies framebuffer 0 on its call; the top bar copies its band's retained
+/// image at the next frame boundary, so neither it nor the read-back ever touches framebuffer 0
+/// mid-page.
+///
+/// The target is built lazily on the first copy and never resized. An incomplete FBO latches `off`
+/// and the sampler answers from its last reading (`None` if it never had one) from then on — the
+/// same refusal every other chain in this module makes.
+pub struct GroundProbe<const N: usize> {
+    cadence: ProbeCadence,
+    px: c_int,
+    /// `(texture, framebuffer)`, once built.
+    target: Option<(c_uint, c_uint)>,
+    off: bool,
+    fence: Option<crate::egl::fence::Fence>,
+    /// The queued copy, read back at a frame boundary ([`ground_probes_frame_end`]) and waiting
+    /// for the sampler's next call to reduce it.
+    ready: Option<Vec<u8>>,
+    /// An image copy asked for by a call and owed to the frame boundary: it holds the band's
+    /// texture alive until the copy is made.
+    queued: Option<ImageTaps<N>>,
+    /// The framebuffer the image's texture is attached to for the length of a copy (0: not built).
+    reader: c_uint,
+    /// The composite terms of the image reading in flight (identity until the first copy).
+    composite: (f32, [[f32; 3]; N]),
+    /// What the latest sampler call stood on. What `groundlog` reports as `src`, so "the bar reads
+    /// flat", "the bar never found its band" and "the call was refused" are different lines.
+    source: GroundSource,
+}
+
+impl<const N: usize> GroundProbe<N> {
+    pub const fn new(every: u32, px: c_int) -> Self {
+        Self {
+            cadence: ProbeCadence::new(every),
+            px,
+            target: None,
+            off: false,
+            fence: None,
+            ready: None,
+            queued: None,
+            reader: 0,
+            composite: (1.0, [[0.0; 3]; N]),
+            source: GroundSource::Absent,
+        }
+    }
+
+    /// Drop any reading in flight or read back, and queue a fresh one on the next call.
+    fn invalidate(&mut self) {
+        self.cadence.invalidate();
+        self.ready = None;
+        self.queued = None;
+    }
+
+    /// Is a queued copy ready to be read back? It has been KICKED (`pending`), not read already
+    /// (`ready`), and — the clause that keeps the image path off the frame it was asked in —
+    /// actually MADE: a copy still owed to the frame boundary (`queued`) has nothing in the target
+    /// to read, and the sim (no fences) would read it at once. The fence is the last test.
+    fn read_due(&self) -> bool {
+        self.cadence.pending.is_some() && self.ready.is_none() && self.queued.is_none()
+    }
+
+    /// **The read-back, at a frame BOUNDARY.** Called right after the swap, before the next frame
+    /// draws anything: reading the probe's target here binds another framebuffer while the
+    /// frame's own has nothing pending, so it neither splits a render pass nor waits on one. The
+    /// first measurement read at the sampler's next call instead, mid-page, and that frame still
+    /// ran ~12 ms over its neighbours with a 0.2 ms read (television, 2026-09-19). Only once the
+    /// copy's fence has signalled; with no fences (the simulator) the swap alone is the rule.
+    unsafe fn read_if_finished(&mut self) {
+        if !self.read_due() {
+            return;
+        }
+        let Some((_, fbo)) = self.target else { return };
+        if !self.fence.as_ref().is_none_or(|f| f.signaled()) {
+            return;
+        }
+        let (w, h) = (self.px * N as c_int, self.px);
+        let mut buf = vec![0u8; (w * h * 4) as usize];
+        plx_base::diag::spans::span("gndread", || {
+            glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+            glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, buf.as_mut_ptr() as *mut c_void);
+            glBindFramebuffer(GL_FRAMEBUFFER, plx_base::surface::default_fb());
+        });
+        self.fence = None;
+        self.ready = Some(buf);
+    }
+
+    /// **The image copy, at a frame BOUNDARY** — the other half of [`Self::read_if_finished`].
+    /// [`ground_probes_frame_end`] runs the read first, so a copy made here is read at the NEXT
+    /// boundary at the earliest ("the swap is what flushes the copy" is the following swap).
+    /// Nothing of framebuffer 0 is pending after the swap, so binding the reader framebuffer here
+    /// adds no render pass to it, which is the whole point of the move: the same five copies made
+    /// inside the page split the frame's pass on the Mali (period-31 spikes, television 2026-10-31).
+    ///
+    /// The copy is wrapped in the `gndkick` span, as the framebuffer probe's is, so a FRAMEDROP line
+    /// can name it. It lands on the line of the frame whose swap has just returned (when that frame
+    /// prints one): `report()` takes the spans in the same loop iteration, after `present_and_swap`
+    /// and so after this. The copy runs after the swap's `Phase::Swap` stamp, so its time is in that
+    /// line's `spans=` and in none of its legs or its `total=`; the next frame's present interval
+    /// (swap to swap) is the one that includes it.
+    unsafe fn kick_queued(&mut self, who: &str) {
+        let Some(taps) = self.queued.take() else { return };
+        if !plx_base::diag::spans::span("gndkick", || self.copy_image(&taps, who)) {
+            self.cadence.abandon();
+            return;
+        }
+        // After the copies, so it signals once they are done. Replacing an older fence destroys
+        // it; nothing is waiting on it.
+        self.fence = crate::egl::fence::Fence::insert();
+    }
+
+    /// The probe's target, built on first use. An incomplete one latches the probe off.
+    unsafe fn ensure_target(&mut self, who: &str) -> Option<(c_uint, c_uint)> {
+        if self.target.is_none() {
+            self.target = fbo_target(self.px * N as c_int, self.px, who);
+            if self.target.is_none() {
+                self.off = true;
+                self.cadence.abandon();
+            }
+        }
+        self.target
+    }
+
+    /// Copy the boxes at `origins` out of the read framebuffer's colour attachment into the target.
+    unsafe fn copy_boxes(&self, tex: c_uint, origins: &[(c_int, c_int); N]) {
+        glBindTexture(GL_TEXTURE_2D, tex);
+        for (i, &(x, y)) in origins.iter().enumerate() {
+            glCopyTexSubImage2D(GL_TEXTURE_2D, 0, i as c_int * self.px, 0, x, y, self.px, self.px);
+        }
+    }
+
+    /// Copy the framebuffer's tap boxes into the target.
+    unsafe fn copy_framebuffer(&mut self, origins: &[(c_int, c_int); N], who: &str) -> bool {
+        let Some((tex, _)) = self.ensure_target(who) else { return false };
+        self.copy_boxes(tex, origins);
+        true
+    }
+
+    /// Copy the image's tap boxes into the target: the image's texture is attached to the probe's
+    /// own reader framebuffer for the length of the copies and detached again, so a later glass
+    /// draw never samples a texture that is a framebuffer attachment.
+    unsafe fn copy_image(&mut self, taps: &ImageTaps<N>, who: &str) -> bool {
+        let Some((tex, _)) = self.ensure_target(who) else { return false };
+        if self.reader == 0 {
+            glGenFramebuffers(1, &mut self.reader);
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, self.reader);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, taps.texture.0, 0);
+        let st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        if st != GL_FRAMEBUFFER_COMPLETE {
+            log(&format!("{who}: band image FBO incomplete (status=0x{st:x}) — {who} off"));
+            glBindFramebuffer(GL_FRAMEBUFFER, plx_base::surface::default_fb());
+            self.off = true;
+            return false;
+        }
+        self.copy_boxes(tex, &taps.origins);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+        glBindFramebuffer(GL_FRAMEBUFFER, plx_base::surface::default_fb());
+        self.composite = taps.composite;
+        true
+    }
+
+    /// Dump mode's read of what the copy just put in the target.
+    #[cold]
+    unsafe fn read_target_now(&mut self) -> Option<Vec<u8>> {
+        let (_, fbo) = self.target?;
+        let (w, h) = (self.px * N as c_int, self.px);
+        let mut buf = vec![0u8; (w * h * 4) as usize];
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, buf.as_mut_ptr() as *mut c_void);
+        glBindFramebuffer(GL_FRAMEBUFFER, plx_base::surface::default_fb());
+        Some(buf)
+    }
+
+    /// One sampler call. Returns the collected `N*px x px` RGBA row-major buffer on a collect,
+    /// `None` otherwise. A kick of a framebuffer source copies here; a kick of an image source
+    /// only queues the copy for the frame boundary. `src` is `None` when there is nothing to copy
+    /// from this call; a due reading is then owed ([`ProbeCadence::step`]).
+    unsafe fn step(&mut self, have: bool, src: Option<TapSource<N>>, who: &str) -> Option<Vec<u8>> {
+        self.source = if src.is_some() { GroundSource::Found } else { GroundSource::Absent };
+        if self.off {
+            return None;
+        }
+        if probe_mode(crate::dump::armed()) == ProbeMode::Sync {
+            // The same source as the product, read at once: the answer is a function of the frame
+            // being drawn and not of how many loop iterations went by.
+            let copied = match &src {
+                Some(TapSource::Framebuffer(origins)) => self.copy_framebuffer(origins, who),
+                Some(TapSource::Image(taps)) => self.copy_image(taps, who),
+                None => false,
+            };
+            return if copied { self.read_target_now() } else { None };
+        }
+        match self.cadence.step(have, drawn_frames(), self.ready.is_some(), src.is_some()) {
+            ProbeStep::Keep => None,
+            ProbeStep::Kick => {
+                match src {
+                    Some(TapSource::Framebuffer(origins)) => {
+                        // `fbo_target` binds `default_fb()` back, which is the page's current
+                        // target (the frame, or a host snapshot being rendered into) — where this
+                        // was called.
+                        let copied = plx_base::diag::spans::span("gndkick", || self.copy_framebuffer(&origins, who));
+                        if !copied {
+                            return None;
+                        }
+                        // After the copies, so it signals once they are done. Replacing an older
+                        // fence destroys it; nothing is waiting on it.
+                        self.fence = crate::egl::fence::Fence::insert();
+                    }
+                    Some(TapSource::Image(taps)) => self.queued = Some(taps),
+                    // The cadence never kicks without a source.
+                    None => self.cadence.abandon(),
+                }
+                None
+            }
+            ProbeStep::Collect => self.ready.take(),
+        }
+    }
+}
+
+/// Read back every ground probe whose copy the GPU has passed, and make the copy the bar's probe
+/// owes the boundary — `app::run` calls it right after the swap, beside [`field_frame_end`]. See
+/// [`GroundProbe::read_if_finished`] and [`GroundProbe::kick_queued`].
+pub fn ground_probes_frame_end() {
+    // SAFETY: main render thread, like every other access to the probes.
+    unsafe {
+        let bar = &mut *std::ptr::addr_of_mut!(GROUND_PROBE);
+        // The read first: a copy made by the line below is not a copy to read at this boundary.
+        bar.read_if_finished();
+        bar.kick_queued("ground");
+        (*std::ptr::addr_of_mut!(CONTROL_PROBE)).read_if_finished();
+    }
+}
+
+/// Box `i`'s pixels in a [`GroundProbe`]'s collected buffer: `px` rows of `px` RGBA texels, taken
+/// from the `n*px`-wide atlas row by row. Order within a box is irrelevant to every consumer (each
+/// one averages).
+fn probe_tap(buf: &[u8], i: usize, px: c_int, n: usize) -> impl Iterator<Item = &[u8]> {
+    let (px, w) = (px as usize, px as usize * n);
+    (0..px).flat_map(move |row| {
+        let at = (row * w + i * px) * 4;
+        buf[at..at + px * 4].chunks_exact(4)
+    })
+}
+
+/// Drawn frames so far — the frame count [`field_frame_end`] advances beside the swap, shared by
+/// every fenced read-back in this module.
+#[inline]
+fn drawn_frames() -> u32 {
+    FIELD_SWAPS.load(Ordering::Relaxed)
+}
+
+/// **The authored points the bar's ground is tapped at**: `N` places along the centre line of
+/// `r`, at `(i + 0.5) / N` of its width. Pure, and the one definition of "where": the image
+/// mapping ([`image_tap_origins`]) and the composite terms (`tap_composite`'s wash) both read it.
+fn ground_tap_points<const N: usize>(r: [f32; 4]) -> [(f32, f32); N] {
+    std::array::from_fn(|i| {
+        let f = (i as f32 + 0.5) / N as f32;
+        (r[0] + r[2] * f, r[1] + r[3] * 0.5)
+    })
+}
+
+/// **Where authored points land in a retained band image**, as the corners of `px`-texel boxes
+/// centred on them, in the image's own storage columns and rows — the coordinates
+/// `glCopyTexSubImage2D` reads with. `None` when the image is smaller than one box (a degenerate
+/// region), which is a refusal and not a clamp that would read outside the texture.
+///
+/// The image holds the authored region `reg` at `dims` texels — half the drawable's pixels per
+/// axis, so a texel is `reg[2] / dims.0` authored px and the mapping is a plain scale about the
+/// region's origin, with no knowledge of the drawable's size. `bottom_up` is the chain's storage
+/// order ([`BlurChain::bottom_up`]), the parity [`blur_uv_rect`] flips v by — and the mapping is
+/// that function at span 1, so a texel row is counted from the region's bottom edge when it is set. Boxes clamp to the image, never to the
+/// texture's allocation (the chain draws into the corner of full-size targets, but a retained image
+/// is exactly `dims`).
+fn image_tap_origins<const N: usize>(
+    points: &[(f32, f32); N],
+    reg: [f32; 4],
+    dims: (c_int, c_int),
+    bottom_up: bool,
+    px: c_int,
+) -> Option<[(c_int, c_int); N]> {
+    let (w, h) = dims;
+    if px < 1 || w < px || h < px || reg[2] <= 0.0 || reg[3] <= 0.0 {
+        return None;
+    }
+    Some(std::array::from_fn(|i| {
+        // A retained image holds its region at span 1, so the glass's own mapping is the unit one.
+        let [u, v, ..] = blur_uv_rect(points[i].0, points[i].1, 0.0, 0.0, reg, [1.0, 1.0], bottom_up);
+        let cx = (u * w as f32).floor() as c_int;
+        let cy = (v * h as f32).floor() as c_int;
+        ((cx - px / 2).clamp(0, w - px), (cy - px / 2).clamp(0, h - px))
+    }))
+}
+
+/// **What the glass composite does to the image after it is read**, folded to `colour * scale +
+/// offset` per tap — `fs_glass.frag`'s `srcRGB`, in order: add the wash delta, then
+/// `mix(ground, c, alpha)`. Both are bound at composite and are not in the retained texels: the
+/// image keeps the wash it was drawn under (the glass owes the difference while the wash eases, and
+/// the image is re-taken when it settles), and a layer's composite alpha is mixed toward the app
+/// ground. The modal dim is the third such term, and is refused rather than folded
+/// ([`ground_taps`]). `wash` is the delta at each tap, already weighted
+/// ([`backdrop::GroundDelta::at`]); identity (`1.0`, zeros) when nothing is owed.
+fn tap_composite<const N: usize>(alpha: f32, ground: [f32; 3], wash: [[f32; 3]; N]) -> (f32, [[f32; 3]; N]) {
+    (
+        alpha,
+        std::array::from_fn(|i| std::array::from_fn(|c| ground[c] * (1.0 - alpha) + wash[i][c] * alpha)),
+    )
+}
+
+/// The bar's taps in the band image that holds the glass drawn at exactly `r`, or `None`.
+///
+/// **The band is found by the rect, not by a z or a coverage test**, because the ground the bar
+/// sits on is the band's OWN image — built from the prefix strictly below the band's ceiling. An
+/// image of a band ABOVE the bar would cover the same rect and contain the bar itself. Only a band
+/// that lists `r` among its drawn members (latched by the discovery walk, so this frame's) and
+/// whose image is current (`valid`) answers; `covers` is the last guard.
+fn ground_taps(r: [f32; 4]) -> Option<ImageTaps<GROUND_TAPS>> {
+    let rect = Rect::new(r[0], r[1], r[2], r[3]);
+    let (z, image) = backdrop::member_image(rect)?;
+    if !image.covers(rect) {
+        return None;
+    }
+    // The deferred dim is the one composite term that cannot be folded: its ink may be a field
+    // texture on the GPU. A page under a modal is frozen and never gets here; a live dim over the
+    // bar's own band leaves the last reading until it is gone.
+    if image.dim_excluded && backdrop::deferred_dim(z).is_some_and(|d| d.tint[3] > 0.0) {
+        return None;
+    }
+    let points = ground_tap_points::<GROUND_TAPS>(r);
+    let c = &image.chain;
+    let origins = image_tap_origins(&points, c.reg, (c.mw, c.mh), c.bottom_up, GROUND_TAP_PX)?;
+    let alpha = if image.alpha_invariant {
+        backdrop::source_alpha(z).unwrap_or(1.0)
+    } else {
+        1.0
+    };
+    let wash = backdrop::deferred_ground(z)
+        .map_or([[0.0; 3]; GROUND_TAPS], |d| std::array::from_fn(|i| d.at(points[i].0, points[i].1)));
+    let (cr, cg, cb) = tokens::CLEAR_RGB;
+    let composite = tap_composite(alpha, [cr, cg, cb], wash);
+    Some(ImageTaps { texture: image.texture.clone(), origins, composite })
+}
+
+pub fn sample_ground(r: [f32; 4], may_read: bool) -> Option<[f32; 3]> {
+    unsafe {
+        let probe = &mut *std::ptr::addr_of_mut!(GROUND_PROBE);
+        // A caller can refuse a FRESH reading while still wanting the last one — the route
+        // cross-fade's case. `ui::nav` dips the whole page toward `SURFACE_APP` while the chrome
+        // holds still, so for the length of a transition the pixels under this bar are not the
+        // page's colour at all, and a reading queued there latches a ground the screen is not on
+        // for the next thirty drawn frames. A refused call returns before `step`, so it says so
+        // itself: `groundlog` would otherwise repeat the last call's `src=`.
+        if !may_read {
+            probe.source = GroundSource::Held;
+            return *std::ptr::addr_of!(GROUND_RGB);
+        }
+        if blur_source_pass() || !may_read_ground() {
+            probe.source = GroundSource::Held;
+            return *std::ptr::addr_of!(GROUND_RGB);
+        }
+        let have = (*std::ptr::addr_of!(GROUND_RGB)).is_some();
+        // The band image under the track, or none: no band (the glass is off, or a video plane
+        // fills the screen), a band whose source did not refresh, or one that does not hold the
+        // track. The answer is then the last reading, and the cadence keeps the reading owed.
+        let src = ground_taps(r).map(TapSource::Image);
+        let Some(buf) = probe.step(have, src, "ground") else {
+            return *std::ptr::addr_of!(GROUND_RGB);
+        };
+        let (scale, offset) = probe.composite;
+        let mut taps = [[0.0f32; 3]; GROUND_TAPS];
+        let mut taps_l = [0.0f32; GROUND_TAPS];
+        let lin = |v: f32| {
+            if v <= 0.03928 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let n = GROUND_TAP_PX as usize;
+        for i in 0..GROUND_TAPS {
+            let mut acc = [0.0f32; 3];
+            for p in probe_tap(&buf, i, GROUND_TAP_PX, GROUND_TAPS) {
+                for c in 0..3 {
+                    acc[c] += p[c] as f32 / 255.0;
+                }
+            }
+            let k = (n * n) as f32;
+            // The image holds the ground BEFORE the glass composite's own terms: the same
+            // `colour * scale + offset` the shader applies ([`tap_composite`]), so the reading
+            // is the colour the glass shows under the labels.
+            taps[i] = std::array::from_fn(|c| (acc[c] / k * scale + offset[i][c]).clamp(0.0, 1.0));
+            let y = 0.2126 * lin(taps[i][0]) + 0.7152 * lin(taps[i][1]) + 0.0722 * lin(taps[i][2]);
+            taps_l[i] = if y > 0.008856 {
+                116.0 * y.cbrt() - 16.0
+            } else {
+                903.3 * y
+            };
+        }
+        // **THE WORST TAP, NOT THE MEAN — and this is a contract the mean was quietly breaking.**
+        //
+        // The consumer sizes a BLACK scrim so a light ink clears a contrast floor, so the tap that
+        // needs the most material is the brightest one. A mean describes a bar that straddles an
+        // edge no better than it describes either half: a census of a real library's hero rotation
+        // measured a MEDIAN span of 26.8 L* across these five taps, with half the heroes over 25 and
+        // a third over 40 — and on those, the density the mean asked for left the labels over the
+        // bright end at 2.18:1, 2.75:1, 3.16:1 where the solver believed it had delivered 4:1. Not a
+        // corner case; the common one, and silent, because a mean cannot report that it describes
+        // nothing.
+        //
+        // The cost is a heavier bar on mixed grounds, which is the trade the contrast floor already
+        // made everywhere else. The span is published beside it so the consequence stays visible.
+        let worst = taps_l
+            .iter()
+            .enumerate()
+            .fold(
+                (0usize, f32::MIN),
+                |a, (i, &l)| if l > a.1 { (i, l) } else { a },
+            )
+            .0;
+        GROUND_RGB = Some(taps[worst]);
+        GROUND_SPAN = taps_l.iter().fold(f32::MIN, |a, &b| a.max(b))
+            - taps_l.iter().fold(f32::MAX, |a, &b| a.min(b));
+        *std::ptr::addr_of!(GROUND_RGB)
+    }
+}
+
+/// The Hero controls' own ground sample. This is deliberately NOT [`sample_ground`]: the top bar
+/// asks for the brightest local patch so it can solve a contrast floor, while a control face asks
+/// for the colour of the material it is standing on. Sharing either the result or the rate latch
+/// would make one of those two answers silently wrong.
+///
+/// Five broad boxes are averaged in LINEAR light across the whole action row. That is the visual
+/// model of a very thick, diffuse glass body: it collects the local scene over a wide support, but
+/// neither displaces nor re-draws it. The sampled colour only keys the control's fixed-lightness
+/// OKLCH face; there is no blur texture and therefore no refraction. Crucially this reads after the
+/// backdrop art and its scrims have painted, so an authored green `UltraBlurColors` corner can
+/// never tint a button green when the actual ground under it is blue-black.
+const CONTROL_GROUND_SAMPLE_EVERY: u32 = 30;
+const CONTROL_GROUND_TAPS: usize = 5;
+const CONTROL_GROUND_TAP_PX: c_int = 49;
+static mut CONTROL_GROUND_RGB: Option<[f32; 3]> = None;
+/// The Hero row's probe — its own cadence and its own target, never the bar's.
+static mut CONTROL_PROBE: GroundProbe<CONTROL_GROUND_TAPS> =
+    GroundProbe::new(CONTROL_GROUND_SAMPLE_EVERY, CONTROL_GROUND_TAP_PX);
+
+/// Mark a Hero's sampled ground stale when the item behind the row changes. The last honest answer
+/// remains available during the carousel/route transition; the first settled draw queues a fresh
+/// reading, and a reading still in flight for the old item is dropped rather than latched.
+pub fn control_ground_invalidate() {
+    unsafe {
+        (*std::ptr::addr_of_mut!(CONTROL_PROBE)).invalidate();
+    }
+}
+
+/// **One display-encoded sRGB channel as RADIANCE** (IEC 61966-2-1), and [`enc`] back again.
+///
+/// Free functions rather than the two closures that used to live inside [`diffuse_ground_mean`],
+/// because averaging framebuffer samples is no longer the only thing in this renderer that has to
+/// do it: `ui::underlay` low-passes, grades and reconstructs a whole 15x8 grid, and every one of
+/// those operations is a WEIGHTED SUM, which is only meaningful in linear light. Two copies of a
+/// transfer function are two chances to get an exponent wrong in a way nothing can see.
+#[inline]
+pub fn lin(v: f32) -> f32 {
+    if v <= 0.04045 {
+        v / 12.92
+    } else {
+        ((v + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// The inverse of [`lin`] — linear radiance back to a display-encoded sRGB channel.
+#[inline]
+pub fn enc(v: f32) -> f32 {
+    if v <= 0.0031308 {
+        v * 12.92
+    } else {
+        1.055 * v.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// **Linear radiance straight to an 8-bit display code** — exactly
+/// `(enc(v).clamp(0.0, 1.0) * 255.0 + 0.5) as u8`, answered by a search instead of a `powf`.
+///
+/// That quantisation is a step function of `v` with 255 steps, so it is fully described by the
+/// 255 smallest inputs at which each code begins; the code for `v` is how many of those it has
+/// reached. The thresholds are found ONCE, by bisecting the float bit patterns against the formula
+/// itself on this machine's own `powf`, so the answer is that formula's to the bit (held by
+/// `the_quantised_encode_is_the_powf_encode_to_the_bit`) rather than an approximation of it. A
+/// modal's field texture is 60x32x3 of these per latch: 5760 `powf` were ~4 ms of the Cortex-A53
+/// frame that latched it (2026-09-19); eight comparisons each are not measurable.
+#[inline]
+pub fn enc_u8(v: f32) -> u8 {
+    // `partition_point` counts the thresholds `v` has reached; NaN reaches none, as `as u8` maps
+    // the formula's NaN to 0.
+    enc_u8_thresholds().partition_point(|&t| t <= v) as u8
+}
+
+fn enc_u8_thresholds() -> &'static [f32; 255] {
+    static T: std::sync::OnceLock<[f32; 255]> = std::sync::OnceLock::new();
+    T.get_or_init(|| {
+        let code = |v: f32| (enc(v).clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+        std::array::from_fn(|k| {
+            // Smallest non-negative float whose code is > k. Non-negative floats order as their
+            // bits; code(0) = 0 and code(1) = 255 bracket every step.
+            let (mut lo, mut hi) = (0.0f32.to_bits(), 1.0f32.to_bits());
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                if code(f32::from_bits(mid)) > k as u8 {
+                    hi = mid;
+                } else {
+                    lo = mid + 1;
+                }
+            }
+            f32::from_bits(lo)
+        })
+    })
+}
+
+/// Average display-encoded sRGB samples as radiance and encode the result back to sRGB.
+/// Kept pure so the material's defining operation is host-testable without an OpenGL context.
+fn diffuse_ground_mean(samples: impl IntoIterator<Item = [f32; 3]>) -> [f32; 3] {
+    let mut acc = [0.0f32; 3];
+    let mut n = 0usize;
+    for sample in samples {
+        for c in 0..3 {
+            acc[c] += lin(sample[c]);
+        }
+        n += 1;
+    }
+    if n == 0 {
+        return [0.0; 3];
+    }
+    let k = n as f32;
+    [enc(acc[0] / k), enc(acc[1] / k), enc(acc[2] / k)]
+}
+
+/// [`lin`] of every 8-bit channel value, `lin(v as f32 / 255.0)` exactly — the same function on the
+/// same input, so a mean taken through it is bit-identical to one taken through [`lin`].
+///
+/// A collected Hero-row probe is 5 x 49 x 49 texels, 36,015 channel values, and every one of them
+/// went through a `powf` on the render thread: ~12 ms of CPU on the frame that latched the reading
+/// (television, 2026-09-19 — the probe's read-back itself was 0.2 ms by then). There are only 256
+/// distinct inputs.
+fn lin_u8(v: u8) -> f32 {
+    static LUT: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
+    LUT.get_or_init(|| std::array::from_fn(|i| lin(i as f32 / 255.0)))[v as usize]
+}
+
+/// [`diffuse_ground_mean`] over RGBA8 texels, through [`lin_u8`]: the same sum in the same order,
+/// so the same answer to the bit.
+fn diffuse_ground_mean_u8<'a>(texels: impl IntoIterator<Item = &'a [u8]>) -> [f32; 3] {
+    let mut acc = [0.0f32; 3];
+    let mut n = 0usize;
+    for p in texels {
+        for c in 0..3 {
+            acc[c] += lin_u8(p[c]);
+        }
+        n += 1;
+    }
+    if n == 0 {
+        return [0.0; 3];
+    }
+    let k = n as f32;
+    [enc(acc[0] / k), enc(acc[1] / k), enc(acc[2] / k)]
+}
+
+/// Sample the pixels already rendered beneath one Hero action row.
+pub fn sample_control_ground(r: [f32; 4], may_read: bool) -> Option<[f32; 3]> {
+    unsafe {
+        if !may_read || blur_source_pass() || !may_read_ground() {
+            return *std::ptr::addr_of!(CONTROL_GROUND_RGB);
+        }
+        let have = (*std::ptr::addr_of!(CONTROL_GROUND_RGB)).is_some();
+        let (gx, gy, gw, gh) = plx_base::surface::viewport();
+        let (sx, sy) = (gw as f32 / SCR_W, gh as f32 / SCR_H);
+        let cy = gy + gh - 1 - ((r[1] + r[3] * 0.5) * sy) as c_int;
+        let origins: [(c_int, c_int); CONTROL_GROUND_TAPS] = std::array::from_fn(|i| {
+            let f = (i as f32 + 0.5) / CONTROL_GROUND_TAPS as f32;
+            let x = gx + ((r[0] + r[2] * f) * sx) as c_int;
+            (
+                (x - CONTROL_GROUND_TAP_PX / 2).clamp(gx, gx + gw - CONTROL_GROUND_TAP_PX),
+                (cy - CONTROL_GROUND_TAP_PX / 2).clamp(gy, gy + gh - CONTROL_GROUND_TAP_PX),
+            )
+        });
+        let probe = &mut *std::ptr::addr_of_mut!(CONTROL_PROBE);
+        let Some(buf) = probe.step(have, Some(TapSource::Framebuffer(origins)), "control ground") else {
+            return *std::ptr::addr_of!(CONTROL_GROUND_RGB);
+        };
+        let taps: [[f32; 3]; CONTROL_GROUND_TAPS] = plx_base::diag::spans::span("gndmean", || {
+            std::array::from_fn(|i| {
+                diffuse_ground_mean_u8(probe_tap(&buf, i, CONTROL_GROUND_TAP_PX, CONTROL_GROUND_TAPS))
+            })
+        });
+        CONTROL_GROUND_RGB = Some(diffuse_ground_mean(taps));
+        *std::ptr::addr_of!(CONTROL_GROUND_RGB)
+    }
+}
+
+// ---- the shared output dither: one amplitude, one policy ---------------------------------------
+
+/// Amplitude of the shared output dither, in colour units: **±1 LSB of an 8-bit framebuffer**.
+///
+/// Triangular rather than uniform, and the triangle is already in the tile ([`noise_tex`]), so this
+/// is the ONE place the TPDF form differs from the ±½ LSB uniform it replaced — a factor of two on
+/// a number, not a second channel on two million fragments.
+pub const DITHER_LSB: f32 = 2.0 / 255.0;
+
+/// **THE ONE RULE for whether a surface's output needs dithering**, shared by the three programs
+/// built with `glsl_dithered!`. `shaders/dither.glsl` is the argument; this is the decision.
+///
+/// **A field dithers whenever it is drawn, and so does every page wash with a gradient** (one of a
+/// single colour is a clear, `flat_clear`, with nothing to band). The noise is one texture
+/// fetch and one add per fragment (`dither.glsl`'s cost rules), priced by AREA. On the 2M-fragment
+/// wash it was once the difference between 45 and 50 fps on Home's fold (2026-09-02), and for that
+/// the wash under moving artwork — Home's, Detail's — was for a while allowed to drop it while the
+/// artwork slid. That exception is gone (2026-09-19): the rules and the field mesh brought the whole
+/// of the wash's noise to ~0.6M cycles a frame on the fold, and the wash-only band under a sliding
+/// photograph banded visibly without it. `draw_ambient` takes no flag at all now.
+///
+/// **No motion verdict is in this decision, and putting one back is the recorded mistake — three
+/// times over.** For one day (2026-09-04) the gate was global — this function and `draw_ambient`
+/// both refused every draw while any spring was in flight — and it was wrong on every screen whose
+/// wash is the whole picture: Settings, the who's-watching picker, first run, sign-in. It was then
+/// narrowed to the PAGE's verdict, which was the same mistake one layer down (2026-09-19):
+/// `AmbientWash::step` drives twelve corner springs through [`spring`], so the wash's own colour
+/// dissolve — and every focus pop, shelf scroll and press dip beside it — reported page motion and
+/// undithered the wash for the length of the animation. Then to the ARTWORK's motion, which left
+/// the band of wash below Home's diving hero undithered for the whole dive. Every time the owner
+/// saw the same thing: bands that appear while something moves and vanish when it stops.
+///
+/// **And no dither on a RECT at all.** Until 2026-09-04 `fs_src` and `fs_shadow` carried the
+/// prelude too, behind a per-draw ramp test (`dither_for_ramp`: slow enough, broad enough, a
+/// container rather than a page field). The test answered 0 for nearly every draw — and the draws
+/// still paid, because the branch it gated was resolved per draw on Midgard but not for free: the
+/// hero paging scene measured +4M shader words a frame with the prelude on those two programs
+/// against without, the whole of a 57→50 fps regression, on frames where every ramp test had
+/// answered 0. A rect's ramp is a scrim or a two-stop fill, crossing tens of codes over hundreds
+/// of pixels, and nobody had reported a tread on one; the fields that DID band (the wash, the
+/// glass blur, and the modal ground whose program slot the underlay field now holds) are exactly
+/// the three that keep the prelude.
+
+/// **The rule for a surface whose ramp is in SAMPLED DATA or a whole-screen field** — the frosted
+/// glass over a blurred snapshot and the Settings ground's desaturate-and-tint grade. (The ambient
+/// wash does not ask: it is always full-screen, so `draw_ambient` passes [`DITHER_LSB`] directly.)
+///
+/// The tread cannot be computed here: the ramp is whatever the blur chain produced, and a blur is
+/// by construction the slowest field the app ever puts on screen (that is what a blur IS). So the
+/// area test is the whole of it, and the answer above the threshold is always yes.
+/// Measured on the television, Settings over Home before this existed: a 700-row column through
+/// the ground spanned luma 55.7 to 59.1 in FOUR distinct levels, treads of 158, 157 and 146 rows.
+pub fn dither_for_field(w: f32, h: f32) -> f32 {
+    if w < DITHER_MIN_SPAN || h < DITHER_MIN_SPAN {
+        return 0.0;
+    }
+    DITHER_LSB
+}
+
+/// The smallest surface on which a staircase is findable by eye, in authored px, applied to BOTH
+/// axes. Below it the amplitude is 0: the fetch still runs (the prelude has no branch — cost rule
+/// 1 in `dither.glsl`) but on a field this small it is on the idle texture pipe and adds nothing.
+const DITHER_MIN_SPAN: f32 = 96.0;
+
+/// Bind the dither tile on texture unit 2 for the LIFE OF THE PROCESS, and leave the active unit
+/// back on 0.
+///
+/// Unit 0 is every program's own texture and unit 1 is `fs_glass.frag`'s sharp source, so 2 is the
+/// first free one. Binding it once here rather than per draw is what keeps the drawing path free of
+/// `glActiveTexture` entirely: nothing else in this renderer ever selects unit 2, so the binding
+/// cannot be disturbed, and each program only has to be told its sampler's unit once at link time.
+unsafe fn bind_dither_tile() {
+    NOISE_TEX = noise_tex();
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, NOISE_TEX);
+    glActiveTexture(GL_TEXTURE0);
+}
+
+/// Point a freshly linked `glsl_dithered!` program's sampler at unit 2 and return its `u_dither`
+/// location.
+///
+/// **It binds `prog` itself, and that is not defensiveness.** `glUniform*` writes to the CURRENTLY
+/// BOUND program, and a uniform LOCATION is an index into that program's own table — so calling
+/// this with somebody else's program current does not fail, warn or link-error: it writes 2 into
+/// whatever uniform happens to sit at that index in the neighbour. Written without the bind, it
+/// set `u_dither_tex`'s index on the ambient program while the fill program was current, and the
+/// television came up with a blank mid-grey Home — every shelf, card and glyph gone, the tab bar
+/// still there, and nothing in any log. Restoring the caller's program is left to `use_prog`'s own
+/// caching at the end of init, which every other program-scoped uniform here already relies on.
+unsafe fn dither_uniforms(prog: c_uint) -> c_int {
+    use_prog(prog);
+    let tex = glGetUniformLocation(prog, c"u_dither_tex".as_ptr());
+    if tex >= 0 {
+        glUniform1i(tex, 2);
+    }
+    glGetUniformLocation(prog, c"u_dither".as_ptr())
+}
+
+/// The authored rect a blur source pass or a [`FrameCache::render_region`] fill may draw into; nothing
+/// outside it can affect the result.
+static mut CULL_RECT: Option<[f32; 4]> = None;
+
+// **Is the host page being served from [`FrameCache`] rather than rasterized?** The flag, its doc
+// and its two accessors live in `plx_machine::idle`, the machine layer: `idle::invalidate` has to read it,
+// and this module may name that layer but not the reverse. Every primitive below consults it
+// through these two names exactly as it did when the flag was declared here.
+pub use plx_machine::idle::{page_frozen, set_page_frozen};
+
+thread_local! {
+    /// **This frame's picture is a hardware VIDEO PLANE** (restructure spec §9), armed for the
+    /// length of the draw by `Dispatcher::draw_with`.
+    ///
+    /// THREAD-LOCAL, unlike the `static mut` page freeze beside it, and deliberately: it is draw
+    /// state, the draw is one thread's, and the host suite runs several dispatchers at once — a
+    /// process-wide flag would let one test's video-plane frame refuse another test's perfectly
+    /// ordinary snapshot, which is the cross-test pollution `lib.rs::testlock` exists to describe
+    /// and cannot fix from outside.
+    static VIDEO_PLANE_FRAME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// The release build's once-per-process log latch — see [`video_plane_refuses`].
+static VIDEO_PLANE_TOLD: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Arm or lift the video-plane frame, returning what was in force (restored, like the page freeze).
+#[inline]
+pub fn set_video_plane_frame(on: bool) -> bool {
+    VIDEO_PLANE_FRAME.with(|f| f.replace(on))
+}
+
+/// Is this frame's picture the hardware video plane?
+#[inline]
+pub fn video_plane_frame() -> bool {
+    VIDEO_PLANE_FRAME.with(|f| f.get())
+}
+
+/// **The refusal every framebuffer-SAMPLING door takes on a video-plane frame** (spec §9).
+///
+/// `true` = refuse. The four doors are `popover::host::begin_frame` (the frozen-host snapshot),
+/// `draw_blur_backdrop` (Glass), `gfx::field_kick` (the field `RouteGround::draw_host`
+/// latches its live source from) and `FrameCache::capture`. Every one of them answers a question by
+/// READING BACK framebuffer 0 —
+/// and on this frame framebuffer 0 is a hole: the picture the viewer sees is a hardware plane the
+/// television composites underneath our surface, which GL cannot read. What each of them would
+/// cache is therefore a photograph of transparent black, served back over the video for as long as
+/// the cache lives.
+///
+/// **The doors also stay shut past the straighten pass** (`straighten.rs`), which is the frame's
+/// last draw while the plane is bound: from then until the next `frame_begin` framebuffer 0 holds
+/// STRAIGHT colour for the television's compositor, not the premultiplied picture every consumer of
+/// a snapshot composites, so a read of it is just as wrong, in another way.
+///
+/// **A debug build PANICS**, because reaching one of these is a structural mistake — a screen that
+/// declared `RenderStrategy::VideoPlane` and then asked for a snapshot — and the picture it
+/// produces on a television is a black rectangle nobody can explain from a log. A release build
+/// logs ONCE and refuses; the once is deliberate, since a door reached at all is reached every
+/// frame and a per-frame line would bury the event log during playback.
+pub fn video_plane_refuses(what: &str) -> bool {
+    // **Past the straighten pass the doors are shut too** (`straighten.rs`): the frame's last draw
+    // turned framebuffer 0 into STRAIGHT colour for the compositor, so a read of it is not the
+    // premultiplied picture every consumer composites. The pass is the one deliberate read of the
+    // framebuffer on a video-plane frame, and it caches nothing: it copies into its own texture and
+    // draws straight back.
+    let straight = straighten::straightened();
+    if !video_plane_frame() && !straight {
+        return false;
+    }
+    // Under `cargo test` these doors are driven ON PURPOSE — the point of
+    // `a_video_plane_screen_replaces_its_host_and_takes_no_snapshot` is to watch each one refuse —
+    // so the assertion is the SHIPPING debug build's, not the harness's.
+    #[cfg(all(debug_assertions, not(any(test, feature = "test-support"))))]
+    {
+        if straight {
+            panic!("{what} after the straighten pass: framebuffer 0 holds straight colour for the compositor");
+        }
+        panic!("{what} on a VIDEO PLANE frame: the plane is not in our framebuffer to sample");
+    }
+    #[allow(unreachable_code)]
+    {
+        if !VIDEO_PLANE_TOLD.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            plx_base::eventlog::log(&format!(
+                "videoplane: refused {what} — the plane is not in our framebuffer to sample"
+            ));
+        }
+        true
+    }
+}
+
+/// Should this quad be skipped entirely?
+///
+/// Two independent reasons. The frozen page ([`page_frozen`]) is tested first because it is a
+/// whole-pass state rather than a per-quad geometric one.
+///
+/// The scissor bounds what a source pass may WRITE, but on a tile-based GPU it does not stop the
+/// tiler binning geometry or the fragment jobs walking tiles: measured on the television, a source
+/// pass whose live area is 152x99 processed **1193 tiles where 70 would do**, because the viewport
+/// that maps authored space into the target necessarily spans the whole canvas. Refusing the draw
+/// call is the only thing that removes the work, and it is exact rather than conservative — the
+/// backdrop is a crop of the page, so a quad that misses the region cannot contribute a fragment
+/// to it.
+///
+/// Always `false` outside a source pass or a region fill ([`CULL_RECT`] is `None`), so the visible
+/// frame is drawn exactly as it always was.
+#[inline]
+pub fn culled(x: f32, y: f32, w: f32, h: f32) -> bool {
+    if page_frozen() || backdrop::suppressed() {
+        return true;
+    }
+    match unsafe { CULL_RECT } {
+        None => false,
+        // A slack margin covers the AA bleed and the SDF rim, which paint a pixel or so beyond the
+        // rect every primitive declares.
+        Some(r) => {
+            const SLACK: f32 = 4.0;
+            x + w < r[0] - SLACK
+                || y + h < r[1] - SLACK
+                || x > r[0] + r[2] + SLACK
+                || y > r[1] + r[3] + SLACK
+        }
+    }
+}
+
+/// Restores framebuffer 0 and everything the source pass changed, ON EVERY EXIT PATH.
+///
+/// This is a `Drop` guard and not straight-line code for one specific reason: `home_draw` opens
+/// with `ui::guard`, which CATCHES a panic and returns normally. A panic anywhere in the page
+/// would otherwise leave the FBO bound with the region viewport set — and nothing else in the app
+/// ever binds framebuffer 0, so every subsequent frame would render into a 480x270 texture and the
+/// television would show a frozen picture with no crash, no log line and no way back.
+struct DirectPass;
+
+impl Drop for DirectPass {
+    fn drop(&mut self) {
+        unsafe {
+            BLUR_IN_PASS = false;
+            CLIP_TARGET = None;
+            CULL_RECT = None;
+            scissor_off();
+            glBindFramebuffer(GL_FRAMEBUFFER, plx_base::surface::default_fb());
+            let (vx, vy, vw, vh) = plx_base::surface::viewport();
+            glViewport(vx, vy, vw, vh);
+            glEnable(GL_BLEND);
+        }
+    }
+}
+
+/// The axis divisor the direct source pass renders at — 1/4, and the only value.
+///
+/// This used to answer `None` unless `/tmp/plxnative-blurdirect` was armed, and `None` meant "use
+/// the capture path instead". The A/B it existed for is over: the direct pass is 4.5x cheaper gross
+/// and 5.8x cheaper net than the `glCopyTexSubImage2D` plus two reductions it replaces, -3.3% of
+/// the whole frame, and it is what takes a refresh frame from 111% of a vsync slot to 99.5% — i.e.
+/// the reason the backdrop can be refreshed on every present at all. Three sessions, interleaved,
+/// agreeing to 0.4%.
+///
+/// 1/4 is not a compromise but the MATCHED sampling rate for this kernel: the whole usable ladder
+/// from 1/2 to 1/8 spans 0.96% of a mean frame and zero frames, 1/8 loses 2.2% of large-scale
+/// contrast to save 0.38%, and 1/2 costs more AND looks rougher because the Kawase tap offsets
+/// scale with the source while the bilinear box does not. There is nothing to tune here, so there
+/// is no knob.
+///
+/// `Option` is kept rather than a bare `u32` because [`blur_snapshot_direct`] still has a real
+/// refusal — a drawable whose dimensions do not divide by the divisor — and its callers already
+/// read the fallback from this type.
+#[inline]
+pub fn blur_direct_scale() -> Option<u32> {
+    // Supersampled, the drawable is `n`x the canvas, so the divisor grows by `n` to render the
+    // source at the same AUTHORED resolution a television does — the same material, not a finer one.
+    (!unsafe { BLUR_DIRECT_OFF })
+        .then_some(BLUR_DIRECT_SCALE * plx_base::surface::render_scale() as u32)
+}
+
+/// The backdrop source, rendered by DRAWING THE SCENE AGAIN at 1/`scale` per axis, instead of
+/// copying framebuffer 0 and reducing it twice.
+///
+/// This is the experiment `docs/backdrop-blur-profiling.md` sizes. The capture path spends a
+/// `glCopyTexSubImage2D` of the region plus two 2x reduction passes to arrive at a quarter-
+/// resolution image of what is behind the panel; the renderer is immediate-mode and holds no
+/// display list, but it is also a pure function of UI state, so the same image can be produced by
+/// running the page draw a second time into a small target. Three passes replace six.
+///
+/// # How the scene lands in a cropped, scaled target with no shader change
+///
+/// Both vertex shaders map an authored pixel with `ndc = px / u_screen * 2 - 1` and emit
+/// `-ndc.y`. Nothing in that depends on the target's size, so a SCALED, NEGATIVE-ORIGIN viewport
+/// is enough to place any sub-rectangle of the authored canvas anywhere in any target:
+///
+/// ```text
+/// glViewport(-rx/scale, -(gh - ry - rh)/scale, gw/scale, gh/scale)
+/// ```
+///
+/// Solving `vx + (rx/gw)*vw == 0` and `vx + ((rx+rw)/gw)*vw == rw/scale` gives `vw = gw/scale` and
+/// `vx = -rx/scale`; the y row falls out the same way once the shaders' flip is accounted for, and
+/// lands on the canvas-bottom distance because GL's viewport origin is bottom-left while the
+/// region is measured from the canvas top. A negative viewport origin is ordinary — the viewport
+/// is an affine map, not a clip — and the scissor below is what bounds the writes.
+///
+/// # Orientation, which is the easiest thing here to get wrong
+///
+/// The scene shaders' flip puts authored y=0 at the target's TOP row, so the direct render is
+/// stored bottom-up — the same orientation `glCopyTexSubImage2D` produces, since a window copy is
+/// bottom-up too. What follows it is [`blur_direct_passes`] flips, and the result is handed to
+/// [`blur_uv_rect`] and to the `u_uvpx` V sign in `fs_glass` through the same `bottom_up` field the
+/// capture path writes.
+///
+/// **That parity is DERIVED here, not asserted.** It used to be a hard-coded `false` under a note
+/// saying the two paths' counts were "both ODD… that is luck, not design; if a pass is ever added
+/// or removed here, this is the line that has to move with it." A pass was then removed from the
+/// OTHER path — `BLUR_REDUCTIONS` went 2 to 1 — and the line that had to move was the capture
+/// path's, which is not the one the warning was written next to. Both now count their own passes.
+///
+/// Returns `false` if it could not run, in which case the caller must fall back to the capture
+/// path — the snapshot is left untouched and no GL state has changed.
+pub fn blur_snapshot_direct(reg: [f32; 4], draw_scene: &mut dyn FnMut()) -> bool {
+    unsafe {
+        let Some(scale) = blur_direct_scale() else {
+            return false;
+        };
+        if !blur_lazy_init() {
+            return false;
+        }
+        let Some(c) = (*std::ptr::addr_of!(BLURST)).as_ref() else {
+            return false;
+        };
+        BLUR_SNAPSHOTS.fetch_add(1, Ordering::Relaxed);
+        let step = scale as c_int;
+        let (rx, ry, rw, rh) = blur_region_px_align(reg, c.gw, c.gh, step);
+        let (tw, th) = ((rw / step).max(1), (rh / step).max(1));
+        // The taps ping-pong through `a`/`b`, so the scene has to fit them. At scale 4 the live
+        // area is exactly their allocation; anything larger is a caller error, not a clamp.
+        if tw > c.sw || th > c.sh {
+            log(&format!(
+                "blur direct: {tw}x{th} exceeds the {}x{} tap targets",
+                c.sw, c.sh
+            ));
+            return false;
+        }
+        // `glViewport` takes integers and the divisions below carry the scale, so a canvas that
+        // does not divide by `scale` would place the region a fraction of a target pixel out and
+        // the backdrop would creep as the panel moved. The region itself is already aligned.
+        if c.gw % step != 0 || c.gh % step != 0 {
+            log(&format!(
+                "blur direct: canvas {}x{} does not divide by {scale}",
+                c.gw, c.gh
+            ));
+            return false;
+        }
+        while glGetError() != GL_NO_ERROR {}
+
+        let vx = -rx / step;
+        let vy = -(c.gh - ry - rh) / step;
+        use crate::gfx::profile::phase;
+        phase("blur.scene", || {
+            // Armed before anything else, and disarmed by `DirectPass::drop` however this exits.
+            BLUR_IN_PASS = true;
+            let _restore = DirectPass;
+            glBindFramebuffer(GL_FRAMEBUFFER, c.a_fbo);
+            glViewport(vx, vy, c.gw / step, c.gh / step);
+            // The viewport places the image; the scissor is what stops the rest of the page
+            // writing over the tap targets' other content — and it bounds `glClear`, which is
+            // viewport-independent. `home_draw` opens with its own `frame_clear`, so the ground
+            // is laid inside this box rather than across the whole allocation.
+            scissor_box(0, 0, tw, th);
+            // **The replay starts on the app ground, never on what the target last held.** `a`
+            // is the tap chain's ping-pong target, so a scene that paints nothing under the
+            // region (the dip's capture frames) would publish the previous source's blur as this
+            // one's. Scissored and first in the pass: free on a tiler.
+            let (cr, cg, cb) = tokens::CLEAR_RGB;
+            set_clear_color(cr, cg, cb, 1.0);
+            glClear(GL_COLOR_BUFFER_BIT);
+            // The same triple the viewport just took, so `Painter::clip` lands on the same pixels.
+            CLIP_TARGET = Some((vx, vy, c.gw as f32 / SCR_W / step as f32, tw, th));
+            // Authored-space bounds for the draw-call cull. `reg` is already what the region was
+            // aligned to, so this and the scissor describe the same rectangle.
+            CULL_RECT = Some([
+                rx as f32 * SCR_W / c.gw as f32,
+                ry as f32 * SCR_H / c.gh as f32,
+                rw as f32 * SCR_W / c.gw as f32,
+                rh as f32 * SCR_H / c.gh as f32,
+            ]);
+            // The scene expects the ordinary blend state initialized at boot. Primitives that
+            // specialize RGB blending restore it before returning, so enabling is sufficient.
+            glEnable(GL_BLEND);
+            draw_scene();
+        });
+
+        glDisable(GL_BLEND);
+        let win = |uw: c_int, uh: c_int, tex_w: c_int, tex_h: c_int| {
+            (uw as f32 / tex_w as f32, uh as f32 / tex_h as f32)
+        };
+        let tap_uv = win(tw, th, c.sw, c.sh);
+        // Hold the AUTHORED radius fixed as the source resolution moves: a tap offset is in source
+        // texels, and a texel covers `scale` authored pixels, so the offsets that give the shipped
+        // look at quarter resolution have to shrink in proportion at any finer divisor. Without
+        // this a scale sweep changes two variables at once and measures neither.
+        let tap_k = 4.0 * plx_base::surface::render_scale() as f32 / scale as f32;
+        for (i, taps) in blur_taps().iter().enumerate() {
+            let name = if i == 0 { "blur.tap1" } else { "blur.tap2" };
+            phase(name, || {
+                glViewport(0, 0, tw, th);
+                let (fbo, src) = if i % 2 == 0 {
+                    (c.b_fbo, c.a)
+                } else {
+                    (c.a_fbo, c.b)
+                };
+                glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+                glClear(GL_COLOR_BUFFER_BIT);
+                use_prog(BPROG);
+                glUniform4f(BL_UVRECT, 0.0, 0.0, tap_uv.0, tap_uv.1);
+                let off = taps * tap_k;
+                note_px(Class::Blur, (tw as f64) * (th as f64));
+                glUniform2f(BL_TEXEL, off / c.sw as f32, off / c.sh as f32);
+                glBindTexture(GL_TEXTURE_2D, src);
+                glDrawArrays(GL_TRIANGLE_STRIP, 0, 4, straighten::Extent::Target);
+            });
+        }
+
+        // Up to half resolution, exactly as the capture path does, so `out` is `mid` and the glass
+        // draw is bit-for-bit the same consumer in both modes. At a divisor beyond 4 this is a
+        // larger magnification than 2x, which is precisely the quality question the scale sweep is
+        // for; the filter itself is unchanged.
+        let (r2w, r2h) = ((rw / 2).max(1), (rh / 2).max(1));
+        phase("blur.up", || {
+            glBindFramebuffer(GL_FRAMEBUFFER, c.mid_fbo);
+            glViewport(0, 0, r2w, r2h);
+            glClear(GL_COLOR_BUFFER_BIT);
+            use_prog(BPROG);
+            glUniform4f(BL_UVRECT, 0.0, 0.0, tap_uv.0, tap_uv.1);
+            note_px(Class::Blur, (r2w as f64) * (r2h as f64));
+            glUniform2f(
+                BL_TEXEL,
+                BLUR_UP_TAP / c.mw as f32,
+                BLUR_UP_TAP / c.mh as f32,
+            );
+            glBindTexture(GL_TEXTURE_2D, c.a);
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4, straighten::Extent::Target);
+        });
+
+        glBindFramebuffer(GL_FRAMEBUFFER, plx_base::surface::default_fb());
+        let (vx, vy, vw, vh) = plx_base::surface::viewport();
+        glViewport(vx, vy, vw, vh);
+        glEnable(GL_BLEND);
+        let e = glGetError();
+        if e != GL_NO_ERROR {
+            log(&format!(
+                "blur direct: GL error=0x{e:x} — falling back to the capture path"
+            ));
+            BLUR_DIRECT_OFF = true;
+            return false;
+        }
+
+        blur_publish(rx, ry, rw, rh, c.mid, blur_direct_passes(), tw, th);
+        true
+    }
+}
+
+/// Declaration and visible drawing share these refusal conditions. A disabled glass or a
+/// hardware video plane must not schedule a source before the draw-time guard can refuse it.
+pub fn live_blur_available() -> bool {
+    !unsafe { BLUR_OFF } && !video_plane_frame() && !masked(Class::Glass)
+}
+
+/// Draw the frosted backdrop for a panel at `(x,y,w,h)` with corner `radius`, capturing the
+/// snapshot first if needed. Returns whether the material was handled, including a culled or
+/// declaration-only surface. `false` asks the caller to paint its flat fallback.
+///
+/// `rest` is where the panel comes to REST, and it is the rect the region is built around — not
+/// `(x,y,w,h)`, which is where this frame draws it. A popover slides into place over its appear
+/// spring, so the two differ for the whole of that animation; keying the region on the moving rect
+/// would fail containment on nearly every frame and add policy-independent captures throughout the
+/// slide. Callers with no motion (the tab bar) pass their own rect twice.
+/// **What a glass surface wears over its backdrop** — its scrim's two stops and its edge.
+///
+/// Both used to be a SECOND draw of the same rounded rect on top of the blur, which is two
+/// antialiased edges for one object; `fs_glass.frag`'s note has the measurement that ended that.
+/// `NONE` is the popover's case: a sheet's frost is already `u_tint` and its edge is the shader's
+/// own specular, so it wears nothing here and the block costs it one compare.
+#[derive(Clone, Copy)]
+pub struct GlassFace {
+    pub scrim_top: [f32; 4],
+    pub scrim_bot: [f32; 4],
+    pub rim: [f32; 4],
+    /// The edge facing the light, as its OWN colour and weight, drawn over the perimeter. White in
+    /// both polarities — the lamp does not move because the material did.
+    pub rim_lit: [f32; 4],
+    /// Rim width in px. 1.0 is the design system's `inset 0 0 0 1px`.
+    pub rim_w: f32,
+}
+impl GlassFace {
+    pub const NONE: Self = Self {
+        scrim_top: [0.0; 4],
+        scrim_bot: [0.0; 4],
+        rim: [0.0; 4],
+        rim_lit: [0.0; 4],
+        rim_w: 1.0,
+    };
+}
+
+/// **Snapshot UV back to the screen**: `(su, sv, ou, ov)` with `screen_uv = uv * (su, sv) + (ou, ov)`
+/// over the whole canvas, top-down — `blur_uv_rect` inverted, for the region `reg` the snapshot holds
+/// in a window of `span` of its texture. Both composite-time terms that live on the page (the dim's
+/// field, the wash's delta) are specified over the screen and read at the sampled snapshot uv.
+fn snapshot_to_screen(reg: [f32; 4], span: [f32; 2], bottom_up: bool) -> [f32; 4] {
+    let su = reg[2] / (span[0] * SCR_W);
+    let ou = reg[0] / SCR_W;
+    let (sv, ov) = if bottom_up {
+        (-reg[3] / (span[1] * SCR_H), (reg[1] + reg[3]) / SCR_H)
+    } else {
+        (reg[3] / (span[1] * SCR_H), reg[1] / SCR_H)
+    };
+    [su, sv, ou, ov]
+}
+
+pub fn draw_blur_backdrop(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    rest: [f32; 4],
+    radius: f32,
+    tint: *const f32,
+    rim: GlassRim,
+    face: GlassFace,
+    deep: f32,
+    rises: bool,
+) -> bool {
+    let live = backdrop::surface_with(Rect::new(x,y,w,h), rises);
+    if live.is_some_and(|r| !r.draw) { return true; }
+    unsafe {
+        // Direct jobs never intersect a lower glass: those bands capture the visible prefix
+        // instead, retaining the lower surface's complete composite. Never capture recursively
+        // from the FBO being produced. The explicit walk ceiling has already refused this glass
+        // and everything above it.
+        // Keep material-dependent child calls identical to declaration. The independent
+        // source does not sample this lower glass, so it is handled without painting it.
+        if BLUR_IN_PASS { return true; }
+        // §9: a Glass surface samples the framebuffer behind it, and on a video-plane frame there
+        // is nothing behind it in OUR framebuffer — the picture is a hardware plane. `ui/mod.rs`
+        // has said "never call it on the player route" in prose since the blur landed; this is the
+        // same rule, enforced, and keyed on the plane being BOUND rather than on the route.
+        if video_plane_refuses("Glass::backdrop") {
+            return false;
+        }
+        // A glass surface belonging to a FROZEN page is in the snapshot already, and the chain it
+        // would run writes FBOs that `culled` cannot refuse — so it is turned away here, where the
+        // whole surface is decided. The popover's own glass never reaches this branch: its draw is
+        // wrapped in `popover::host::live`, which lifts the freeze.
+        if page_frozen() {
+            return false;
+        }
+        // DEV: a `drawmask=glass` leg removes the WHOLE surface — chain, composite and the region
+        // bookkeeping — rather than only the panel quad, so the leg it prices is "this glass is
+        // not here". `false` puts the caller on its opaque ground, exactly as a latched-off blur
+        // does. REFUSAL ONLY: the ledger entry is booked further down, after every path that
+        // returns without drawing, because this one sits above three of them.
+        if masked(Class::Glass) {
+            return false;
+        }
+        let need = blur_region_for(rises, rest[0], rest[1], rest[2], rest[3]);
+        let retained;
+        let c = if let Some(request) = live {
+            if !BLUR_IN_PASS && (request.refresh || backdrop::image(request.z).is_none_or(|image| !image.covers(request.rect))) {
+                // Activation and newly exposed geometry capture the framebuffer prefix HERE:
+                // the layer walker has reached, but has not drawn, this glass's z ceiling.
+                // `inl` (armed `FRAMEDROP` spans only, empty otherwise, like `src`): one INLINE
+                // capture, so a probe counts the frames that took this path (a glass beneath a
+                // lower live glass) instead of inferring them from tile counts.
+                let captured = plx_base::diag::spans::span("inl", || {
+                    if !backdrop::begin_inline_capture(request.z) { return false; }
+                    BLUR_VALID=false;
+                    let r = backdrop::region(request.z).unwrap_or(Rect::new(x,y,w,h));
+                    blur_snapshot(blur_region_for(backdrop::rises(request.z), r.x,r.y,r.w,r.h));
+                    if !retain_backdrop(request.z) {
+                        backdrop::capture_failed(request.z);
+                        return false;
+                    }
+                    true
+                });
+                if !captured { return false; }
+            }
+            retained = backdrop::image(request.z);
+            let Some(image) = retained.as_ref() else { return false; };
+            &image.chain
+        } else {
+            retained = None;
+            // The dev load dial is a synthetic chain benchmark, outside the live surface walk.
+            BLUR_WANT_CUR = blur_region_union(*std::ptr::addr_of!(BLUR_WANT_CUR), need);
+            let stale = (*std::ptr::addr_of!(BLURST)).as_ref()
+                .is_none_or(|c| !blur_region_covers(c.reg,x,y,w,h));
+            if !BLUR_VALID || stale {
+                blur_snapshot(blur_region_union(*std::ptr::addr_of!(BLUR_WANT_PREV),need));
+            }
+            if BLUR_OFF || !BLUR_VALID { return false; }
+            let Some(c) = (*std::ptr::addr_of!(BLURST)).as_ref() else { return false; };
+            c
+        };
+        // ...and only NOW is a composite certain, so this is where the ledger hears about it. The
+        // mask was answered at the top of the function; this books the quad. Booking it up there
+        // instead credited `glass` with a full panel per surface per frame on every frame that
+        // returned early — the blur latched off, or a snapshot that could not be taken — which is
+        // precisely the quietly-wrong number this module's doc warns a misplaced hook produces.
+        // (`gate` clamps to the panel and to `Painter::clip`, so an off-screen panel books zero
+        // area of its own accord; what it must not do is book a panel that never rasterized.)
+        if gate(Class::Glass, x, y, w, h) {
+            return false;
+        }
+        // How much of `out` the region occupies. Both paths end with the up pass back to half res,
+        // so `out` is `mid` whoever took the snapshot and the live area is the region halved.
+        debug_assert_eq!(
+            c.out, c.mid,
+            "a finished snapshot lands in `mid`, on either path"
+        );
+        let span = [
+            (c.rw / 2) as f32 / c.mw as f32,
+            (c.rh / 2) as f32 / c.mh as f32,
+        ];
+        let uv = blur_uv_rect(x, y, w, h, c.reg, span, c.bottom_up);
+        use_prog(GPROG);
+        let source_alpha = if retained.as_ref().is_some_and(|image| image.alpha_invariant) {
+            live.and_then(|request| backdrop::source_alpha(request.z)).unwrap_or(1.0)
+        } else { 1.0 };
+        let ground = tokens::CLEAR_RGB;
+        glUniform1f(GL_SOURCE_ALPHA, source_alpha);
+        glUniform3f(GL_SOURCE_GROUND, ground.0, ground.1, ground.2);
+        // THE MODAL DIM, at composite. A band whose dim is the last draw under it filters the
+        // UNDIMMED prefix once (`backdrop::dim_deferred` skipped the dim in the replay) and takes
+        // this frame's dim here, in `srcRGB`, before the sharp rim mix — the sharp grab is off the
+        // finished framebuffer, which carries the dim already. Blur is linear and the ink is a
+        // smooth field, so this is the picture the in-source dim made, without re-filtering the
+        // page every frame its alpha ramps or its field re-latches (`backdrop::Dim`).
+        let dim = if retained.as_ref().is_some_and(|image| image.dim_excluded) {
+            live.and_then(|request| backdrop::deferred_dim(request.z))
+        } else {
+            None
+        };
+        match dim {
+            Some(d) if d.tint[3] > 0.0 => {
+                glUniform4f(GL_DIM, d.tint[0], d.tint[1], d.tint[2], d.tint[3]);
+                glUniform1f(GL_DIM_FIELD, if d.tex != 0 { 1.0 } else { 0.0 });
+                if d.tex != 0 {
+                    let [su, sv, ou, ov] = snapshot_to_screen(c.reg, span, c.bottom_up);
+                    glUniform4f(GL_DIM_UV, su, sv, ou, ov);
+                    glActiveTexture(GL_TEXTURE3);
+                    glBindTexture(GL_TEXTURE_2D, d.tex);
+                    glActiveTexture(GL_TEXTURE0);
+                }
+            }
+            _ => glUniform4f(GL_DIM, 0.0, 0.0, 0.0, 0.0),
+        }
+        // THE PAGE WASH, as a delta, in the same slot of the same expression (`backdrop::Ground`):
+        // the image keeps the wash it was drawn under and the composite owes this frame's
+        // difference from it, where the glass SAMPLES. The sharp grab below is off the finished
+        // framebuffer, whose wash is this frame's already, so only `srcRGB` takes it. Off (and
+        // exactly today's glass) whenever the two are the same wash.
+        match retained.as_ref().and(live).and_then(|request| backdrop::deferred_ground(request.z)) {
+            Some(d) => {
+                let [su, sv, ou, ov] = snapshot_to_screen(c.reg, span, c.bottom_up);
+                let [rx, ry, rw, rh] = d.rect;
+                // Snapshot UV -> screen UV (0..1 over the canvas) -> the wash's own frame.
+                let (kx, ky) = (SCR_W / rw.max(1.0), SCR_H / rh.max(1.0));
+                glUniform1f(GL_WASH_ON, 1.0);
+                glUniform4f(GL_WASH_UV, su * kx, sv * ky, ou * kx - rx / rw.max(1.0), ov * ky - ry / rh.max(1.0));
+                for (loc, k) in (*std::ptr::addr_of!(GL_WASH_K)).iter().zip(d.corners) {
+                    glUniform3f(*loc, k[0], k[1], k[2]);
+                }
+                glUniform2f(GL_WASH_W, d.weight[0], d.weight[1]);
+            }
+            None => glUniform1f(GL_WASH_ON, 0.0),
+        }
+        // The sharp grab below is off the finished framebuffer: the dim is in it already.
+        glUniform1f(GL_DIM_SHARP, 0.0);
+        // A BLUR is the slowest field the app produces, so the policy is the area test, per draw
+        // — moving or not: a panel's glass is a fraction of the screen and the tile is one fetch,
+        // and gating it on motion (one day, 2026-09-04) flickered the bands in and out on every
+        // appear spring. It was `GLASS_NOISE` (½ LSB, uniform) feeding an unconditional sine
+        // hash, then a constant set once at link.
+        glUniform1f(GL_DITHER_AMT, dither_for_field(w, h));
+        glBindTexture(GL_TEXTURE_2D, c.out);
+        // **Per DRAW, not per init.** This is the UV travelled by one authored screen pixel, and it
+        // is what turns the lens's displacement (in px) into a texture offset. It was a boot-time
+        // constant of `1/SCR_W` while the grab was always the whole screen; against a region it is
+        // `span / region size`, which for a 770px-wide region is 2.5x larger. Left at the old value
+        // the 38px lens would have silently become a ~15px one — the rim would still refract, just
+        // less, with nothing anywhere to say so.
+        glUniform2f(
+            GL_UVPX,
+            span[0] / c.reg[2],
+            if c.bottom_up {
+                -span[1] / c.reg[3]
+            } else {
+                span[1] / c.reg[3]
+            },
+        );
+        // THE RIM'S SHARP SOURCE. The grab holds the same authored region as the snapshot, at full
+        // resolution, in the bottom-left of a `gw x gh` texture and bottom-up as
+        // `glCopyTexSubImage2D` left it — so its window is the same expression with the grab's own
+        // span and a fixed `true` for the row order, rather than the chain's parity.
+        // THE RIM'S SHARP SOURCE, taken HERE rather than with the snapshot, and the difference is
+        // not an optimisation. The snapshot is cached across frames and the direct path never fills
+        // `grab` at all; worse, a copy taken inside `blur_snapshot` reads a framebuffer that may
+        // still hold THIS SURFACE from the previous frame — photographed while getting this wrong,
+        // the rim showed the bar's own plate and its selected pill, which is a mirror, not a lens.
+        // At this point the page is complete and this surface has not drawn, which is exactly the
+        // moment a refraction wants. It is the REGION, not the screen: the lens reaches `lens` px
+        // outside the container and no further, so 728x200 on the dev set against a 1920x1080 grab.
+        let sharpw = rim.sharp();
+        let (mut sreg, mut sspan) = (c.reg, [1.0f32, 1.0]);
+        if sharpw > 0.0 {
+            // **The BAND, not the region.** The sample never travels further than `lens` outside
+            // the container, so the sharp source only has to hold the panel plus that margin —
+            // 595x124 against the blur region's 728x200 on the dev set, which is where half of
+            // this feature's cost went. Measured whole-frame on the T820 with `plxnative-hwcnt`:
+            // the region copy put GPU_ACTIVE up 5.1%, the band 2.7%.
+            let m = rim.params().1.ceil() + 2.0;
+            let sc = c.gw as f32 / SCR_W;
+            let (sx0, sy0) = ((x - m).max(0.0), (y - m).max(0.0));
+            let (sx1, sy1) = ((x + w + m).min(SCR_W), (y + h + m).min(SCR_H));
+            // Integer pixels FIRST, then the authored rect derived from them. The other order
+            // rounds twice — the copy lands on one rect and the UV describes another, and the rim
+            // shows the page shifted by a fraction of a pixel that grows with the drawable scale.
+            let px = ((sx0 * sc).floor() as c_int).clamp(0, c.gw - 1);
+            let py = ((sy0 * sc).floor() as c_int).clamp(0, c.gh - 1);
+            let dw = (((sx1 * sc).ceil() as c_int) - px).clamp(1, c.gw - px);
+            let dh = (((sy1 * sc).ceil() as c_int) - py).clamp(1, c.gh - py);
+            sreg = [
+                px as f32 / sc,
+                py as f32 / sc,
+                dw as f32 / sc,
+                dh as f32 / sc,
+            ];
+            sspan = [dw as f32 / c.gw as f32, dh as f32 / c.gh as f32];
+            // The page is COMPLETE here and this surface has not drawn yet, which is exactly the
+            // moment a refraction wants — and it is why the copy is not taken with the snapshot.
+            // The snapshot is cached across frames, the direct path never fills `grab` at all, and
+            // a copy taken inside `blur_snapshot` reads a framebuffer that may still hold THIS
+            // surface from the previous frame: photographed while getting that wrong, the rim
+            // showed the bar's own plate and its selected pill, which is a mirror, not a lens.
+            // ON UNIT 1, and that is not tidiness. `glCopyTexSubImage2D` works on whatever is bound
+            // to the ACTIVE unit, and unit 0 already holds the blurred snapshot this draw is about
+            // to sample. Copying through unit 0 leaves the grab bound there, so the composite reads
+            // the sharp grab through the SNAPSHOT's uv rect — a different span and a different row
+            // order — and the panel fills with the wrong part of the page. Photographed on the
+            // television: the bar showed the hair of a character standing BELOW it, which reads
+            // exactly like the backdrop being flipped and is not that at all.
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, c.grab);
+            profile::phase("glass.sharp", || {
+                glCopyTexSubImage2D(
+                    GL_TEXTURE_2D,
+                    0,
+                    0,
+                    0,
+                    c.gx + px,
+                    c.gy + c.gh - (py + dh),
+                    dw,
+                    dh,
+                );
+            });
+            glActiveTexture(GL_TEXTURE0);
+        }
+        let suv = blur_uv_rect(x, y, w, h, sreg, sspan, true);
+        glUniform4f(GL_SHARP_RECT, suv[0], suv[1], suv[2], suv[3]);
+        glUniform2f(GL_SHARP_PX, sspan[0] / sreg[2], -sspan[1] / sreg[3]);
+        glUniform1f(GL_SHARPW, sharpw);
+        glUniform1f(GL_RIMCLEAR, rim.rimclear());
+        // `deep` is authored px; the snapshot's own UV-per-authored-pixel is already in hand, and
+        // its v may be negative, so the radius is taken on the ABSOLUTE step or the cross collapses
+        // to a line on one axis.
+        //
+        // **BOTH axes, and it was one for a while.** The cross was offset by `vec2(d, d)` from the
+        // U step alone, but an authored pixel is `1/SCR_W` of the texture across and `1/SCR_H` of it
+        // down — so the four extra taps landed the full radius sideways and 56% of it vertically,
+        // and the "softer material" was squashed. `GL_UVPX` two lines up already computes the pair;
+        // this is the same expression, rectified. The shader reads the ON/OFF state off `.x` now,
+        // which is why there is no flag component left to carry.
+        let dpx = if deep > 0.0 {
+            deep_sweep().unwrap_or(deep)
+        } else {
+            0.0
+        };
+        glUniform2f(
+            GL_DEEP,
+            dpx * (span[0] / c.reg[2]).abs(),
+            dpx * (span[1] / c.reg[3]).abs(),
+        );
+        if sharpw <= 0.0 {
+            // Unit 1 is never sampled at zero weight, but a stale binding on it is still a texture
+            // the driver may keep alive; bind the snapshot rather than leaving whatever was last.
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, c.out);
+            glActiveTexture(GL_TEXTURE0);
+        }
+        let (bevel, lens, spec) = rim.params();
+        glUniform1f(GL_BEVEL, bevel);
+        glUniform1f(GL_LENS, lens);
+        glUniform4fv(GL_SPEC, 1, spec.as_ptr());
+        glUniform4fv(GL_TINT, 1, tint);
+        glUniform4fv(GL_SCRIM_TOP, 1, face.scrim_top.as_ptr());
+        glUniform4fv(GL_SCRIM_BOT, 1, face.scrim_bot.as_ptr());
+        glUniform4fv(GL_RIMCOL_G, 1, face.rim.as_ptr());
+        glUniform4fv(GL_RIMLIT_G, 1, face.rim_lit.as_ptr());
+        glUniform1f(GL_RIMW_G, face.rim_w);
+        glUniform4f(GL_UVRECT, uv[0], uv[1], uv[2], uv[3]);
+        glUniform1f(GL_RADIUS, radius);
+        glUniform2f(GL_CH, w * 0.5, h * 0.5);
+        let ext = set_rect(GL_RECT, x, y, w, h);
+        profile::phase("glass.composite", || {
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4, ext);
+        });
+        true
+    }
+}
+
+/// **A menu's glass on FROZEN ground** — the same `fs_glass.frag` composite as
+/// [`draw_blur_backdrop`] (the face gradient, the rim, the lit edge, the lens), fed two pictures
+/// the frame already holds instead of a blur chain: `ground`, the latched underlay field
+/// (`ui::underlay`'s 60x32 reconstruction of the undimmed host page, mapped over the whole screen
+/// top-down), as the backdrop the panel's body shows, and `sharp`, the host snapshot
+/// (`ui::popover::host`'s one page-sized capture, bottom-up as [`FrameCache`] holds it), as the
+/// rim's sharp source. Neither is taken here and neither is a function of this frame's page:
+/// nothing is copied off the framebuffer, no source pass runs and no backdrop entry is requested,
+/// so a menu standing over its host costs one panel quad however long it stands, and its morph or
+/// slide moves that quad over pictures that do not change.
+///
+/// Both pictures are UNDIMMED, so the modal dim the frame drew under the panel is applied to both
+/// at composite (`dim`, the [`backdrop::Dim`] a glass over a live band applies the same way):
+/// blur is linear and the dim's ink is a smooth field, so the panel shows the dimmed page it
+/// stands on. `sharp` 0 draws the single-source material (the host holds no undimmed page this
+/// frame).
+///
+/// Returns whether the material was handled, a culled or `drawmask`ed quad included (as
+/// [`draw_field_panel`] answers). `false` — no glass program, no ground, a video-plane frame —
+/// asks the caller for its field ground.
+/// `u_dim_field` for a frozen glass whose body samples `ground` and whose dim's ink is `dim_tex`
+/// times its tint (`0` = a flat ink). A menu's dim is the latched underlay field
+/// (`underlay::Role::Dim`) and its ground is the same field, both read at the screen point
+/// `v_cuv`, so the dim's texel is the body's: mode 2 reuses it instead of fetching it again.
+fn frozen_dim_field(ground: c_uint, dim_tex: c_uint) -> f32 {
+    match dim_tex {
+        0 => 0.0,
+        t if t == ground => 2.0,
+        _ => 1.0,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn draw_glass_frozen(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    ground: c_uint,
+    sharp: c_uint,
+    dim: Option<backdrop::Dim>,
+    tint: *const f32,
+    rim: GlassRim,
+    face: GlassFace,
+) -> bool {
+    if ground == 0 || unsafe { GPROG } == 0 || unsafe { BLUR_OFF } {
+        return false;
+    }
+    // §9, as for every glass: a menu over the hardware video plane has no page behind it in our
+    // framebuffer, and the host snapshot of that frame would be a photograph of the hole.
+    if video_plane_refuses("Glass::frozen") {
+        return false;
+    }
+    if culled(x, y, w, h) || gate(Class::Glass, x, y, w, h) {
+        return true;
+    }
+    unsafe {
+        use_prog(GPROG);
+        glUniform1f(GL_SOURCE_ALPHA, 1.0);
+        let g = tokens::CLEAR_RGB;
+        glUniform3f(GL_SOURCE_GROUND, g.0, g.1, g.2);
+        // `v_cuv` IS the screen point over the screen, top-down (the field's own mapping), so the
+        // dim's field is read at `v_cuv` itself.
+        match dim {
+            Some(d) if d.tint[3] > 0.0 => {
+                glUniform4f(GL_DIM, d.tint[0], d.tint[1], d.tint[2], d.tint[3]);
+                let mode = frozen_dim_field(ground, d.tex);
+                glUniform1f(GL_DIM_FIELD, mode);
+                if mode == 1.0 {
+                    glUniform4f(GL_DIM_UV, 1.0, 1.0, 0.0, 0.0);
+                    glActiveTexture(GL_TEXTURE3);
+                    glBindTexture(GL_TEXTURE_2D, d.tex);
+                    glActiveTexture(GL_TEXTURE0);
+                }
+            }
+            _ => glUniform4f(GL_DIM, 0.0, 0.0, 0.0, 0.0),
+        }
+        // A frozen page carries its wash in the snapshot: no delta (the uniform is the program's,
+        // so the last live glass's `1` would otherwise stay).
+        glUniform1f(GL_WASH_ON, 0.0);
+        glUniform1f(GL_DIM_SHARP, if sharp != 0 { 1.0 } else { 0.0 });
+        glUniform1f(GL_DITHER_AMT, dither_for_field(w, h));
+        glBindTexture(GL_TEXTURE_2D, ground);
+        glUniform2f(GL_UVPX, 1.0 / SCR_W, 1.0 / SCR_H);
+        let sharpw = if sharp != 0 { rim.sharp() } else { 0.0 };
+        // The snapshot is the whole drawable, bottom-up: its window is the screen rect over the
+        // screen, with the row order flipped (`frame_cache_uv`).
+        let full = [0.0, 0.0, SCR_W, SCR_H];
+        let suv = blur_uv_rect(x, y, w, h, full, [1.0, 1.0], true);
+        glUniform4f(GL_SHARP_RECT, suv[0], suv[1], suv[2], suv[3]);
+        glUniform2f(GL_SHARP_PX, 1.0 / SCR_W, -1.0 / SCR_H);
+        glUniform1f(GL_SHARPW, sharpw);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, if sharp != 0 { sharp } else { ground });
+        glActiveTexture(GL_TEXTURE0);
+        glUniform1f(GL_RIMCLEAR, rim.rimclear());
+        // The field is already the softest picture of the page there is: no deep cross.
+        glUniform2f(GL_DEEP, 0.0, 0.0);
+        let (bevel, lens, spec) = rim.params();
+        glUniform1f(GL_BEVEL, bevel);
+        glUniform1f(GL_LENS, lens);
+        glUniform4fv(GL_SPEC, 1, spec.as_ptr());
+        glUniform4fv(GL_TINT, 1, tint);
+        glUniform4fv(GL_SCRIM_TOP, 1, face.scrim_top.as_ptr());
+        glUniform4fv(GL_SCRIM_BOT, 1, face.scrim_bot.as_ptr());
+        glUniform4fv(GL_RIMCOL_G, 1, face.rim.as_ptr());
+        glUniform4fv(GL_RIMLIT_G, 1, face.rim_lit.as_ptr());
+        glUniform1f(GL_RIMW_G, face.rim_w);
+        glUniform4f(GL_UVRECT, x / SCR_W, y / SCR_H, w / SCR_W, h / SCR_H);
+        glUniform1f(GL_RADIUS, radius);
+        glUniform2f(GL_CH, w * 0.5, h * 0.5);
+        let ext = set_rect(GL_RECT, x, y, w, h);
+        profile::phase("glass.frozen", || {
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4, ext);
+        });
+    }
+    true
+}
+
+// ============================== UI self-capture ==============================
+// GL side of the dev capture stream (crate::capture): grab our own back buffer,
+// GPU-downscale it, and read the small result back — the fast path the external
+// ~200ms/frame capture service can't offer. UI plane ONLY: glReadPixels cannot
+// see the hardware video overlay plane (that's composited by the TV, outside our
+// context). Design per the verified plan (2026-07-22 workflow):
+//
+// - TWO chains (parity ping-pong): the chain written this capture is never the
+//   chain in flight from the last one — kills Mali's CopyTex-into-referenced-
+//   texture ghosting AND lets us read a chain rendered >=1 capture-cycle (>=33ms)
+//   ago, so the read degenerates to a driver memcpy instead of the 155ms
+//   window-surface pipeline drain we measured.
+// - Downscale is exact-2x per pass (2x bilinear == 2x2 box): 1920x1080 -> mid
+//   960x540 -> out 480x270. A single 4x pass would sample only 2x2 of each 4x4
+//   block -> text shimmer. Both output sizes are always allocated; the requested
+//   size only selects which FBO is the pass target (no realloc on switch, no
+//   size races — dims are latched per chain at write time).
+// - All six textures are NPOT: CLAMP_TO_EDGE + LINEAR are REQUIRED at creation
+//   (core ES2 samples an NPOT texture as opaque black under the REPEAT +
+//   NEAREST_MIPMAP_LINEAR defaults — no GL error, just black), and mipmaps are
+//   illegal. GL_RGBA unsized everywhere (GL_RGBA8 is not a valid ES2 token).
+// - RGBA-texture FBO renderability is implementation-defined in core ES2, so
+//   completeness is checked; on failure capture latches off (logged) rather than
+//   crashing. Midgard exposes OES_rgb8_rgba8 in practice.
+// - Y orientation: every full-quad IPROG pass flips row order once (vs_img does
+//   gl_Position.y = -ndc.y with v_cuv = a_pos), glReadPixels is bottom-up memory
+//   order (NOT a flip). CopyTexSubImage leaves cap_tex bottom-up; 1 pass (960 out)
+//   -> top-down (correct); 2 passes (480 out) -> bottom-up again. The per-frame
+//   `flip` flag tells the encoder to walk rows in reverse. No CPU flip cost — the
+//   RGBA->RGB strip touches every row anyway.
+// Main-thread only (like all gfx state).
+
+const GL_FRAMEBUFFER: c_uint = 0x8D40;
+const GL_COLOR_ATTACHMENT0: c_uint = 0x8CE0;
+const GL_FRAMEBUFFER_COMPLETE: c_uint = 0x8CD5;
+const GL_PACK_ALIGNMENT: c_uint = 0x0D05;
+const GL_NO_ERROR: c_uint = 0;
+
+const CAP_W: c_int = 1920;
+const CAP_H: c_int = 1080;
+const CAP_MID_W: c_int = 960;
+const CAP_MID_H: c_int = 540;
+const CAP_OUT_W: c_int = 480;
+const CAP_OUT_H: c_int = 270;
+const CAP_TINT: [f32; 4] = [1.0, 1.0, 1.0, 1.0]; // untinted blit
+
+struct CapChain {
+    grab: c_uint, // 1920x1080 back-buffer copy target
+    mid: c_uint,  // 960x540 downscale target
+    mid_fbo: c_uint,
+    /// 480x270 downscale target. **Deliberately never read**, unlike `grab` and `mid`, which are
+    /// both sampled as the next pass's source: this is the LAST pass, and its frame leaves through
+    /// `glReadPixels` on `out_fbo`. Kept because it is the only handle on the texture object
+    /// backing that fbo — dropping the name leaks it unrecoverably, with nothing to delete or
+    /// re-attach it by. `#[allow]` rather than `_out` so it still reads as a live GL resource.
+    #[allow(dead_code)]
+    out: c_uint,
+    out_fbo: c_uint,
+    pending: bool,    // a frame was rendered into this chain, not yet read back
+    pw: c_int,        // dims of the pending frame — LATCHED at write time (never
+    ph: c_int,        //   re-derived from the live request; kills the switch race)
+    read_fbo: c_uint, // which fbo holds the pending frame (mid_fbo or out_fbo)
+    flip: bool,       // pending frame is bottom-up (even pass count) — encoder reverses rows
+}
+
+struct CapState {
+    chains: [CapChain; 2],
+    parity: usize,
+    first_copy_checked: bool,
+}
+static mut CAPST: Option<CapState> = None;
+static mut CAP_LATCHED_OFF: bool = false;
+
+// glReadPixels time split out of the whole-cycle time (capture.rs owns that one and
+// folds both into its periodic stats line). The read is the only synchronous GL call
+// in the cycle — everything else is submission cost that lands at the swap.
+pub static CAP_READ_US: AtomicU32 = AtomicU32::new(0);
+pub static CAP_READ_N: AtomicU32 = AtomicU32::new(0);
+
+/// A capture-ready NPOT texture: storage only (pixels NULL), refreshed via CopyTexSubImage.
+/// `upload_rgba` already sets the CLAMP_TO_EDGE + LINEAR quartet these NPOT targets REQUIRE
+/// (see the section comment) — same contract, one implementation.
+fn cap_tex(w: c_int, h: c_int) -> c_uint {
+    upload_rgba(0, w, h, std::ptr::null())
+}
+
+/// Texture + FBO pair; None (and latch-off by the caller) if incomplete. `who` names the feature
+/// in the failure line — two chains build targets this way now (capture and the backdrop blur) and
+/// a bare "FBO incomplete" says nothing about which one just turned itself off.
+fn fbo_target(w: c_int, h: c_int, who: &str) -> Option<(c_uint, c_uint)> {
+    unsafe {
+        let t = cap_tex(w, h);
+        let mut f: c_uint = 0;
+        glGenFramebuffers(1, &mut f);
+        glBindFramebuffer(GL_FRAMEBUFFER, f);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t, 0);
+        let st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        glBindFramebuffer(GL_FRAMEBUFFER, plx_base::surface::default_fb());
+        if st != GL_FRAMEBUFFER_COMPLETE {
+            log(&format!(
+                "{who}: FBO {w}x{h} incomplete (status=0x{st:x}) — {who} off"
+            ));
+            return None;
+        }
+        Some((t, f))
+    }
+}
+
+fn cap_lazy_init() -> bool {
+    unsafe {
+        if (*std::ptr::addr_of!(CAPST)).is_some() {
+            return true;
+        }
+        let mk_chain = || -> Option<CapChain> {
+            let grab = cap_tex(CAP_W, CAP_H);
+            let (mid, mid_fbo) = fbo_target(CAP_MID_W, CAP_MID_H, "capture")?;
+            let (out, out_fbo) = fbo_target(CAP_OUT_W, CAP_OUT_H, "capture")?;
+            Some(CapChain {
+                grab,
+                mid,
+                mid_fbo,
+                out,
+                out_fbo,
+                pending: false,
+                pw: 0,
+                ph: 0,
+                read_fbo: 0,
+                flip: false,
+            })
+        };
+        match (mk_chain(), mk_chain()) {
+            (Some(a), Some(b)) => {
+                CAPST = Some(CapState {
+                    chains: [a, b],
+                    parity: 0,
+                    first_copy_checked: false,
+                });
+                true
+            }
+            _ => {
+                CAP_LATCHED_OFF = true; // cap_target already logged the status
+                false
+            }
+        }
+    }
+}
+
+/// One capture cycle, called by `capture::tick` on the GL (main) thread between the last UI
+/// draw and the swap. Writes the current back buffer (grab + downscale) into this cycle's
+/// chain, and — if the *other* chain has a frame pending from the previous cycle — reads it
+/// into `buf` (resized exactly). Returns `Some((w, h, flip))` when `buf` was filled.
+/// `want_960` selects the 960x540 output (single pass) over the default 480x270 (two passes).
+/// Returns `None` and does nothing after a completeness/copy failure (latched off).
+pub fn cap_cycle(want_960: bool, buf: &mut Vec<u8>) -> Option<(c_int, c_int, bool)> {
+    unsafe {
+        if CAP_LATCHED_OFF || !cap_lazy_init() {
+            return None;
+        }
+        // through a raw pointer, not `&mut CAPST` (`static_mut_refs`, a future hard error). Sound
+        // for the same reason the direct form was: `cap_cycle` runs only on the GL (main) thread.
+        let st = (*std::ptr::addr_of_mut!(CAPST)).as_mut().unwrap();
+        let w = st.parity;
+        let r = 1 - w;
+
+        // A. grab the finished UI frame (framebuffer 0 is bound; nothing drawn after this,
+        //    so the pass-flush this forces is work the swap would submit anyway).
+        glBindTexture(GL_TEXTURE_2D, st.chains[w].grab);
+        glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, CAP_W, CAP_H);
+        if !st.first_copy_checked {
+            st.first_copy_checked = true;
+            let e = glGetError();
+            if e != GL_NO_ERROR {
+                // e.g. INVALID_OPERATION if the window config lost its alpha bits — the copy
+                // silently no-ops (black stream), so latch off loudly instead.
+                log(&format!(
+                    "capture: CopyTexSubImage error=0x{e:x} — capture off"
+                ));
+                CAP_LATCHED_OFF = true;
+                return None;
+            }
+        }
+
+        // B. downscale pass(es). Blend OFF (fresh target, raw copy); glClear before each pass
+        //    spares Midgard the tile preserve-load of the stale FBO contents (a full-screen
+        //    quad does NOT relieve that obligation). Scissor is off here (clip pairs in-frame).
+        glDisable(GL_BLEND);
+        let c = &st.chains[w];
+        glBindFramebuffer(GL_FRAMEBUFFER, c.mid_fbo);
+        glViewport(0, 0, CAP_MID_W, CAP_MID_H);
+        glClear(GL_COLOR_BUFFER_BIT);
+        // full-authored-screen rect: IPROG maps (0,0,1920,1080) to the whole viewport
+        draw_tex(c.grab, 0.0, 0.0, SCR_W, SCR_H, 0.0, CAP_TINT.as_ptr());
+        if !want_960 {
+            glBindFramebuffer(GL_FRAMEBUFFER, c.out_fbo);
+            glViewport(0, 0, CAP_OUT_W, CAP_OUT_H);
+            glClear(GL_COLOR_BUFFER_BIT);
+            draw_tex(c.mid, 0.0, 0.0, SCR_W, SCR_H, 0.0, CAP_TINT.as_ptr());
+        }
+        let ch = &mut st.chains[w];
+        ch.pending = true;
+        if want_960 {
+            ch.pw = CAP_MID_W;
+            ch.ph = CAP_MID_H;
+            ch.read_fbo = ch.mid_fbo;
+            ch.flip = false; // 1 pass: cap (bottom-up) + 1 flip = top-down
+        } else {
+            ch.pw = CAP_OUT_W;
+            ch.ph = CAP_OUT_H;
+            ch.read_fbo = ch.out_fbo;
+            ch.flip = true; // 2 passes: flips cancel = bottom-up; encoder reverses rows
+        }
+
+        // C. read the OTHER chain's frame, rendered >=1 cycle ago (complete — no drain).
+        let mut got = None;
+        let rc = &mut st.chains[r];
+        if rc.pending {
+            rc.pending = false;
+            glBindFramebuffer(GL_FRAMEBUFFER, rc.read_fbo);
+            glPixelStorei(GL_PACK_ALIGNMENT, 1); // RGBA rows are 4-aligned anyway; belt+braces
+            let n = (rc.pw * rc.ph * 4) as usize;
+            buf.resize(n, 0); // resize, NOT with_capacity: glReadPixels needs len, not capacity
+            let t0 = std::time::Instant::now();
+            glReadPixels(
+                0,
+                0,
+                rc.pw,
+                rc.ph,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                buf.as_mut_ptr() as *mut c_void,
+            );
+            CAP_READ_US.fetch_add(t0.elapsed().as_micros() as u32, Ordering::Relaxed);
+            CAP_READ_N.fetch_add(1, Ordering::Relaxed);
+            got = Some((rc.pw, rc.ph, rc.flip));
+        }
+
+        // D. restore the world exactly: framebuffer 0 (or every next frame renders into the
+        //    FBO = frozen screen), full viewport, blend back on (func untouched). Program binding
+        //    needs no restore — every draw fn binds its own lazily (use_prog); texture unit 0
+        //    stays active; vertex state untouched.
+        glBindFramebuffer(GL_FRAMEBUFFER, plx_base::surface::default_fb());
+        glViewport(0, 0, CAP_W, CAP_H);
+        glEnable(GL_BLEND);
+
+        st.parity = r;
+        got
+    }
+}
+
+// ============================== The UNDERLAY FIELD ==============================
+// A COARSE COLOUR FIELD OF WHATEVER IS RENDERED BENEATH AN OVERLAY — the GL half. The CPU half
+// (low-pass, grade, reconstruct, upload) is `ui::underlay`, and the reason the split falls here is
+// that everything below this line needs a context and everything above that line is arithmetic a
+// host test can grade.
+//
+// WHY A CHAIN AND NOT FOUR `glReadPixels` TAPS. The four-corner sampler this replaced (PR2 stage B,
+// 2026-09-19; it read four 49x49 squares and handed back a four-corner envelope) hands back a
+// bilinear gradient with four degrees of freedom, so it cannot say "the green is on the LEFT of the
+// bottom edge and the red on the right". 120 cells can, and they cost one read instead of four —
+// 480 bytes against 4 x 9.6 kB, all of it produced by the GPU's own filter rather than by averaging
+// 2401 samples per corner on the CPU.
+//
+// WHY EXACT 2x PASSES. Bilinear minification is a clean 2x2 box at exactly 2x and nothing else
+// (see `blur_dims`' note): one 128x reduction would sample 2x2 of each 128x128 block and the field
+// would swim as the page scrolled, because it would be keyed to whichever 4 pixels the filter
+// happened to land on. 1920 = 15 * 2^7, so the chain is seven exact halvings; 1080 floors its way
+// down (540, 270, 135, 67, 33, 16, 8), which loses at most one row per level off a field whose
+// whole output is 8 rows tall.
+
+/// The field grid. 15x8 is the coarsest thing that still resolves a SIDE and a CORNER at 16:9 —
+/// finer than the four-corner envelope by a factor of 30 and still small enough that the readback
+/// is 480 bytes, under a single cache line's worth of rows.
+pub const FIELD_W: c_int = 15;
+pub const FIELD_H: c_int = 8;
+/// Cells in one field, in `FIELD_W`-major row order from the TOP-LEFT.
+pub const FIELD_CELLS: usize = (FIELD_W * FIELD_H) as usize;
+
+struct FieldChain {
+    grab: c_uint, // the viewport rect of the drawable, copied verbatim
+    view: (c_int, c_int, c_int, c_int),
+    /// `(tex, fbo, w, h)` per reduction level, ending at exactly `FIELD_W` x `FIELD_H`.
+    levels: Vec<(c_uint, c_uint, c_int, c_int)>,
+}
+
+static mut FIELDST: Option<FieldChain> = None;
+/// Latched after a refusal that cannot get better (an incomplete FBO, a drawable the exact-2x
+/// chain cannot be built for). The caller's answer is then permanently `None`, which is a real
+/// answer: `ui::underlay` has a CPU source for exactly this case.
+static mut FIELD_OFF: bool = false;
+
+/// How many exact halvings take `gw` to [`FIELD_W`], or `None` when it is not a power-of-two
+/// multiple of it.
+///
+/// Pure, so the one property that makes the chain a box filter is host-gradeable without a
+/// context. The television answers 7 (`1920 = 15 * 2^7`); a simulator window scaled to a
+/// non-power-of-two multiple answers `None` and the feature declines rather than producing a
+/// field keyed to an arbitrary 2x2 of each block.
+fn field_passes(gw: c_int) -> Option<u32> {
+    if gw < FIELD_W || gw % FIELD_W != 0 {
+        return None;
+    }
+    let q = (gw / FIELD_W) as u32;
+    q.is_power_of_two().then(|| q.trailing_zeros())
+}
+
+fn field_lazy_init() -> bool {
+    unsafe {
+        let view = plx_base::surface::viewport();
+        if let Some(c) = (*std::ptr::addr_of!(FIELDST)).as_ref() {
+            if c.view == view {
+                return true;
+            }
+            // The drawable moved under a built chain. Rebuilding one is a resize path this app has
+            // never needed (the television's viewport is fixed for the life of the process), so say
+            // so once and decline rather than sample a stale geometry.
+            log("field: viewport changed under the underlay chain — underlay field off");
+            FIELD_OFF = true;
+            return false;
+        }
+        if FIELD_OFF {
+            return false;
+        }
+        let (_, _, gw, gh) = view;
+        let Some(n) = field_passes(gw) else {
+            log(&format!(
+                "field: drawable {gw}x{gh} is not a power-of-two multiple of {FIELD_W} wide — underlay field off"
+            ));
+            FIELD_OFF = true;
+            return false;
+        };
+        let grab = cap_tex(gw, gh);
+        let mut levels = Vec::with_capacity(n as usize);
+        let (mut w, mut h) = (gw, gh);
+        for _ in 0..n {
+            w = (w / 2).max(1);
+            h = (h / 2).max(1);
+            let Some((t, f)) = fbo_target(w, h, "field") else {
+                FIELD_OFF = true;
+                return false;
+            };
+            levels.push((t, f, w, h));
+        }
+        debug_assert_eq!(levels.last().map(|l| (l.2, l.3)), Some((FIELD_W, FIELD_H)));
+        FIELDST = Some(FieldChain { grab, view, levels });
+        true
+    }
+}
+
+/// A reduction [`field_kick`] queued, to be read by [`field_collect`] once the GPU has had a frame
+/// to finish it. `run` names the chain run (a later kick reuses the same targets, so an older
+/// ticket is simply lost), `swaps` the drawn-frame count it was queued in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FieldTicket {
+    run: u32,
+    swaps: u32,
+}
+
+impl FieldTicket {
+    /// A ticket for a fake `DimSink` — a host test has no chain to queue on.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(run: u32, swaps: u32) -> Self {
+        Self { run, swaps }
+    }
+}
+
+/// What [`field_collect`] answers for a ticket.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum FieldRead {
+    /// The field the kick reduced.
+    Ready([[f32; 3]; FIELD_CELLS]),
+    /// Queued on this very frame: reading it now is the stall the ticket exists to avoid.
+    Pending,
+    /// The targets have been reused by a later run (or the chain is gone): kick again.
+    Lost,
+}
+
+/// Chain runs so far — a ticket's `run`. Main render thread only, like the chain itself.
+static mut FIELD_RUNS: u32 = 0;
+/// Drawn frames so far, advanced by [`field_frame_end`] beside the swap.
+static FIELD_SWAPS: AtomicU32 = AtomicU32::new(0);
+
+/// Drawn frames that must end between a kick and its read — the FLOOR, not the rule. The swap is
+/// what flushes the kick (and its fence) to the GPU, so nothing can be finished before one.
+///
+/// The rule is the kick's fence ([`crate::egl::fence`]): the read waits for the GPU to have
+/// actually passed the reduction. A frame count alone was a guess, and a wrong one on the
+/// television, where the GPU runs more than a frame behind a modal's open: one frame later the
+/// read still waited 11–25 ms (`fieldread`), and two frames later the collecting frame paid a
+/// larger throttle wait instead (2026-09-19, `docs/backdrop-blur-profiling.md`). With no fences
+/// (the simulator) the floor is the whole rule.
+const FIELD_READ_LAG_SWAPS: u32 = 1;
+
+/// The fence [`field_kick`] inserted after its passes, with the run it belongs to. Main render
+/// thread only, like the chain.
+static mut FIELD_FENCE: Option<(u32, crate::egl::fence::Fence)> = None;
+
+/// Close a DRAWN frame for the field's tickets — `app::run` calls it beside `blur_frame_end`,
+/// inside the idle gate, because a frame the gate skipped queued nothing on the GPU and gives a
+/// pending read no more time to finish.
+pub fn field_frame_end() {
+    FIELD_SWAPS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Where a ticket stands — [`field_collect`]'s decision before it touches GL.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TicketState {
+    Due,
+    Pending,
+    Lost,
+}
+
+/// [`field_collect`]'s decision, as a pure function of the ticket, the two counters and the GPU's
+/// word on the kick (`finished`: its fence has signalled, or there is no fence to ask).
+pub fn field_ticket_state(t: FieldTicket, runs: u32, swaps: u32, finished: bool) -> TicketState {
+    if t.run != runs {
+        TicketState::Lost
+    } else if swaps.wrapping_sub(t.swaps) < FIELD_READ_LAG_SWAPS || !finished {
+        TicketState::Pending
+    } else {
+        TicketState::Due
+    }
+}
+
+/// Has the GPU finished run `run`'s reduction? `true` when there is no fence to ask — a chain
+/// without fences answers by frame count alone.
+fn field_run_finished(run: u32) -> bool {
+    // SAFETY: main render thread, like every other access to the chain.
+    match unsafe { (*std::ptr::addr_of!(FIELD_FENCE)).as_ref() } {
+        Some((r, fence)) if *r == run => fence.signaled(),
+        _ => true,
+    }
+}
+
+/// **Queue the reduction of the undimmed page to the 15x8 field, and read nothing yet.**
+///
+/// `src` is a texture that already holds the drawable's viewport exactly as a
+/// `glCopyTexSubImage2D` of it would (bottom-up, full size) — `popover::host`'s page snapshot,
+/// which is taken at the same instant this is asked and makes the chain's own full-screen copy a
+/// second copy of the same pixels. `None` copies the framebuffer as it stands.
+///
+/// The refusals, and why each one is not a guess:
+///
+/// * **Inside a blur source pass** ([`BLUR_IN_PASS`]) the bound framebuffer is a quarter-resolution
+///   crop of the page, not the page — the same reason [`sample_control_ground`] refuses there.
+/// * **On a video-plane frame** framebuffer 0 is the punch-through hole the television composites
+///   the plane through, so a read returns transparent black; [`video_plane_refuses`] is the shared
+///   gate, and it is why this returns `None` here rather than a photograph of the hole —
+///   `RouteGround::draw_host` falls back to its corner envelope on exactly this `None` rather than
+///   latch to black for the life of the ground.
+/// * **While the page is served from [`FrameCache`]** ([`page_frozen`]) every primitive in this
+///   module refuses its quad, the reduction passes included, so the chain would reduce whatever
+///   was last left in its targets. The pixels on the panel are right; the ones this would read are
+///   not.
+/// * **`drawmask=field`** removes the whole feature, chain and draw together, so the leg prices it.
+/// * An incomplete FBO or a drawable the exact-2x chain cannot be built for latches
+///   [`FIELD_OFF`] and the answer is `None` from then on.
+///
+/// GL state is restored the way [`cap_cycle`] restores it: framebuffer and viewport back to the
+/// drawable, blend back on. Programs bind themselves lazily through [`use_prog`], texture unit 0
+/// never moves, and vertex state is untouched.
+pub fn field_kick(src: Option<c_uint>) -> Option<FieldTicket> {
+    unsafe {
+        if blur_source_pass() || page_frozen() || masked(Class::Field) {
+            return None;
+        }
+        if video_plane_refuses("gfx::field_kick") {
+            return None;
+        }
+        if !field_lazy_init() {
+            return None;
+        }
+        let c = (*std::ptr::addr_of!(FIELDST)).as_ref()?;
+        let (gx, gy, gw, gh) = c.view;
+
+        let mut prev = match src {
+            Some(tex) if tex != 0 => tex,
+            _ => {
+                glBindTexture(GL_TEXTURE_2D, c.grab);
+                plx_base::diag::spans::span("fieldcopy", || {
+                    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, gx, gy, gw, gh)
+                });
+                c.grab
+            }
+        };
+
+        // Blend OFF: every target is a fresh copy, and `glClear` before each pass spares Midgard
+        // the tile preserve-load of the stale contents (a full-screen quad does not relieve that
+        // obligation — `cap_cycle` carries the same note).
+        glDisable(GL_BLEND);
+        for &(_, fbo, w, h) in &c.levels {
+            glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+            glViewport(0, 0, w, h);
+            glClear(GL_COLOR_BUFFER_BIT);
+            // `Class::Blur` because the chain is ACCOUNTING-ONLY at the primitive: its targets are
+            // not in authored coordinates and half a masked chain would leave the field reading
+            // stale texels rather than measuring anything. `drawmask=field` refuses the whole
+            // sample above instead, and the ledger gets the target pixels through `note_px` below.
+            note_px(Class::Field, (w as f64) * (h as f64));
+            draw_tex_core(
+                Class::Blur,
+                prev,
+                0.0,
+                0.0,
+                SCR_W,
+                SCR_H,
+                [0.0, 0.0, 1.0, 1.0],
+                0.0,
+                CAP_TINT.as_ptr(),
+                0.0,
+                NO_RIM.as_ptr(),
+                0.0,
+                0.0,
+                0.0,
+                NO_RIM.as_ptr(),
+                0.0,
+                0.0,
+                None,
+            );
+            prev = fbo_tex_of(c, fbo);
+        }
+
+        // Restore the world exactly — see `cap_cycle`'s step D for what "exactly" has to mean.
+        glBindFramebuffer(GL_FRAMEBUFFER, plx_base::surface::default_fb());
+        glViewport(gx, gy, gw, gh);
+        glEnable(GL_BLEND);
+
+        FIELD_RUNS = FIELD_RUNS.wrapping_add(1);
+        // After the passes, so it signals once they are done. Replacing the previous run's fence
+        // destroys it: that run's ticket is `Lost` from here on and nobody will ask.
+        FIELD_FENCE = crate::egl::fence::Fence::insert().map(|f| (FIELD_RUNS, f));
+        FIELD_KICK_SWAPS = FIELD_SWAPS.load(Ordering::Relaxed);
+        Some(FieldTicket {
+            run: FIELD_RUNS,
+            swaps: FIELD_KICK_SWAPS,
+        })
+    }
+}
+
+/// The live run's kick frame (its ticket's `swaps`), so the frame head can ask
+/// [`field_ticket_state`] about it without a ticket in hand. Main render thread only.
+static mut FIELD_KICK_SWAPS: u32 = 0;
+/// The field the frame head read, with the run it belongs to. Main render thread only.
+static mut FIELD_LANDED: Option<(u32, [[f32; 3]; FIELD_CELLS])> = None;
+
+/// **Read the live run's field at the HEAD of a drawn frame, before anything is drawn.**
+///
+/// `app::run` calls it first thing in a drawn frame. The read used to happen wherever a consumer
+/// collected — between the page and the surfaces, after framebuffer 0 already held a frame's worth
+/// of tiles — and a `glReadPixels` there ends framebuffer 0's render pass on Midgard: the rest of
+/// the frame then reloads every tile it had drawn (+2743 tiles, ~12 M GPU cycles on the frame a
+/// modal's dim latched, 2026-09-19). At the head there is nothing of this frame to split. The
+/// decision is still [`field_ticket_state`]'s — a frame after the kick AND past its fence — so the
+/// read never waits for the GPU either; one it refuses is simply asked again next frame.
+pub fn field_frame_begin() {
+    // SAFETY: main render thread, like every other access to the chain.
+    unsafe {
+        let Some(c) = (*std::ptr::addr_of!(FIELDST)).as_ref() else {
+            return;
+        };
+        let run = FIELD_RUNS;
+        if run == 0 || matches!(*std::ptr::addr_of!(FIELD_LANDED), Some((r, _)) if r == run) {
+            return;
+        }
+        let t = FieldTicket {
+            run,
+            swaps: FIELD_KICK_SWAPS,
+        };
+        let swaps = FIELD_SWAPS.load(Ordering::Relaxed);
+        if field_ticket_state(t, run, swaps, field_run_finished(run)) == TicketState::Due {
+            if let Some(field) = field_readback(c) {
+                FIELD_LANDED = Some((run, field));
+            }
+        }
+    }
+}
+
+/// [`field_collect`]'s answer, as a pure function of the ticket, the live run and the run whose
+/// field [`field_frame_begin`] last read.
+pub fn field_answer(t: FieldTicket, runs: u32, landed: Option<u32>) -> TicketState {
+    if t.run != runs {
+        TicketState::Lost
+    } else if landed == Some(t.run) {
+        TicketState::Due
+    } else {
+        TicketState::Pending
+    }
+}
+
+/// **The field a [`field_kick`] queued, once the frame head has read it** — [`FieldRead::Pending`]
+/// before that, [`FieldRead::Lost`] if a later run has reused the targets. Touches no GL: the read
+/// itself is [`field_frame_begin`]'s, at the head of a frame, for the reason given there.
+pub fn field_collect(t: FieldTicket) -> FieldRead {
+    // SAFETY: main render thread, like every other access to the chain.
+    unsafe {
+        if (*std::ptr::addr_of!(FIELDST)).is_none() {
+            return FieldRead::Lost;
+        }
+        let landed = *std::ptr::addr_of!(FIELD_LANDED);
+        match field_answer(t, FIELD_RUNS, landed.map(|l| l.0)) {
+            TicketState::Due => landed.map_or(FieldRead::Lost, |l| FieldRead::Ready(l.1)),
+            TicketState::Pending => FieldRead::Pending,
+            TicketState::Lost => FieldRead::Lost,
+        }
+    }
+}
+
+/// Read the chain's last level — the 15x8 a run left there — and put the framebuffer back.
+unsafe fn field_readback(c: &FieldChain) -> Option<[[f32; 3]; FIELD_CELLS]> {
+    let &(_, fbo, _, _) = c.levels.last()?;
+    let (gx, gy, gw, gh) = c.view;
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    let mut buf = [0u8; FIELD_CELLS * 4];
+    glPixelStorei(GL_PACK_ALIGNMENT, 1); // 15 RGBA texels is 60 bytes — 4-aligned anyway
+    plx_base::diag::spans::span("fieldread", || {
+        glReadPixels(
+            0,
+            0,
+            FIELD_W,
+            FIELD_H,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            buf.as_mut_ptr() as *mut c_void,
+        )
+    });
+    glBindFramebuffer(GL_FRAMEBUFFER, plx_base::surface::default_fb());
+    glViewport(gx, gy, gw, gh);
+
+    // ORIENTATION, DERIVED rather than asserted. `glCopyTexSubImage2D` leaves `grab` (and the page
+    // snapshot, which is the same copy) bottom-up and every full-quad pass flips row order once
+    // (`vs_img` emits `-ndc.y` with `v_cuv = a_pos`), so an ODD pass count puts `glReadPixels`'
+    // first row at the TOP of the screen. The television runs seven; a supersampled simulator runs
+    // eight. The blur chain records what a hard-coded parity cost when a pass count changed — this
+    // one counts its own.
+    let top_down = c.levels.len() % 2 == 1;
+    Some(std::array::from_fn(|i| {
+        let (row, col) = (i / FIELD_W as usize, i % FIELD_W as usize);
+        let row = if top_down {
+            row
+        } else {
+            FIELD_H as usize - 1 - row
+        };
+        let p = (row * FIELD_W as usize + col) * 4;
+        [
+            buf[p] as f32 / 255.0,
+            buf[p + 1] as f32 / 255.0,
+            buf[p + 2] as f32 / 255.0,
+        ]
+    }))
+}
+
+/// The texture attached to `fbo` — the next pass's source. The chain stores the pair together, so
+/// this is a lookup rather than a GL query.
+fn fbo_tex_of(c: &FieldChain, fbo: c_uint) -> c_uint {
+    c.levels
+        .iter()
+        .find(|l| l.1 == fbo)
+        .map_or(0, |l| l.0)
+}
+
+/// Draw a reconstructed underlay field over `x,y,w,h`: one magnified fetch, one tint multiply, one
+/// shared dither (`shaders/fs_field.frag`). `tex` is `ui::underlay`'s 60x32 RGBA8, already LINEAR +
+/// CLAMP_TO_EDGE through [`upload_rgba`].
+///
+/// The dither is [`dither_for_field`]'s decision and not the caller's: a field reconstructed from
+/// 15x8 cells is the slowest ramp this app produces, and motion is not part of the question for a
+/// field (see `shaders/dither.glsl`'s closing note).
+pub fn draw_field(x: f32, y: f32, w: f32, h: f32, tex: c_uint, tint: *const f32) {
+    if tex == 0 || unsafe { UPROG } == 0 || culled(x, y, w, h) || gate(Class::Field, x, y, w, h) {
+        return;
+    }
+    unsafe {
+        use_prog(UPROG); // u_screen and the sampler unit are set once at init
+        let ext = set_rect(UL_RECT, x, y, w, h);
+        glUniform4fv(UL_TINT, 1, tint);
+        glUniform1f(UL_DITHER, dither_for_field(w, h));
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4, ext);
+    }
+}
+
+/// Draw the underlay field as a popover's MATERIAL over the rounded rect `x,y,w,h` (corner
+/// `radius`): the field's own window `uv` — the panel's screen rect over the screen size, which
+/// `ui::underlay::panel_uv` computes — magnified, tinted and dithered
+/// (`shaders/fs_field_panel.frag`).
+///
+/// Returns whether the program was reachable. `false` — no texture or no program — tells the
+/// caller to lay down the flat sheet instead, so a panel is never left as a hole. A culled or
+/// `drawmask`ed quad answers `true`: the draw was ASKED for and refused on purpose, and a fallback
+/// sheet in its place would make the mask leg price the wrong primitive.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_field_panel(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    uv: [f32; 4],
+    tex: c_uint,
+    tint: *const f32,
+) -> bool {
+    if tex == 0 || unsafe { PPROG } == 0 {
+        return false;
+    }
+    if culled(x, y, w, h) || gate(Class::Field, x, y, w, h) {
+        return true;
+    }
+    unsafe {
+        use_prog(PPROG); // u_screen and the sampler unit are set once at init
+        let ext = set_rect(FP_RECT, x, y, w, h);
+        glUniform4fv(FP_TINT, 1, tint);
+        glUniform4f(FP_UVRECT, uv[0], uv[1], uv[2], uv[3]);
+        glUniform2f(FP_SIZE, w, h);
+        glUniform1f(FP_RADIUS, radius.min(w.min(h) * 0.5));
+        glUniform1f(FP_DITHER, dither_for_field(w, h));
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4, ext);
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **[`enc_u8`] is `(enc(v).clamp(0, 1) * 255 + 0.5) as u8` to the bit, without a `powf`.**
+    /// Every threshold is checked from both sides (the last float below it and the threshold
+    /// itself), then a dense sweep of the whole working range and the edge values a colour
+    /// pipeline can hand it: negatives, zero, the linear toe, above white, infinities and NaN.
+    #[test]
+    fn the_quantised_encode_is_the_powf_encode_to_the_bit() {
+        let reference = |v: f32| (enc(v).clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+        for &t in enc_u8_thresholds().iter() {
+            let below = f32::from_bits(t.to_bits() - 1);
+            assert_eq!(enc_u8(below), reference(below), "just below {t:e}");
+            assert_eq!(enc_u8(t), reference(t), "at {t:e}");
+        }
+        // Every 16th float in [0, 1.25): ~67M values' worth of bit patterns, sampled 1 in 16.
+        let (lo, hi) = (0.0f32.to_bits(), 1.25f32.to_bits());
+        let mut b = lo;
+        while b < hi {
+            let v = f32::from_bits(b);
+            assert_eq!(enc_u8(v), reference(v), "at {v:e}");
+            b += 16;
+        }
+        for v in [
+            -1.0,
+            -0.0,
+            f32::MIN_POSITIVE,
+            0.0031308,
+            1.0,
+            2.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+        ] {
+            assert_eq!(enc_u8(v), reference(v), "at {v:e}");
+        }
+    }
+
+    /// **The underlay chain is a BOX FILTER only because every pass is exactly 2x**, and that is a
+    /// property of the drawable's width, so it is graded here rather than assumed. The television
+    /// is `1920 = 15 * 2^7`; its height floors to exactly `FIELD_H` along the way; an odd pass count
+    /// is what puts `glReadPixels`' first row at the top of the screen. A drawable that is not a
+    /// power-of-two multiple of the grid refuses — the field then comes from the CPU corners.
+    #[test]
+    fn the_underlay_chain_is_seven_exact_halvings_on_the_television() {
+        assert_eq!(field_passes(1920), Some(7));
+        let mut h = 1080;
+        for _ in 0..7 {
+            h /= 2;
+        }
+        assert_eq!(h, FIELD_H, "1080 floors to the grid's height in the same seven passes");
+        assert_eq!(7 % 2, 1, "an odd pass count reads back top-down");
+        assert_eq!(field_passes(3840), Some(8), "a 2x-supersampled simulator is still exact");
+        assert_eq!(field_passes(1440), None, "a 0.75x window cannot be halved onto 15 columns");
+        assert_eq!(field_passes(14), None);
+        assert_eq!(field_passes(15), Some(0));
+    }
+
+    /// **A field read is due one drawn frame after its kick, and never from a reused chain.** The
+    /// lag is what keeps `glReadPixels` off the frame that queued the reduction (26–37 ms of a
+    /// modal's open frame on the television when it was not); the run check is what keeps one
+    /// reader from adopting another's page.
+    #[test]
+    fn a_field_ticket_is_due_a_frame_later_and_lost_to_a_later_run() {
+        let t = FieldTicket { run: 4, swaps: 10 };
+        assert_eq!(field_ticket_state(t, 4, 10, true), TicketState::Pending, "same frame: would stall");
+        assert_eq!(field_ticket_state(t, 4, 11, true), TicketState::Due);
+        assert_eq!(field_ticket_state(t, 4, 40, true), TicketState::Due, "late is still the same page");
+        assert_eq!(field_ticket_state(t, 5, 11, true), TicketState::Lost, "another run reused the targets");
+        let wrapped = FieldTicket { run: 1, swaps: u32::MAX };
+        assert_eq!(field_ticket_state(wrapped, 1, 0, true), TicketState::Due, "the swap count wraps");
+    }
+
+    /// **A frame count is only the floor: the read waits for the GPU's own word.** On the
+    /// television the GPU runs more than a frame behind a modal's open, so "one frame later" still
+    /// stalled the collecting frame by 11–25 ms; an unsignalled fence keeps the ticket pending however
+    /// many frames have passed, and a signalled one is still refused on the kick's own frame.
+    #[test]
+    fn a_field_ticket_waits_for_its_fence_whatever_the_frame_count() {
+        let t = FieldTicket { run: 4, swaps: 10 };
+        assert_eq!(field_ticket_state(t, 4, 11, false), TicketState::Pending, "not finished: no read");
+        assert_eq!(field_ticket_state(t, 4, 40, false), TicketState::Pending, "late but unfinished");
+        assert_eq!(field_ticket_state(t, 4, 10, true), TicketState::Pending, "the floor still holds");
+        assert_eq!(field_ticket_state(t, 5, 40, false), TicketState::Lost, "a reused chain is lost either way");
+    }
+
+    /// **The read happens at the frame's HEAD; a collect mid-frame only answers what landed.** A
+    /// `glReadPixels` between the page and the surfaces ends framebuffer 0's render pass on Midgard
+    /// and makes the rest of the frame reload every tile it had drawn, so `field_collect` must
+    /// never touch GL: it is `Due` only for the run [`field_frame_begin`] already read, `Pending`
+    /// for the live run until then, and `Lost` for any other run whatever landed.
+    #[test]
+    fn a_field_collect_answers_only_what_the_frame_head_read() {
+        let t = FieldTicket { run: 4, swaps: 10 };
+        assert_eq!(field_answer(t, 4, None), TicketState::Pending, "nothing read yet");
+        assert_eq!(field_answer(t, 4, Some(3)), TicketState::Pending, "an older run landed");
+        assert_eq!(field_answer(t, 4, Some(4)), TicketState::Due, "the head read this run");
+        assert_eq!(field_answer(t, 5, Some(4)), TicketState::Lost, "a later run reused the targets");
+        assert_eq!(field_answer(t, 5, Some(5)), TicketState::Lost, "another run's page");
+    }
+
+    /// **A frame that rendered the page offscreen is not followed by a present until the GPU has
+    /// finished it — for a bounded number of frames.** Unfenced (the simulator), nothing is ever
+    /// pending; a fence that never signals stops deferring after `SNAPSHOT_DEFER_MAX` frames rather
+    /// than freezing the screen.
+    #[test]
+    fn a_snapshot_in_flight_defers_presents_for_a_bounded_number_of_frames() {
+        assert!(!snapshot_defers(None, 0), "no fence: nothing in flight");
+        assert!(!snapshot_defers(Some(true), 0), "signalled: present");
+        assert!(snapshot_defers(Some(false), 0), "in flight: defer");
+        assert!(snapshot_defers(Some(false), SNAPSHOT_DEFER_MAX - 1));
+        assert!(!snapshot_defers(Some(false), SNAPSHOT_DEFER_MAX), "the cap: present anyway");
+    }
+
+    #[test]
+    fn a_framebuffer_cache_flips_the_copied_rows_exactly_once() {
+        let uv = frame_cache_uv();
+        assert_eq!(uv, [0.0, 1.0, 1.0, -1.0]);
+        assert_eq!(uv[1] + uv[3], 0.0, "the bottom row lands at screen bottom");
+    }
+
+    /// Strip comments so a claim in the CODE is graded and an account of a mistake in the PROSE is
+    /// not — several of these shaders' headers name `sin` and `fract` on purpose, describing what
+    /// they used to do.
+    fn shader_code(src: &CStr) -> String {
+        src.to_str()
+            .unwrap()
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// **No shader source names a dev trigger, in code or in a comment.** Every file under
+    /// `shaders/` is embedded whole by `include_str!` (the `glsl!` family strips nothing, comments
+    /// included; [`shader_code`] strips them for the tests only), so a comment that spells
+    /// `plxnative-hwcnt` puts that string in the binary. The stable and nightly package gate
+    /// (`ci/check-package.py`, "carries no dev-trigger surface") refuses every catalog name
+    /// (`plxnative-<name>` from `dev.rs`'s `DIAG` and `devtrig.rs`'s `CONTROLLED`) anywhere in the
+    /// packaged binary, and #981's `fs_ramp.frag` comment did exactly that and failed the Nightly
+    /// `make ipk`. The scan matches the catalog's names; this matches the whole `plxnative-` prefix,
+    /// which nothing in a shader needs and which a new trigger cannot slip past. It lists the
+    /// directory, so a new shader is covered by being added.
+    #[test]
+    fn no_shader_source_names_a_dev_trigger() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/shaders");
+        let mut scanned = 0;
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
+            let path = entry.expect("a directory entry").path();
+            // Lossy: a stray non-UTF-8 file (a Finder `.DS_Store`) is not a shader and must not
+            // turn this red; the bytes the scan reads are the same either way.
+            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            let text = String::from_utf8_lossy(&bytes);
+            scanned += 1;
+            for (n, line) in text.lines().enumerate() {
+                if line.contains("plxnative-") {
+                    found.push(format!("{}:{}: {}", path.display(), n + 1, line.trim()));
+                }
+            }
+        }
+        assert!(scanned > 0, "no shader sources under {}", dir.display());
+        assert!(
+            found.is_empty(),
+            "shader sources are embedded verbatim in the binary, comments included, and the \
+             stable/nightly package scan (ci/check-package.py) refuses any dev-trigger name in it; \
+             reword these without the `plxnative-` name:\n{}",
+            found.join("\n")
+        );
+    }
+
+    /// **A frozen menu glass reads its ground ONCE per fragment, dim included.** The modal dim's
+    /// ink on a menu is the latched underlay field times a weight (`underlay::Role::Dim`), and the
+    /// glass's body is that same field (`UnderlayField::ground_tex`), both read at the screen point
+    /// `v_cuv` — so the dim's texel IS the ground's texel and a second `texture2D` of the same
+    /// texture at the same UV is pure cost (~144k interior fragments of a hold menu, plus the rim's
+    /// two). Mode 2 says so; another field keeps its own fetch (mode 1); a flat ink none (0). Red on
+    /// the build that set 1 for every field ink.
+    #[test]
+    fn a_frozen_glass_reuses_its_ground_texel_for_a_dim_of_the_same_field() {
+        assert_eq!(frozen_dim_field(5, 5), 2.0, "dim on the ground's own field: reuse the texel");
+        assert_eq!(frozen_dim_field(5, 7), 1.0, "a different field keeps its own fetch");
+        assert_eq!(frozen_dim_field(5, 0), 0.0, "a flat ink fetches nothing");
+        let code = shader_code(FS_GLASS);
+        assert!(code.contains("u_dim_field > 1.5"), "the shader must carry the reuse mode");
+        let fetches = code.matches("texture2D(u_dim_tex").count();
+        assert_eq!(fetches, 1, "one dim-field fetch site, behind mode 1");
+        let sharp = code.lines().find(|l| l.contains("u_dim_sharp > 0.0")).expect("the sharp dim");
+        assert!(sharp.contains("dimRGB(sharp") && sharp.contains(", g)"), "the sharp dim reuses the body's texel: {sharp}");
+    }
+
+    /// **The page wash's delta rides `srcRGB`, once, before the source-alpha mix and off the sharp
+    /// branch.** `backdrop::Ground` defers the wash to composite: the snapshot keeps the wash it was
+    /// drawn under and `srcRGB` owes the difference, at the UV it SAMPLES (the refracted one — the
+    /// caller passes the lens's uv, so a term placed here is read where the filtered source is). The
+    /// sharp rim grab is off the finished framebuffer and carries this frame's wash already, so a
+    /// second delta there would count it twice. Behind a uniform branch so `u_wash_on = 0` is the
+    /// glass without it.
+    #[test]
+    fn the_wash_delta_is_applied_in_src_rgb_at_the_sampled_uv_and_nowhere_else() {
+        let code = shader_code(FS_GLASS);
+        for uniform in ["u_wash_on", "u_wash_uv", "u_wash_tl", "u_wash_tr", "u_wash_br", "u_wash_bl", "u_wash_w"] {
+            assert!(code.contains(&format!("uniform ")) && code.contains(uniform), "{uniform} declared");
+        }
+        let src = &code[code.find("vec3 srcRGB(").expect("srcRGB")..];
+        let src = &src[..src.find("\n}\n").expect("end of srcRGB")];
+        let on = src.find("if (u_wash_on > 0.0)").expect("the wash term is behind its uniform branch");
+        let mix = src.find("mix(u_source_ground, c, u_source_alpha)").expect("the source-alpha mix");
+        assert!(on < mix, "the delta is part of the source colour, before it is mixed over the ground");
+        assert!(src.contains("uv * u_wash_uv.xy + u_wash_uv.zw"), "evaluated at the sampled uv");
+        assert_eq!(code.matches("u_wash_tl").count(), 2, "declared once, read once");
+        let main = &code[code.find("void main(){").expect("main")..];
+        assert!(!main.contains("u_wash_"), "main never touches the wash: the sharp grab already carries it");
+    }
+
+    /// **The hairline specular costs nothing where it is off.** `u_spec.w` is its strength and both
+    /// shipped glass rims that reach the edge path most (`Menu`, `Standing`) set it to 0, yet the
+    /// band ran `pow` and two `smoothstep`s per rim fragment to multiply by that 0. A uniform branch
+    /// is coherent across every fragment, so the guard is exact and free. Red on the unguarded
+    /// shader.
+    #[test]
+    fn the_glass_hairline_specular_is_skipped_when_its_strength_is_zero() {
+        assert_eq!(GlassRim::Menu.params().2[3], 0.0);
+        let code = shader_code(FS_GLASS);
+        let guard = code.find("if (u_spec.w > 0.0)").expect("the spec guard");
+        let pow = code.find("pow(abs(dot(nrm, u_spec.xy))").expect("the lobe");
+        let hair = code.find("float hair").expect("the hairline");
+        assert!(guard < hair && guard < pow, "the guard must precede the hairline and lobe");
+    }
+
+    /// **The glass interior's box pre-test only skips work, never a decision.** `fs_glass.frag`
+    /// takes its interior exit without evaluating `sdBox` for a fragment inside the panel's box
+    /// inset by `max(radius, bevel) + 1`: there both components of `q` are below -1, so the
+    /// `length` term is 0 and `d = max(|p| - ch) < -bevel - 1`, and the exit (`d < -bevel`) is
+    /// certain. Graded on a replica over a dense grid of each case — the hold menu's panel, a chip,
+    /// a radius above the half-size, a bevel plus radius above it, a zero and a negative radius —
+    /// and the shader must run the test BEFORE the `sdBox` it skips, with a stand-in `d` that is
+    /// itself an interior value. Red on the build that ran `sdBox` on every fragment.
+    #[test]
+    fn the_glass_interior_box_pretest_is_exact_and_runs_first() {
+        fn sd_box(p: [f32; 2], b: [f32; 2], r: f32) -> f32 {
+            let q = [p[0].abs() - b[0] + r, p[1].abs() - b[1] + r];
+            let len = (q[0].max(0.0).powi(2) + q[1].max(0.0).powi(2)).sqrt();
+            len + q[0].max(q[1]).min(0.0) - r
+        }
+        fn pretest(p: [f32; 2], ch: [f32; 2], r: f32, bevel: f32) -> bool {
+            let k = r.max(bevel) + 1.0;
+            p[0].abs() < ch[0] - k && p[1].abs() < ch[1] - k
+        }
+        let code = shader_code(FS_GLASS);
+        let main = &code[code.find("void main(){").expect("main")..];
+        let guard = main.find("if (!all(lessThan(abs(v_p), u_ch - vec2(max(u_iradius, u_bevel) + 1.0))))").expect("the pre-test");
+        let sdf = main.find("d = sdBox(v_p, u_ch, u_iradius);").expect("the guarded sdBox");
+        let exit = main.find("if (d < -u_bevel)").expect("the interior exit");
+        assert!(guard < sdf && sdf < exit, "the pre-test guards the sdBox, and both precede the exit");
+        assert!(main.starts_with("void main(){\n  highp float d = -u_bevel - 1.0;"), "the skipped d is an interior value");
+        assert_eq!(main.matches("sdBox(").count(), 1, "main evaluates sdBox once, behind the pre-test");
+        assert_eq!(GlassRim::Menu.params().0, tokens::MENU_BEVEL);
+        for (case, &(w, h, r, bevel)) in [
+            (382.0f32, 339.0f32, 20.0f32, tokens::MENU_BEVEL),
+            (80.0, 40.0, 20.0, 12.0),
+            (60.0, 60.0, 40.0, 12.0),
+            (60.0, 50.0, 20.0, 12.0),
+            (500.0, 400.0, 0.0, 12.0),
+            (300.0, 200.0, -4.0, 6.0),
+            (900.0, 120.0, 30.0, 28.0),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let ch = [w * 0.5, h * 0.5];
+            let (mut taken, mut n) = (0u32, 0u32);
+            for i in 0..=400 {
+                for j in 0..=400 {
+                    let p = [-ch[0] + w * i as f32 / 400.0 + 0.25, -ch[1] + h * j as f32 / 400.0 + 0.25];
+                    n += 1;
+                    if pretest(p, ch, r, bevel) {
+                        taken += 1;
+                        let d = sd_box(p, ch, r);
+                        assert!(d < -bevel - 0.99, "{w}x{h} r{r} bevel{bevel}: {p:?} pre-tested in, d {d}");
+                    }
+                }
+            }
+            if case == 0 {
+                assert!(taken * 4 > n * 3, "the hold menu's panel is mostly pre-tested ({taken} of {n})");
+            }
+        }
+    }
+
+    /// The ambient program is drawn over more pixels than any other in the app — the hero's
+    /// corner scrim, the atmospheric ramps and the page wash are all full-width quads — so its
+    /// per-fragment contract is pinned by text: NO arithmetic on the colour at all. The whole
+    /// bilinear field is evaluated per VERTEX of [`FIELD_N`]² cells and handed over as one fp16
+    /// varying; the fragment reads it and (dithered) adds the noise. Its dither is the shared one
+    /// and is graded by the case below, across all the programs that carry it.
+    #[test]
+    fn full_screen_ambient_reads_one_interpolated_colour_per_fragment() {
+        let src = shader_code(FS_AMBIENT);
+        assert!(src.contains("varying vec4 v_col"), "the colour stays fp16");
+        assert!(
+            !src.contains("mix("),
+            "no per-fragment mix: the field is evaluated per vertex of the mesh"
+        );
+        assert!(
+            !src.contains("u_atl"),
+            "the corners are the vertex shader's business"
+        );
+        let vs = VS_AMBIENT.to_str().unwrap();
+        assert!(vs.contains("v_col = mix(mix(u_atl, u_atr, a_pos.x), mix(u_abl, u_abr, a_pos.x), a_pos.y)"));
+    }
+
+    /// **The field mesh is the bilinear field to within half an 8-bit code, at its worst.**
+    ///
+    /// A triangle interpolates LINEARLY, and a bilinear field is not linear: inside one cell of
+    /// side `h` it differs from the plane through the cell's corners by `k·s·t·h²` where `k` is
+    /// the field's twist `tl − tr − bl + br` per channel. On either triangle of the cell that
+    /// deviation peaks at `k·h²/4`. The largest twist a colour field can have is 2 (opposite
+    /// corners at 0 and at 1), so at `FIELD_N` = 16 the error is at most `2/(4·256)` — under half
+    /// an 8-bit code, i.e. below the quantum the one-LSB dither already spreads. This test walks
+    /// the REAL mesh ([`field_mesh`]) rather than the formula, so a coarser grid or a triangle
+    /// wound across the wrong diagonal fails it.
+    #[test]
+    fn the_field_mesh_is_the_bilinear_field_within_half_a_code() {
+        let v = field_mesh();
+        assert_eq!(v.len(), FIELD_N * FIELD_N * 6 * 2, "two triangles a cell, two floats a vertex");
+        // The worst-case twist: tl = br = 1, tr = bl = 0.
+        let f = |x: f32, y: f32| {
+            let top = (1.0 - x) * 1.0 + x * 0.0;
+            let bot = (1.0 - x) * 0.0 + x * 1.0;
+            top * (1.0 - y) + bot * y
+        };
+        let mut worst = 0.0f32;
+        let mut area = 0.0f32;
+        for tri in v.chunks(6) {
+            let (p0, p1, p2) = ((tri[0], tri[1]), (tri[2], tri[3]), (tri[4], tri[5]));
+            area += ((p1.0 - p0.0) * (p2.1 - p0.1) - (p2.0 - p0.0) * (p1.1 - p0.1)).abs() / 2.0;
+            let (f0, f1, f2) = (f(p0.0, p0.1), f(p1.0, p1.1), f(p2.0, p2.1));
+            for i in 0..=8 {
+                for j in 0..=(8 - i) {
+                    let (a, b) = (i as f32 / 8.0, j as f32 / 8.0);
+                    let c = 1.0 - a - b;
+                    let x = a * p0.0 + b * p1.0 + c * p2.0;
+                    let y = a * p0.1 + b * p1.1 + c * p2.1;
+                    let lin = a * f0 + b * f1 + c * f2;
+                    worst = worst.max((lin - f(x, y)).abs());
+                }
+            }
+        }
+        assert!((area - 1.0).abs() < 1e-4, "the mesh tiles the unit square exactly once: {area}");
+        assert!(worst * 255.0 <= 0.5, "worst deviation {:.3} codes", worst * 255.0);
+    }
+
+    /// **The mesh is stored row by row**, `FIELD_N` squares of 6 vertices to a row, top to bottom —
+    /// which is what lets [`draw_field_mesh_rows`] (and the scrim layer, which draws only the rows its
+    /// shade reaches) address a run of rows as one contiguous `glDrawArrays` range.
+    #[test]
+    fn the_field_mesh_is_stored_row_by_row() {
+        let v = field_mesh();
+        let row_verts = FIELD_N * 6;
+        assert_eq!(v.len(), FIELD_N * row_verts * 2);
+        for (j, row) in v.chunks(row_verts * 2).enumerate() {
+            let (top, bottom) = (j as f32 / FIELD_N as f32, (j + 1) as f32 / FIELD_N as f32);
+            for p in row.chunks(2) {
+                assert!(p[1] >= top && p[1] <= bottom, "row {j}: a vertex at y {}", p[1]);
+            }
+            assert!(row.chunks(2).any(|p| p[1] == top) && row.chunks(2).any(|p| p[1] == bottom), "row {j} spans its strip");
+        }
+    }
+
+    /// **The shared output dither, graded across every program that carries it.**
+    ///
+    /// Written as one case over a LIST rather than five cases, because the failure this guards is
+    /// exactly "one of them did it differently". That is not hypothetical: `fs_glass.frag` — the
+    /// popover background — carried a `fract(sin(dot(p,k))*43758.5)` hash, evaluated
+    /// UNCONDITIONALLY on every fragment of every glass surface, for as long as `fs_ambient.frag`'s
+    /// own header had been recording that same construction as a mistake it had made and fixed
+    /// (38% of a Home frame). Five programs, four answers, and nothing compiling the difference.
+    ///
+    /// The properties are the cost rules in `shaders/dither.glsl`: no branch (the off state is a
+    /// twin program), a texture fetch rather than arithmetic, the tile sampled 1:1 at
+    /// `1/NOISE_DIM`, and its coordinate handed over by the vertex shader rather than computed
+    /// from `gl_FragCoord`.
+    #[test]
+    fn every_dithered_program_carries_the_one_shared_dither_and_no_hash_of_its_own() {
+        let prelude = shader_code(unsafe {
+            CStr::from_bytes_with_nul_unchecked(
+                concat!(include_str!("shaders/dither.glsl"), "\0").as_bytes(),
+            )
+        });
+        assert!(prelude.contains("uniform float u_dither"));
+        // Cost rule 1, as REVISED 2026-09-19: no branch at all. The uniform branch this prelude
+        // carried measured +5.8M arithmetic words a frame on a scrolling Library's dithered wash
+        // (49 fps against 59 without it); the undithered case is a different PROGRAM
+        // (`ambient_program`'s twin) or a field too small for the fetch to matter.
+        assert!(
+            !prelude.contains("if (u_dither"),
+            "the dither is unconditional — its off state is the twin program, not a branch"
+        );
+        assert!(
+            prelude.contains("texture2D(u_dither_tex, v_dither_nc)"),
+            "the dither is a texture fetch on the idle pipe, addressed straight from a varying"
+        );
+        // Cost rule 4: NO arithmetic on `gl_FragCoord`. It is highp, so scaling it into the tile
+        // was an fp32 multiply on every fragment of every dithered surface — measured 2026-09-19
+        // as the difference between 45 and 60 fps on a scrolling Library (the whole wash cost).
+        assert!(
+            !prelude.contains("gl_FragCoord"),
+            "the noise coordinate comes from the vertex shader, never from gl_FragCoord"
+        );
+        assert!(prelude.contains("varying highp vec2 v_dither_nc"));
+        // The tile is sampled 1:1 in SCREEN space, so the vertex shaders' divisor and `NOISE_DIM`
+        // are one number written in two languages. Nothing tied them together before, and the
+        // failure is silent in the worst way: a divisor left behind when the tile grows does not
+        // band or blank, it magnifies the tile into exactly the periodic pattern the 256 was
+        // measured to remove.
+        for (name, vs) in [
+            ("vs_ambient.vert", VS_AMBIENT_DITHERED),
+            ("vs_ambient.vert (art wash)", VS_ART_WASH),
+            ("vs_img.vert", VS_IMG_DITHERED),
+            ("vs_src.vert", VS_SRC_DITHERED),
+        ] {
+            let code = shader_code(vs);
+            assert!(
+                code.contains(&format!("v_dither_nc = px * (1.0 / {NOISE_DIM}.0)")),
+                "{name} must hand the tile coordinate at 1/NOISE_DIM ({NOISE_DIM}) of the target px"
+            );
+            assert!(
+                code.contains("#define PLX_DITHER_NC"),
+                "{name}: the dithered twin defines it"
+            );
+        }
+        for (name, vs) in [
+            ("vs_ambient.vert", VS_AMBIENT),
+            ("vs_img.vert", VS_IMG),
+            ("vs_src.vert", VS_SRC),
+        ] {
+            assert!(
+                !shader_code(vs).contains("#define PLX_DITHER_NC"),
+                "{name}: the plain vertex shader (every image program, the undithered twin) \
+                 carries no noise varying"
+            );
+        }
+
+        for (name, src) in [
+            ("fs_ambient.frag", FS_AMBIENT),
+            ("fs_field.frag", FS_FIELD),
+            ("fs_field_panel.frag", FS_FIELD_PANEL),
+            ("fs_glass.frag", FS_GLASS),
+            ("fs_art_wash.frag", FS_ART_WASH),
+        ] {
+            let code = shader_code(src);
+            assert!(
+                code.contains("uniform float u_dither"),
+                "{name} must be built with glsl_dithered! (the prelude is missing)"
+            );
+            assert!(
+                code.contains("plx_dither"),
+                "{name} carries the prelude but never applies it — a program that pays for the \
+                 uniforms and bands anyway"
+            );
+            assert!(
+                !code.contains("fract(sin("),
+                "{name} has a sine hash of its own; the shared tile is the one answer"
+            );
+            assert!(
+                !code.contains("if (u_dither"),
+                "{name} must reach the dither through the prelude's helpers, never a branch of its own"
+            );
+        }
+        // The other half of the list: the per-rect programs carry NOTHING of it — not the branch,
+        // not the uniforms. This is the 2026-09-04 hero-paging regression (+4M shader words a
+        // frame for a branch that answered "no" on every draw) written as a test.
+        for (name, src) in [
+            ("fs_src.frag", FS_SRC),
+            ("fs_shadow.frag", FS_SHADOW),
+            ("fs_flat.frag", FS_FLAT),
+            ("fs_ramp.frag", FS_RAMP),
+            ("fs_tex.frag", FS_TEX),
+            ("fs_art_scrim.frag", FS_ART_SCRIM),
+            ("fs_ambient.frag (plain twin)", FS_AMBIENT_PLAIN),
+        ] {
+            let code = shader_code(src);
+            assert!(
+                !code.contains("u_dither") && !code.contains("texture2D(u_dither_tex"),
+                "{name} is a hot-path program and must stay free of the dither prelude"
+            );
+            assert!(!code.contains("fract(sin("), "{name} has a sine hash of its own");
+        }
+    }
+
+    /// The ground's one-pass programs: the ink ramp rides only the dithered wash (the plain twin
+    /// behind `draw_grad4` carries real corner alpha and must not grow a ramp), the art variant hands
+    /// the ramp to the fragment instead of pre-mixing it into the wash colour (the art sits BETWEEN
+    /// wash and ink), and the fragment is opaque — it replaces three blended layers.
+    #[test]
+    fn the_art_wash_is_the_wash_program_with_the_art_between_it_and_the_ink() {
+        let wash = shader_code(VS_AMBIENT_DITHERED);
+        assert!(wash.contains("#define PLX_WASH_INK") && !wash.contains("#define PLX_ART_WASH"));
+        assert!(!shader_code(VS_AMBIENT).contains("#define PLX_WASH_INK"), "plain twin: no ramp");
+        let vs = shader_code(VS_ART_WASH);
+        for d in ["#define PLX_DITHER_NC", "#define PLX_WASH_INK", "#define PLX_ART_WASH"] {
+            assert!(vs.contains(d), "VS_ART_WASH must define {d}");
+        }
+        let fs = shader_code(FS_ART_WASH);
+        assert!(fs.contains("varying float v_inka") && fs.contains("uniform vec3 u_ink"));
+        assert!(fs.contains("mix(g, u_ink, v_inka)"), "the ink goes over the art, not under it");
+        assert!(fs.contains("c.a * u_tint.a"), "the art's own alpha times the dissolve");
+        assert!(fs.contains(", 1.0);"), "one opaque fragment: nothing below it is read");
+    }
+
+    /// **Every program that carries the ground shade stops at its live blocks.** The three vertex
+    /// programs built with `PLX_SCRIM` (the wash, the art wash, the layer) declare the block array at
+    /// the size the Rust side uploads ([`scrim::VEC4S`]), take the live count as `u_scn`, and loop over
+    /// at most [`scrim::MAX_BLOCKS`] blocks, leaving at the count. The programs without it carry none
+    /// of it (the plain twin behind `draw_grad4`).
+    #[test]
+    fn the_scrim_programs_stop_at_the_live_block_count() {
+        let blocks = scrim::MAX_BLOCKS;
+        for (name, src) in [("wash", VS_AMBIENT_DITHERED), ("art wash", VS_ART_WASH), ("layer", VS_SCRIM_LAYER)] {
+            let code = shader_code(src);
+            assert!(code.contains("#define PLX_SCRIM\n"), "{name}: built with the scrim");
+            assert!(code.contains(&format!("uniform vec4 u_sc[{}];", scrim::VEC4S)), "{name}: the array is the one uploaded");
+            assert!(code.contains("uniform float u_scn;"), "{name}: the live count");
+            assert!(code.contains(&format!("for (int i = 0; i < {blocks}; i++)")), "{name}: a constant bound, as GLSL ES 1.00 wants");
+            assert!(code.contains("if (float(i) >= u_scn) break;"), "{name}: leaves at the count");
+            assert!(code.contains("shade_block(2 * i, px)"), "{name}: two vectors a block");
+        }
+        assert!(!shader_code(VS_AMBIENT).contains("#define PLX_SCRIM"), "plain twin: no scrim");
+    }
+
+    /// **The card composite's box test is an exact subset of its SDF early-out.** `fs_img.frag`
+    /// returns `(tex, ta)` without evaluating the highp rounded-box SDF for any fragment strictly
+    /// inside the packed `u_card` interior; that is only the same picture if every such point also has `d < -2`, the
+    /// SDF path's own early-out. Graded against a replica of `sdBox` over a dense grid of cards,
+    /// radii and points — an unsafe packed interior cutoff would put a rim or an AA edge inside
+    /// the box and cut it off.
+    #[test]
+    fn the_card_interior_box_never_reaches_the_rim() {
+        fn sd_box(p: (f32, f32), b: (f32, f32), r: f32) -> f32 {
+            let q = (p.0.abs() - b.0 + r, p.1.abs() - b.1 + r);
+            let outside = (q.0.max(0.0).powi(2) + q.1.max(0.0).powi(2)).sqrt();
+            outside + q.0.max(q.1).min(0.0) - r
+        }
+        let code = shader_code(FS_IMG);
+        let boxed = code.find("straight < u_card.w").expect("the interior box test");
+        let sdf = code.find("length(q)").expect("the SDF corner distance");
+        assert!(boxed < sdf, "the box test must run BEFORE the SDF it exists to skip");
+        for &(w, h) in &[(260.0_f32, 390.0_f32), (410.0, 230.0), (12.0, 12.0), (3.0, 40.0)] {
+            for &r in &[0.5_f32, 1.0, 6.0, 14.0, 24.0, 60.0] {
+                let (chw, chh) = (w * 0.5, h * 0.5);
+                let geometry = image_card_geometry(chw, chh, r);
+                let inner = [geometry[0] + geometry[3], geometry[1] + geometry[3]];
+                let n = 60;
+                for i in 0..=n {
+                    for j in 0..=n {
+                        let p = (
+                            -chw + w * i as f32 / n as f32,
+                            -chh + h * j as f32 / n as f32,
+                        );
+                        if p.0.abs() < inner[0] && p.1.abs() < inner[1] {
+                            let d = sd_box(p, (chw, chh), r);
+                            assert!(d < -2.0, "card {w}x{h} r{r}: p {p:?} is boxed but d={d}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The flat program is the whole of `fs_src.frag`'s flat path minus the interpolation: one
+    /// uniform out, and the routing test in `draw_rect` is exact on the colour pair.
+    #[test]
+    fn a_uniform_square_rect_is_one_colour_out_and_the_pair_test_is_exact() {
+        let code = shader_code(FS_FLAT);
+        assert!(code.contains("gl_FragColor = u_col;"));
+        assert!(!code.contains("mix("), "no interpolation: that is the point of the program");
+        assert!(!code.contains("varying"), "and no varying to load");
+        let a = [0.10f32, 0.10, 0.12, 0.8];
+        let b = [0.10f32, 0.10, 0.12, 0.8];
+        let c = [0.10f32, 0.10, 0.12, 0.79];
+        assert!(same_colour(a.as_ptr(), a.as_ptr()), "the same array twice is the common call");
+        assert!(same_colour(a.as_ptr(), b.as_ptr()), "equal components are the same fill");
+        assert!(!same_colour(a.as_ptr(), c.as_ptr()), "one component apart is a gradient");
+    }
+
+    /// **`draw_rect`'s program choice, as a pure function.** A square, unfocused rect never needs the
+    /// SDF: one colour is the flat program's, two colours the ramp program's. Rounding or focus
+    /// keeps the fill program, whatever the colours are. The thresholds are `fs_src.frag`'s own
+    /// flat-path test (`u_radius < 0.5`, `u_focus < 0.001`), so each boundary is pinned from both
+    /// sides, and a NaN input (every comparison false) lands on the SDF program, as it does in the
+    /// shader.
+    #[test]
+    fn a_square_unfocused_rect_is_flat_or_ramp_and_anything_else_is_the_sdf_fill() {
+        assert_eq!(rect_fill(0.0, 0.0, true), RectFill::Flat, "one colour: the scrim");
+        assert_eq!(rect_fill(0.0, 0.0, false), RectFill::Ramp, "two colours: the hero's ramp band");
+        for one_colour in [true, false] {
+            assert_eq!(rect_fill(14.0, 0.0, one_colour), RectFill::Sdf, "rounded");
+            assert_eq!(rect_fill(0.0, 1.0, one_colour), RectFill::Sdf, "focused");
+            assert_eq!(rect_fill(14.0, 1.0, one_colour), RectFill::Sdf, "rounded and focused");
+            assert_eq!(rect_fill(0.5, 0.0, one_colour), RectFill::Sdf, "radius 0.5 is the first rounded");
+            assert_eq!(rect_fill(0.001, 0.001, one_colour), RectFill::Sdf, "focus 0.001 is the first focused");
+            assert_eq!(rect_fill(f32::NAN, 0.0, one_colour), RectFill::Sdf, "NaN radius");
+            assert_eq!(rect_fill(0.0, f32::NAN, one_colour), RectFill::Sdf, "NaN focus");
+        }
+        assert_eq!(rect_fill(0.499, 0.0, false), RectFill::Ramp, "just under the radius threshold");
+        assert_eq!(rect_fill(0.0, 0.000_999, false), RectFill::Ramp, "just under the focus threshold");
+        assert_eq!(rect_fill(0.0, 0.000_999, true), RectFill::Flat);
+        // The same pair test feeds it, so the common call (one array passed twice) is a scrim.
+        let a = [0.0f32, 0.0, 0.0, 0.5];
+        let b = [0.0f32, 0.0, 0.0, 0.0];
+        assert_eq!(rect_fill(0.0, 0.0, same_colour(a.as_ptr(), a.as_ptr())), RectFill::Flat);
+        assert_eq!(rect_fill(0.0, 0.0, same_colour(a.as_ptr(), b.as_ptr())), RectFill::Ramp);
+    }
+
+    /// **The ramp program is `fs_src.frag`'s flat path and nothing else.** The picture only stays
+    /// the same if the expression, the interpolation and every precision qualifier on it are the
+    /// fill program's own, so each is read out of both sources and compared; the draw must keep the
+    /// rect's exact bounds (no AA bleed, which is the SDF path's alone), book the draw in the
+    /// overdraw ledger BEFORE choosing a program, and fall back to the fill program rather than
+    /// draw nothing when the ramp program did not compile or link. Each arm of the routing must call
+    /// ITS program (a swap would still contain both calls), and the ramp program must be built from
+    /// `VS_SRC` + `FS_RAMP` through `link_optional_program`: `link_program` exits the process on a
+    /// compile rejection, so the fallback above would never be reached for it.
+    #[test]
+    fn the_ramp_program_is_the_fill_programs_flat_path_in_a_smaller_shader() {
+        let ramp = shader_code(FS_RAMP);
+        let fill = shader_code(FS_SRC);
+        for line in [
+            "precision mediump float;",
+            "varying highp vec2 v_uv;",
+            "uniform vec4 u_colTop;",
+            "uniform vec4 u_colBot;",
+            "float vy = v_uv.y;",
+            "gl_FragColor = mix(u_colTop, u_colBot, vy);",
+        ] {
+            assert!(ramp.lines().any(|l| l.trim() == line), "fs_ramp.frag must carry `{line}`");
+            assert!(fill.lines().any(|l| l.trim() == line), "fs_src.frag's flat path must carry `{line}`");
+        }
+        assert!(!ramp.contains("u_radius") && !ramp.contains("u_focus"), "no SDF inputs");
+        assert!(!ramp.contains("if (") && !ramp.contains("discard"), "no branch: that is the point");
+
+        let src = include_str!("gfx.rs");
+        let prod = &src[..src.find("\n#[cfg(test)]\nmod tests").expect("the unit tests")];
+        let body = |head: &str| {
+            let from = prod.find(head).unwrap_or_else(|| panic!("`{head}` is gone"));
+            let rest = &prod[from..];
+            &rest[..rest.find("\n}\n").expect("the end of the function")]
+        };
+        let ramp_draw = body("unsafe fn draw_ramp(");
+        assert!(ramp_draw.contains("set_rect(RP_RECT, x, y, w, h);"), "exactly the rect's bounds");
+        assert!(ramp_draw.contains("if RPROG == 0 {") && ramp_draw.contains("use_prog(PROG);"), "the fallback");
+        let rect_draw = body("pub fn draw_rect(");
+        let (gated, routed) = (
+            rect_draw.find("gate(Class::Rect, x, y, w, h)").expect("the ledger gate"),
+            rect_draw.find("rect_fill(radius, focus, same_colour(top, bot))").expect("the routing"),
+        );
+        assert!(gated < routed, "the draw is booked in the ledger before a program is chosen");
+        // Each arm is cut out of the routing `match` (up to the next arm) and must call its own
+        // program and not the other's.
+        let arm = |head: &str, next: &str| {
+            let from = rect_draw.find(head).unwrap_or_else(|| panic!("`{head}` is gone"));
+            let rest = &rect_draw[from..];
+            &rest[..rest.find(next).unwrap_or_else(|| panic!("`{next}` no longer follows `{head}`"))]
+        };
+        let flat_arm = arm("RectFill::Flat =>", "RectFill::Ramp =>");
+        let ramp_arm = arm("RectFill::Ramp =>", "RectFill::Sdf =>");
+        assert!(
+            flat_arm.contains("draw_flat(x, y, w, h, top)") && !flat_arm.contains("draw_ramp("),
+            "the Flat arm draws through draw_flat with the one colour"
+        );
+        assert!(
+            ramp_arm.contains("draw_ramp(x, y, w, h, top, bot)") && !ramp_arm.contains("draw_flat("),
+            "the Ramp arm draws through draw_ramp with both colours"
+        );
+        assert!(
+            prod.contains("RPROG = link_optional_program(VS_SRC.as_ptr(), FS_RAMP.as_ptr())"),
+            "the ramp program is vs_src.vert + fs_ramp.frag, linked optionally so a compile rejection falls back"
+        );
+    }
+
+    #[test]
+    fn art_scrim_draws_only_the_band_and_covers_the_cards_aa_fringe() {
+        // Include fractional scrolling, a focused card, a tiny band and a full-height band.
+        for (x, y, w, h, band) in [
+            (120.0, 270.0, 320.0, 180.0, 64.0),
+            (119.25, 269.625, 336.0, 189.0, 67.2),
+            (-0.25, -3.5, 8.0, 4.0, 0.5),
+            (0.0, 0.0, 8.0, 4.0, 20.0),
+        ] {
+            let [qx, qy, qw, qh] = art_scrim_quad(x, y, w, h, band).unwrap();
+            let close = |a: f32, b: f32| assert!((a - b).abs() < 0.0001, "{a} != {b}");
+            close(qx, x - AA_BLEED);
+            close(qx + qw, x + w + AA_BLEED);
+            close(qy + qh, y + h + AA_BLEED);
+            close(qy + AA_BLEED, y + h - band.min(h));
+            assert!(qh <= h + 2.0 * AA_BLEED, "the band never expands to multiple full cards");
+            // Local shader coordinates must reach both true card sides despite fractional origins.
+            close((x - qx) / qw * qw - AA_BLEED, 0.0);
+            close((y + h - qy) / qh * qh + h - band.min(h) - AA_BLEED, h);
+        }
+        assert!(art_scrim_quad(0.0, 0.0, 320.0, 180.0, 0.0).is_none());
+        assert!(art_scrim_quad(0.0, 0.0, 0.0, 180.0, 64.0).is_none());
+        assert!(art_scrim_quad(0.0, 0.0, 320.0, -1.0, 64.0).is_none());
+    }
+
+    #[test]
+    fn art_scrim_preserves_straight_alpha_and_the_shared_rounded_edge() {
+        let code = shader_code(FS_ART_SCRIM);
+        let vertex = shader_code(VS_ART_SCRIM);
+        assert!(code.contains("varying highp vec2 v_p"), "fractional card coordinates need fp32");
+        assert!(vertex.contains(&format!("const highp float bleed = {AA_BLEED:.1};")));
+        assert!(code.contains("smoothstep(-1.0, 1.0, d)"), "same silhouette as artwork");
+        assert!(code.contains("vec4(u_col.rgb, alpha * coverage)"), "coverage must not darken RGB twice");
+        assert!(code.contains("u_col.a * clamp(v_ramp, 0.0, 1.0)"));
+        assert!(vertex.contains("/ u_band.x"), "divide once per vertex, not once per fragment");
+        assert!(
+            code.lines().all(|line| !line.split("//").next().unwrap().contains('/')),
+            "the fragment has no division after comment removal"
+        );
+        for extra in ["gl_FragCoord", "u_focus", "u_rim", "u_pill", "discard", "texture2D"] {
+            assert!(!code.contains(extra), "scrim must remain independent of {extra}");
+        }
+    }
+
+    #[test]
+    fn art_scrim_corner_only_distance_matches_the_card_sdf() {
+        let code = shader_code(FS_ART_SCRIM);
+        assert!(code.contains("d = max(q.x, q.y) - u_band.y"));
+        assert!(code.contains("if (min(q.x, q.y) > 0.0) d = length(q) - u_band.y"));
+        for source in [FS_IMG, FS_STILL] {
+            let code = shader_code(source);
+            assert!(code.contains("d = straight - u_card.z"));
+            assert!(code.contains("if (min(q.x, q.y) > 0.0) d = length(q) - u_card.z"));
+        }
+        // Sample all quadrants and the branch boundary at subpixel offsets. Negative q covers
+        // the interior and straight edges; two positive coordinates cover the rounded arcs.
+        let samples: [f32; 10] = [-200.0, -14.0, -1.0, -0.25, 0.0, 0.25, 1.0, 13.0, 14.0, 15.0];
+        for x in samples {
+            for y in samples {
+                let reference = x.max(0.0).hypot(y.max(0.0)) + x.max(y).min(0.0) - 14.0;
+                let scrim = if x.min(y) > 0.0 { x.hypot(y) } else { x.max(y) } - 14.0;
+                assert!((scrim - reference).abs() < 0.0001, "SDF differs at ({x}, {y})");
+            }
+        }
+    }
+
+    #[test]
+    fn still_fusion_requires_opaque_paint_resident_art_and_a_linked_program() {
+        assert!(still_fusion_eligible(7, [1.0; 4], true));
+        for alpha in [0.0, 0.5, 0.9999, 1.0001, f32::NAN] {
+            assert!(!still_fusion_eligible(7, [1.0, 1.0, 1.0, alpha], true));
+        }
+        for channel in 0..3 {
+            let mut dim = [1.0; 4];
+            dim[channel] = 0.9999;
+            assert!(!still_fusion_eligible(7, dim, true));
+        }
+        assert!(!still_fusion_eligible(0, [1.0; 4], true));
+        assert!(!still_fusion_eligible(7, [1.0; 4], false));
+    }
+
+    #[test]
+    fn image_interior_shortcut_preserves_small_radii_circles_and_fractional_cards() {
+        let code = shader_code(FS_IMG);
+        assert!(code.find("straight < u_card.w").unwrap() < code.find("min(q.x, q.y)").unwrap());
+        for (w, h, radius) in [(420.0f32, 236.0f32, 0.0f32), (420.0, 236.0, 0.5),
+            (420.0, 236.0, 1.0), (420.0, 236.0, 2.0), (420.0, 236.0, 14.0),
+            (457.8, 257.24, 15.26), (190.0, 190.0, 95.0), (8.0, 4.0, 2.0)] {
+            let g = image_card_geometry(w * 0.5, h * 0.5, radius);
+            let sample = |half: f32, corner: f32| [-half - 1.0, -half, -corner - 0.25,
+                -corner + 0.25, 0.0, corner - 0.25, corner + 0.25, half, half + 1.0];
+            for x in sample(w * 0.5, g[0]) {
+                for y in sample(h * 0.5, g[1]) {
+                    let q = [x.abs() - g[0], y.abs() - g[1]];
+                    let old = [x.abs() - w * 0.5 + radius, y.abs() - h * 0.5 + radius];
+                    let reference = old[0].max(0.0).hypot(old[1].max(0.0))
+                        + old[0].max(old[1]).min(0.0) - radius;
+                    if q[0].max(q[1]) < g[3] { assert!(reference < -1.9999); }
+                    let distance = if q[0].min(q[1]) > 0.0 { q[0].hypot(q[1]) }
+                        else { q[0].max(q[1]) } - radius;
+                    assert!((distance - reference).abs() < 0.0001);
+                }
+            }
+        }
+        let g = image_card_geometry(210.0, 118.0, 14.0);
+        assert!((g[0] * g[1]) / (210.0 * 118.0) > 0.80, "shortcut must cover the broad interior");
+    }
+
+    /// `fs_img.frag`'s FOCUS literals can't read a Rust `const` (GLSL has no such thing), so this
+    /// pins the shader's own numbers against `tokens.rs`'s `CARD_GLOW_*`/`CARD_GLOSS_*` documentation
+    /// copies — the ones the shader keeps as plain distances/fractions rather than folding into an
+    /// algebraic form (unlike `CARD_GLARE_EASE`, which the shader halves into `chh * 0.32` rather
+    /// than `(2*chh) * 0.16`; that transform is checked numerically below instead of by text).
+    /// The focus ring, rim and glow are ADDED to the fill in `fs_src.frag`, so under an RGB gain
+    /// (`ui::output_gain`, the HDR overlay dim) the sum overshoots it: a focused disc measured a
+    /// full-brightness ring (232) round a half-brightness fill (123) at 50%. The shader holds the
+    /// result to `u_rgb_cap`, and every draw that runs that program has to say what the cap is,
+    /// because uniforms persist per program and a stale cap would clamp the next fill.
+    #[test]
+    fn the_rect_program_caps_its_additive_edge_at_the_gain() {
+        let frag = include_str!("shaders/fs_src.frag");
+        assert!(
+            frag.contains("gl_FragColor = vec4(min(rgb, vec3(u_rgb_cap)), a);"),
+            "the SDF path must cap rgb at the gain after the rim, glow and ring are added"
+        );
+        // the model of the line above, at the measured figures: 0.5 * 0.96 fill + 0.5 * 1.0 rim
+        let (fill, rim, gain) = (0.96_f32 * 0.5, 1.0_f32 * 0.5, 0.5_f32);
+        assert!(fill + rim > 0.97, "uncapped, the dimmed ring is near full brightness");
+        assert_eq!((fill + rim).min(gain), 0.5, "capped, it is the gain");
+        let src = include_str!("gfx.rs");
+        let draws = ["pub fn draw_rect(", "pub fn draw_rrect(", "pub fn draw_rrect_sheened(", "pub fn draw_rect_shaped("];
+        for d in draws {
+            let at = src.find(d).expect(d);
+            let body = &src[at..at + src[at..].find("\n}\n").unwrap()];
+            assert!(body.contains("glUniform1f(LOC_RGB_CAP,"), "{d} must set the cap");
+        }
+    }
+
+    #[test]
+    fn image_focus_geometry_matches_the_shader_literals() {
+        use crate::gfx::tokens::{
+            CARD_GLARE_A, CARD_GLARE_EASE, CARD_GLARE_PX, CARD_GLOSS_A, CARD_GLOSS_DIR,
+            CARD_GLOSS_FADE, CARD_GLOW_A, CARD_GLOW_BAND_PX, CARD_GLOW_BOT_A, CARD_GLOW_BOT_PX,
+            CARD_GLOW_TOP_A, CARD_GLOW_TOP_PX,
+        };
+        // `shader_code` returns the raw, un-preprocessed file text (it strips comment-only lines,
+        // nothing else), so the text inside a `#ifdef PLX_FOCUS` block is present whichever of
+        // `FS_IMG`/`FS_FOCUS` (same file, different prepended `#define`) is read here — reading the
+        // `FS_FOCUS`/`VS_FOCUS` constants just documents which program actually compiles this code.
+        // `an_unfocused_program_carries_none_of_the_focus_code` below is the test that checks what
+        // the plain program's PREPROCESSED output actually contains.
+        let code = shader_code(FS_FOCUS);
+        let vs = shader_code(VS_FOCUS);
+        assert!(code.contains("uniform highp vec3 u_focus;"));
+        assert!(vs.contains("uniform highp vec3 u_focus;"), "the vertex shader shares the uniform");
+        // The risen-shadow shift now lives in the QUAD's own asymmetric inflation (gfx.rs's
+        // `draw_tex_impl`), not a second SDF query point here: the CARD's shape math corrects `v_p`
+        // back up by `u_focus.z`, and the shadow's own `dShadow` reads raw `v_p` directly.
+        assert!(code.contains("vec2(v_p.x, v_p.y + u_focus.z)"));
+        assert!(code.contains("if (u_focus.z > 0.0)"));
+        // GLOSS's linear projection moved to the vertex shader as `v_gloss`; the fragment shader
+        // only ever reads the interpolated varying now.
+        assert!(code.contains("varying highp float v_gloss;"));
+        assert!(vs.contains("varying highp float v_gloss;"));
+        for lit in [
+            format!("/ {CARD_GLOW_BAND_PX:.1}"),
+            format!("* {CARD_GLOW_A}"),
+            format!("* {CARD_GLOW_TOP_A}"),
+            format!("/ {CARD_GLOW_TOP_PX:.1}"),
+            format!("* {CARD_GLOW_BOT_A}"),
+            format!("/ {CARD_GLOW_BOT_PX:.1}"),
+            format!("- {CARD_GLARE_PX:.1}"),
+            format!("{CARD_GLARE_A} - u_rimcol.a"),
+            format!("* {CARD_GLOSS_A}"),
+            format!("/ {CARD_GLOSS_FADE}"),
+        ] {
+            assert!(code.contains(&lit), "fs_img.frag is missing `{lit}` — it has drifted from gfx/tokens.rs");
+        }
+        // `chh * 0.32` is `(2*chh) * CARD_GLARE_EASE`: the shader folds the *2 into the one constant
+        // it multiplies `chh` (the CPU-supplied half-height) by, rather than materializing the full
+        // height first. `glareZone` is that same product, guarded against a degenerate tiny tile.
+        assert!(code.contains("chh * 0.32"));
+        assert!((2.0 * CARD_GLARE_EASE - 0.32).abs() < 1e-6);
+        // The 160deg CSS gradient direction, baked as the literals `0.34202014`/`0.93969262` — now
+        // in the vertex shader, where the gloss projection `t`/`v_gloss` is computed.
+        let rad = 160.0_f32.to_radians();
+        assert!((CARD_GLOSS_DIR[0] - rad.sin()).abs() < 1e-5);
+        assert!((CARD_GLOSS_DIR[1] - (-rad.cos())).abs() < 1e-5);
+        assert!(vs.contains("0.34202014") && vs.contains("0.93969262"));
+        assert!(!code.contains("0.34202014"), "the projection must not also run per-fragment");
+
+        // f <= 0 folds to the identity uniform — the shader's whole-branch skip for a resting tile.
+        // This holds even with a nonzero `dy` in hand: `card_shadow_params`'s own offset leg is
+        // itself `f`-scaled from 0 (see `ui::mod`'s `tex_carded`), so a caller can never actually
+        // reach this with `f <= 0` and `dy > 0` — but the geometry fn's own contract still drops it.
+        assert_eq!(image_focus_geometry(0.0, 100.0, 60.0, 5.0), [0.0, 0.0, 0.0]);
+        assert_eq!(image_focus_geometry(-1.0, 100.0, 60.0, 5.0), [0.0, 0.0, 0.0]);
+        // A degenerate box must not divide by zero.
+        assert_eq!(image_focus_geometry(1.0, 0.0, 0.0, 0.0), [1.0, 0.0, 0.0]);
+        // Otherwise f passes through, the gradient length is the box's own w,h dotted with the gloss
+        // direction (the one term the shader cannot derive from its packed `u_card`), and `dy` is
+        // carried straight into the third lane (clamped against a negative shift, never legitimate).
+        let uf = image_focus_geometry(0.6, 100.0, 60.0, 9.0);
+        assert!((uf[0] - 0.6).abs() < 1e-6);
+        let grad_len = 200.0 * CARD_GLOSS_DIR[0] + 120.0 * CARD_GLOSS_DIR[1];
+        assert!((uf[1] - 1.0 / grad_len).abs() < 1e-6);
+        assert!((uf[2] - 9.0).abs() < 1e-6);
+        assert_eq!(image_focus_geometry(0.6, 100.0, 60.0, -3.0)[2], 0.0);
+    }
+
+    /// A tiny, single-purpose preprocessor: `#ifdef`/`#ifndef`/`#else`/`#endif` only (no `#elif`,
+    /// no macro-in-body substitution — neither shader here uses either), just enough to answer
+    /// "what does the GPU driver actually compile for this macro set", which `shader_code`
+    /// deliberately does NOT answer (it returns the raw file so a literal-pinning test can find text
+    /// inside either branch, regardless of which of `FS_IMG`/`FS_STILL`/`FS_FOCUS` reads it).
+    fn preprocess(src: &str, defined: &[&str]) -> String {
+        struct Frame { parent_live: bool, if_true: bool, in_else: bool }
+        fn live(stack: &[Frame]) -> bool {
+            stack.last().map_or(true, |f| {
+                f.parent_live && if f.in_else { !f.if_true } else { f.if_true }
+            })
+        }
+        let mut out = String::new();
+        let mut stack: Vec<Frame> = Vec::new();
+        for line in src.lines() {
+            let t = line.trim();
+            // A real GLSL preprocessor leaves comments alone too, but a header comment mentioning
+            // `u_focus` in PROSE (as this very file's own module doc does, outside any `#ifdef`)
+            // is not the thing this test exists to catch — strip full-line `//` comments first, the
+            // same filter `shader_code` applies, so only actual GLSL text is inspected below.
+            if t.starts_with("//") {
+                continue;
+            }
+            if let Some(name) = t.strip_prefix("#ifdef ") {
+                let parent_live = live(&stack);
+                stack.push(Frame { parent_live, if_true: defined.contains(&name.trim()), in_else: false });
+            } else if let Some(name) = t.strip_prefix("#ifndef ") {
+                let parent_live = live(&stack);
+                stack.push(Frame { parent_live, if_true: !defined.contains(&name.trim()), in_else: false });
+            } else if t == "#else" {
+                if let Some(f) = stack.last_mut() { f.in_else = true; }
+            } else if t == "#endif" {
+                stack.pop();
+            } else if live(&stack) {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        out
+    }
+
+    /// The whole reason [`FOCUS_IMAGE`] exists: every draw through the unfocused image program (a
+    /// rounded resting card and a split card's ring, a fused still; before [`PLAIN_IMAGE`] took the
+    /// square-cornered draws, also a blur reduction, a `field_kick` and a `FrameCache` quad) must
+    /// compile and run EXACTLY what main shipped before the lit-glass/risen-shadow feature, with no trace of
+    /// `u_focus`/`v_gloss` left in by a stray `#ifdef PLX_FOCUS` that didn't close where intended.
+    /// Preprocessing with `PLX_FOCUS` absent (mirroring what the GL driver does for `FS_IMG`/
+    /// `VS_IMG`, `FS_STILL`/`VS_STILL`) and grepping the result is what actually answers that,
+    /// unlike a raw-text search against `shader_code`.
+    #[test]
+    fn an_unfocused_program_carries_none_of_the_focus_code() {
+        let fs = preprocess(FS_IMG.to_str().unwrap(), &[]);
+        let vs = preprocess(VS_IMG.to_str().unwrap(), &[]);
+        for hay in [&fs, &vs] {
+            for needle in ["u_focus", "v_gloss", "PLX_FOCUS"] {
+                assert!(!hay.contains(needle), "plain program must not reference `{needle}`:\n{hay}");
+            }
+        }
+        // Also true with PLX_STILL_GROUND defined alongside (FS_STILL/VS_STILL) — the two macros
+        // are independent, and the still specialization has no focus code of its own either
+        // (`draw_tex_carded_still` refuses `f > 0.0` rather than ever reaching for it).
+        let fs_still = preprocess(FS_IMG.to_str().unwrap(), &["PLX_STILL_GROUND"]);
+        let vs_still = preprocess(VS_IMG.to_str().unwrap(), &["PLX_STILL_GROUND"]);
+        for hay in [&fs_still, &vs_still] {
+            for needle in ["u_focus", "v_gloss", "PLX_FOCUS"] {
+                assert!(!hay.contains(needle), "still program must not reference `{needle}`:\n{hay}");
+            }
+        }
+        // The reconstructed plain fragment body must still carry the exact pre-focus expressions —
+        // a structural pin against main's own `fs_img.frag` (78a823eea) rather than the whole file,
+        // which comments/whitespace reflow would otherwise make brittle.
+        for line in [
+            "highp vec2 q = abs(v_p) - u_card.xy;",
+            "if (straight < u_card.w) {",
+            "float d = straight - u_card.z;",
+            "if (min(q.x, q.y) > 0.0) d = length(q) - u_card.z;",
+            "if (d < -2.0) {",
+            "float rim = max(0.0, 1.0 - abs(d + u_rimw)) * u_rimcol.a;",
+            "float sh = clamp(0.5 - d*u_shinv, 0.0, 1.0);",
+        ] {
+            assert!(fs.contains(line), "plain fs_img.frag missing pre-focus line `{line}`");
+        }
+        assert!(vs.contains("v_p = (a_pos - 0.5) * u_trect.zw;"));
+        // And none of the FOCUS-only identifiers/branches leak through under any spelling.
+        for gone in ["wide", "wide2", " vp ", "dShadowBox", "glareTop", "qs", "straightS"] {
+            assert!(!fs.contains(gone), "plain fs_img.frag must not carry focus identifier `{gone}`");
+        }
+    }
+
+    /// **The three ways a fragment leaves `fs_img.frag` as plain texture x tint are one expression.**
+    /// A split card's interior is drawn with `u_card.z = 0`, i.e. through the first; the picture it
+    /// replaces left through the second or third (and a ring fragment still can). If any of them ever
+    /// computes anything else, the split changes the picture - and this is the test that says so.
+    #[test]
+    fn the_plain_exits_of_the_card_shader_are_one_expression() {
+        for (defined, plain) in [
+            (&[][..], "gl_FragColor = vec4(tex, ta);"),
+            (&["PLX_STILL_GROUND"][..], "gl_FragColor = stillOver(tex, ta, 1.0, ramp);"),
+        ] {
+            let fs = preprocess(FS_IMG.to_str().unwrap(), defined);
+            let fast = fs
+                .lines()
+                .find(|l| l.contains("u_card.z < 0.5"))
+                .unwrap_or_else(|| panic!("the u_card.z < 0.5 exit is gone from {defined:?}"));
+            assert!(fast.contains(plain), "fast path of {defined:?} is not `{plain}`: {fast}");
+            let at = |needle: &str| fs.find(needle).unwrap_or_else(|| panic!("`{needle}` missing from {defined:?}"));
+            let (box_exit, d_exit) = (at("if (straight < u_card.w) {"), at("if (d < -2.0) {"));
+            for (name, from) in [("straight < u_card.w", box_exit), ("d < -2.0", d_exit)] {
+                let body = &fs[from..];
+                let body = &body[..body.find('}').unwrap()];
+                assert!(body.contains(plain), "the `{name}` exit of {defined:?} is not `{plain}`: {body}");
+            }
+            // And nothing between the fast path and the box exit writes a fragment.
+            let between = &fs[fs.find("u_card.z < 0.5").unwrap()..box_exit];
+            assert_eq!(between.matches("gl_FragColor").count(), 1, "{defined:?}: a fourth exit: {between}");
+        }
+    }
+
+    /// A shader's tokens apart from its comments: every `//` tail cut and all whitespace gone, so
+    /// two sources compare by their statements and a reflow is not a difference.
+    fn squash(src: &str) -> String {
+        src.lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .flat_map(|l| l.chars().filter(|c| !c.is_whitespace()))
+            .collect()
+    }
+
+    /// The one-line declarations of kind `kw` (`uniform`, `varying`) a source makes, comments cut and
+    /// whitespace collapsed to single spaces, in file order.
+    fn declared(src: &str, kw: &str) -> Vec<String> {
+        src.lines()
+            .map(|l| l.split("//").next().unwrap_or("").split_whitespace().collect::<Vec<_>>())
+            .filter(|words| words.first() == Some(&kw))
+            .map(|words| words.join(" "))
+            .collect()
+    }
+
+    /// **`fs_tex.frag` is `fs_img.frag`'s plain exit, statement for statement.** The plain texture
+    /// program replaces the image program for every draw that leaves it through `u_card.z < 0.5`, so it
+    /// is the same picture only while it declares the same inputs at the same precision (fp16 `u_tint`
+    /// and sampler, fp32 `v_cuv`: a desktop GL ignores the qualifiers, a Mali does not) and its `main`
+    /// is, token for token, the image program's `main` from its opening brace THROUGH that exit - one
+    /// contiguous block, so a statement slipped in ahead of the exit (a crop clamp, a premultiply)
+    /// that the image program would run and this one would not fails here. It reads NOTHING else, and
+    /// the vertex source it links against declares exactly the three uniforms [`PlainUniforms`] sends,
+    /// so a pad or inflation uniform added there (which this program would never set) fails too.
+    #[test]
+    fn the_plain_texture_program_is_the_card_shaders_plain_exit() {
+        const MAIN: &str = "voidmain(){";
+        let img = squash(&preprocess(FS_IMG.to_str().unwrap(), &[]));
+        let tex = squash(&preprocess(FS_TEX.to_str().unwrap(), &[]));
+        let (img_decls, img_main) = img.split_once(MAIN).expect("fs_img.frag's main");
+        let (tex_decls, tex_main) = tex.split_once(MAIN).expect("fs_tex.frag's main");
+        // What the plain program declares is exactly its four inputs, and the image program declares
+        // each of them the same way.
+        assert_eq!(
+            tex_decls,
+            "precisionmediumpfloat;varyinghighpvec2v_cuv;uniformsampler2Du_tex;uniformvec4u_tint;",
+            "the plain program reads u_tex and u_tint and the one varying, nothing else"
+        );
+        for decl in tex_decls.split_inclusive(';') {
+            assert!(img_decls.contains(decl), "fs_img.frag no longer declares `{decl}` as fs_tex.frag does");
+        }
+        // The body: fs_tex's `main` is the statements, then the single write. The image program's
+        // `main`, from its brace through the `u_card.z < 0.5` exit, is those statements and that write
+        // inside the exit's braces - nothing before, between or after.
+        let tex_main = tex_main.strip_suffix('}').expect("fs_tex.frag ends with its main");
+        let cut = tex_main[..tex_main.len() - 1].rfind(';').map_or(0, |i| i + 1);
+        let (statements, write) = tex_main.split_at(cut);
+        assert_eq!(write, "gl_FragColor=vec4(tex,ta);", "fs_tex.frag's one write");
+        let exit = format!("if(u_card.z<0.5){{{write}return;}}");
+        let through_exit = &img_main[..img_main.find(&exit).expect("fs_img.frag's u_card.z < 0.5 exit") + exit.len()];
+        assert_eq!(
+            through_exit,
+            format!("{statements}{exit}"),
+            "fs_img.frag's main up to its plain exit is not fs_tex.frag's main"
+        );
+        // The vertex source both link against: the three uniforms `init_image` looks up and
+        // `bind_plain_image` sends are ALL it declares, and the varying and its expression are the
+        // ones fs_tex.frag reads.
+        let vs = preprocess(VS_IMG.to_str().unwrap(), &[]);
+        let mut uniforms = declared(&vs, "uniform");
+        uniforms.sort();
+        assert_eq!(
+            uniforms,
+            ["uniform vec2 u_tscreen;", "uniform vec4 u_trect;", "uniform vec4 u_uvrect;"],
+            "vs_img.vert must declare exactly u_trect, u_tscreen and u_uvrect: a uniform the plain program never sets is a different picture"
+        );
+        assert!(declared(&vs, "varying").contains(&"varying vec2 v_cuv;".to_string()));
+        assert!(vs.contains("v_cuv = u_uvrect.xy + a_pos * u_uvrect.zw;"), "the texture coordinate fs_tex.frag samples");
+    }
+
+    /// `card_split_tests::plain_exit` is a transcription of `fs_img.frag`'s plain program; this is
+    /// what keeps it one. The box distance it computes `straight` from, and the exits it tests it
+    /// against, are pinned in the shader text (both the plain and the still program), so editing the
+    /// shader's math without editing the replica fails here instead of passing a stale test.
+    #[test]
+    fn the_card_split_test_replica_still_matches_the_shaders_box_distance() {
+        for defined in [&[][..], &["PLX_STILL_GROUND"][..]] {
+            let fs = preprocess(FS_IMG.to_str().unwrap(), defined);
+            for line in [
+                "highp vec2 q = abs(v_p) - u_card.xy;",
+                "highp float straight = max(q.x, q.y);",
+                "if (straight < u_card.w) {",
+                "float d = straight - u_card.z;",
+                "if (u_card.z < 0.5)",
+            ] {
+                assert!(fs.contains(line), "{defined:?}: `{line}` is gone from the shader: plain_exit() no longer replays it");
+            }
+        }
+    }
+
+    /// `draw_tex_impl` must reach for [`FOCUS_IMAGE`] exactly when a draw is actually focused or
+    /// risen, and never otherwise — that boundary is the entire point of splitting the program in
+    /// two, so it is worth pinning as its own assertion rather than trusting the `||` at the call
+    /// site to keep meaning what it says.
+    #[test]
+    fn only_a_focused_or_risen_draw_reaches_for_the_focus_program() {
+        assert!(!wants_focus_program(0.0, 0.0), "a resting card stays on the plain program");
+        assert!(!wants_focus_program(-1.0, 0.0), "a negative focus is still at rest");
+        assert!(wants_focus_program(0.01, 0.0), "any positive pop factor reaches for it");
+        assert!(wants_focus_program(0.0, 0.5), "a risen shadow alone also reaches for it");
+        assert!(wants_focus_program(0.6, 9.0), "the ordinary focused+risen case");
+        assert!(!wants_focus_program(0.0, -3.0), "a negative dy clamps to 0, still at rest");
+    }
+
+    /// **Which draws reach the plain texture program.** The rule is the shader's own first exit
+    /// (`u_card.z < 0.5`, `u_card.z` being the radius) and nothing about the rim, shadow or pad, which
+    /// that exit never reads: a square-cornered picture carrying a shadow pad is exactly as plain as
+    /// one without (the exit draws no shadow in it, though the pad's fragments still run it). A
+    /// rounded draw keeps the image program, and so does any draw with a program of its own (focus,
+    /// still): the still's exit is not the plain write, and the focus program's fragments past the
+    /// exit are what it is for. A program that did not link leaves everything where it was.
+    #[test]
+    fn only_a_square_cornered_unoverridden_draw_reaches_for_the_plain_texture_program() {
+        const LINKED: Option<u32> = Some(7);
+        for radius in [0.0, 0.25, 0.4999, -1.0, f32::NEG_INFINITY] {
+            assert_eq!(plain_texture_program(LINKED, false, radius), LINKED, "radius {radius}: a plain texture");
+        }
+        for radius in [0.5, 1.0, 6.0, 14.0, 95.0, 1.0e6, f32::INFINITY, f32::NAN] {
+            assert_eq!(plain_texture_program(LINKED, false, radius), None, "radius {radius}: a card");
+        }
+        for radius in [0.0, 14.0] {
+            assert_eq!(plain_texture_program(LINKED, true, radius), None, "an overridden program keeps its draw");
+            assert_eq!(plain_texture_program(None::<u32>, false, radius), None, "a program that did not link");
+            assert_eq!(plain_texture_program(None::<u32>, true, radius), None);
+        }
+        // The interior piece of a split card is drawn with `u_card` of radius 0 and nothing overriding it.
+        assert_eq!(plain_texture_program(LINKED, false, 0.0), LINKED);
+        // A split card's interior piece on the still program stays on it: its exit is `stillOver`,
+        // which is NOT the plain write (`the_plain_exits_of_the_card_shader_are_one_expression`).
+        assert_eq!(plain_texture_program(LINKED, true, 0.0), None);
+    }
+
+    /// The wiring no host test can drive, pinned in the source: the program is chosen AFTER the
+    /// ledger's `gate` (a masked or culled draw never reaches a program), from [`PLAIN_IMAGE`] only,
+    /// with `image.is_some()` as the override, for the whole draw (the draw's own radius) and for the
+    /// interior piece (radius 0); the ring pieces never leave the program the draw bound; and the
+    /// plain program is sent every uniform it reads (uniforms persist per program) from one helper.
+    /// The argument wiring is pinned as whole statements, because the types cannot: `quad` and `uv`
+    /// are both `[f32; 4]`, so a call site or an init field with the two swapped compiles.
+    #[test]
+    fn the_plain_texture_program_is_chosen_after_the_ledger_and_sent_everything_it_reads() {
+        let src = include_str!("gfx.rs");
+        let prod = &src[..src.find("\n#[cfg(test)]\nmod tests").expect("the unit tests")];
+        let body = |head: &str| {
+            let from = prod.find(head).unwrap_or_else(|| panic!("`{head}` is gone"));
+            let rest = &prod[from..];
+            &rest[..rest.find("\n}\n").expect("the end of the function")]
+        };
+        let draw = body("fn draw_tex_core_in(");
+        let (gate, whole, interior) = (
+            draw.find("gate(class, qx, qy, qw, qh)").expect("the ledger's gate"),
+            draw.find("plain_texture_program(plain, image.is_some(), radius)").expect("the whole-draw choice"),
+            draw.find("plain_texture_program(plain, image.is_some(), 0.0)").expect("the interior piece's choice"),
+        );
+        let plan = draw.find("card_plan(&boxes").expect("the piece plan");
+        assert!(gate < whole && whole < plan && plan < interior, "gate {gate}, whole {whole}, plan {plan}, interior {interior}");
+        assert!(draw.contains("PLAIN_IMAGE).read()"), "the plain program is read from its own static");
+        let branch = draw.find("if piece.interior {").expect("the interior branch of the piece loop");
+        assert!(
+            plan < branch && branch < interior && draw[branch..interior].matches("glDrawArrays").count() == 0,
+            "the interior choice sits first inside the `if piece.interior` branch: the ring is never switched"
+        );
+        // One bind for the whole draw, one for the interior, each with its arguments in the signature's
+        // order. `quad` and `uv` are both `[f32; 4]`, so a swap COMPILES and draws the wrong picture:
+        // the full statements are what is pinned.
+        assert_eq!(draw.matches("bind_plain_image(").count(), 2, "one bind for the whole draw, one for the interior");
+        assert_eq!(draw.matches("bind_plain_image(program, loc, tint, uv, quad);").count(), 1, "the whole draw's bind");
+        assert_eq!(draw.matches("=> bind_plain_image(program, loc, tint, uv, quad),").count(), 1, "the interior piece's bind");
+        assert!(draw.contains("let quad = [qx, qy, qw, qh];"), "`quad` is the inflated rect the card path draws");
+        assert!(
+            prod.contains(
+                "unsafe fn bind_plain_image(program: c_uint, loc: PlainUniforms, tint: *const f32, uv: [f32; 4], quad: [f32; 4]) {"
+            ),
+            "bind_plain_image's signature: the argument order every call site is pinned to"
+        );
+        // Every uniform the program reads goes on every bind, and the bind is the only place it is bound.
+        let bind = body("unsafe fn bind_plain_image(");
+        for needle in [
+            "use_prog(program);",
+            "glUniform4fv(loc.tint, 1, tint);",
+            "glUniform4f(loc.uvrect, uv[0], uv[1], uv[2], uv[3]);",
+            "glUniform4f(loc.rect, quad[0], quad[1], quad[2], quad[3]);",
+        ] {
+            assert!(bind.contains(needle), "`{needle}` is gone from bind_plain_image");
+        }
+        // The program's own link block: which vertex source it links against, what is set once, and
+        // which looked-up location lands in which field.
+        let init = body("pub fn init_image(");
+        let link = &init[init.find("PLAIN_IMAGE = link_optional_program(").expect("the plain program's link")..];
+        let link = &link[..link.find("});").expect("the end of its link closure")];
+        for needle in [
+            "link_optional_program(VS_IMG.as_ptr(), FS_TEX.as_ptr())",
+            "glUniform2f(loc(c\"u_tscreen\"), SCR_W, SCR_H);",
+            "glUniform1i(loc(c\"u_tex\"), 0);",
+            "(program, PlainUniforms { rect: loc(c\"u_trect\"), tint: loc(c\"u_tint\"), uvrect: loc(c\"u_uvrect\") })",
+        ] {
+            assert!(link.contains(needle), "`{needle}` is gone from the plain program's link block:\n{link}");
+        }
+        assert!(init.contains("plain image prog unavailable"), "a link failure is logged and falls back");
+    }
+
+    #[test]
+    fn still_fusion_matches_two_passes_at_edges_shadows_and_transparent_texels() {
+        let code = shader_code(FS_STILL);
+        assert!(code.contains("keep = alpha * (1.0 - s)"));
+        assert!(code.contains("rgb * keep + u_still_col.rgb * s, s + keep"));
+        let compositor = code.split("vec4 stillOver").nth(1).unwrap().split('}').next().unwrap();
+        assert!(!compositor.contains('/') && !compositor.contains("if ("),
+            "the specialized compositor must not carry a divide or alpha branch");
+        let ink = tokens::SCRIM_INK;
+        for coverage in [0.0f32, 0.000001, 0.00006, 0.05, 0.25, 0.5, 0.9, 1.0] {
+            for tex_alpha in [0.0f32, 0.000001, 0.00006, 0.25, 0.8, 1.0] {
+                for shadow in [0.0f32, 0.1, 0.4] {
+                    for ramp in [0.0f32, 0.1, 0.4, 0.78] {
+                        let card_a = tex_alpha * coverage + shadow * (1.0 - coverage);
+                        let s = ramp * coverage;
+                        let out_a = s + card_a * (1.0 - s);
+                        for channel in 0..3 {
+                            for rim in [0.0f32, 0.22, 1.0] {
+                                let tex = [0.9, 0.5, 0.2][channel];
+                                let card_rgb = (tex * (1.0 - rim) + 0.95 * rim) * coverage;
+                                let fused_rgb = card_rgb * (card_a * (1.0 - s)) + ink[channel] * s;
+                                for background in [0.0f32, 0.15, 1.0] {
+                                    let first = card_rgb * card_a + background * (1.0 - card_a);
+                                    let two_pass = ink[channel] * s + first * (1.0 - s);
+                                    let one_pass = fused_rgb + background * (1.0 - out_a);
+                                    assert!((one_pass - two_pass).abs() < 0.00001);
+                                }
+                            }
+                        }
+                        for background_alpha in [0.0f32, 0.5, 1.0] {
+                            let first = card_a + background_alpha * (1.0 - card_a);
+                            assert!((s + first * (1.0 - s)
+                                - (out_a + background_alpha * (1.0 - out_a))).abs() < 0.00001);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn art_scrim_central_rectangle_accepts_only_fully_covered_fragments() {
+        let code = shader_code(FS_ART_SCRIM);
+        assert!(code.contains("all(lessThan(abs(v_p), u_band.zw))"));
+        for (w, h, radius) in [(420.0, 236.0, 14.0), (457.8, 257.24, 15.26),
+            (8.0, 4.0, 2.0), (8.0, 4.0, 0.0), (8.0, 4.0, 0.5), (1.0, 1.0, 0.5)] {
+            let inner = art_scrim_inner(w, h, radius);
+            let samples = |half: f32, inset: f32| [-half - 1.0, -half, -inset - 0.25,
+                -inset + 0.25, 0.0, inset - 0.25, inset + 0.25, half, half + 1.0];
+            for x in samples(w * 0.5, inner[0]) {
+                for y in samples(h * 0.5, inner[1]) {
+                    if x.abs() < inner[0] && y.abs() < inner[1] {
+                        let qx = x.abs() - w * 0.5 + radius;
+                        let qy = y.abs() - h * 0.5 + radius;
+                        let d = qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - radius;
+                        assert!(d <= -AA_BLEED, "early return lost edge coverage: d={d}");
+                    }
+                }
+            }
+        }
+        let inner = art_scrim_inner(420.0, 236.0, 14.0);
+        assert!(236.0 * 0.5 - 1.5 < inner[1], "straight bottom interior takes the cheap path");
+    }
+
+    /// **The policy, at the two edges that decide whether a fragment pays anything at all.**
+    ///
+    /// The cost of this whole mechanism is the number of draws that answer non-zero, so the two
+    /// refusals matter more than the acceptance: a flat fill has no ramp to quantise, and a chip
+    /// too small to show a plateau must never dither. The app draws far more chips, pills
+    /// and row highlights than it draws panels.
+    /// A field (glass, the modal ground) pays whenever it is drawn, spring in flight or not — and
+    /// the page wash has no answer to give at all: `draw_ambient` takes no flag. Observed RED
+    /// against the day-old global gate, which answered 0 for the field under motion and produced
+    /// the banding-flicker the owner reported on Settings, the picker and first run (2026-09-04).
+    /// Every motion this test can raise is raised through the real seams — a popover's scope, the
+    /// page's unscoped springs, the verdict app.rs threads into `popover::host::begin_frame` — and
+    /// NONE of them may move the answer.
+    /// **A frozen page never reads its ground.** Under a modal the page is the host snapshot, so
+    /// both samplers answer with their last reading however many draws pass — neither cadence
+    /// counter moves, so no `glReadPixels` (a full GPU drain) is ever reached — and the freeze
+    /// lifting hands the cadence back where it was.
+    #[test]
+    fn a_frozen_page_answers_its_ground_from_the_last_reading() {
+        let _g = plx_base::testlock::serial();
+        let last = Some([0.25f32, 0.5, 0.75]);
+        let (g0, c0) = unsafe {
+            GROUND_RGB = last;
+            CONTROL_GROUND_RGB = last;
+            (
+                (*std::ptr::addr_of!(GROUND_PROBE)).cadence,
+                (*std::ptr::addr_of!(CONTROL_PROBE)).cadence,
+            )
+        };
+        let was = set_page_frozen(true);
+        for _ in 0..(3 * GROUND_SAMPLE_EVERY.max(CONTROL_GROUND_SAMPLE_EVERY)) {
+            assert_eq!(sample_ground([0.0, 0.0, 100.0, 40.0], true), last);
+            assert_eq!(sample_control_ground([0.0, 0.0, 100.0, 40.0], true), last);
+        }
+        set_page_frozen(was);
+        let (g1, c1) = unsafe {
+            (
+                (*std::ptr::addr_of!(GROUND_PROBE)).cadence,
+                (*std::ptr::addr_of!(CONTROL_PROBE)).cadence,
+            )
+        };
+        assert_eq!((g1, c1), (g0, c0), "no reading was even counted toward while frozen");
+        unsafe {
+            GROUND_RGB = None;
+            CONTROL_GROUND_RGB = None;
+        }
+    }
+
+    #[test]
+    fn discovery_does_not_advance_a_cached_control_ground_probe() {
+        let _g = plx_base::testlock::serial();
+        use crate::gfx::backdrop::{self, Sources};
+        use std::{cell::RefCell, rc::Rc};
+
+        let last = Some([0.25f32, 0.5, 0.75]);
+        let before = unsafe {
+            CONTROL_GROUND_RGB = last;
+            let probe = &mut *std::ptr::addr_of_mut!(CONTROL_PROBE);
+            probe.cadence = ProbeCadence {
+                every: CONTROL_GROUND_SAMPLE_EVERY,
+                at: 7,
+                last_drawn: drawn_frames(),
+                dirty: false,
+                pending: None,
+            };
+            probe.cadence
+        };
+        {
+            let _discovery = backdrop::discover(Rc::new(RefCell::new(Sources::default())));
+            assert_eq!(sample_control_ground([0.0, 0.0, 100.0, 40.0], true), last);
+        }
+        let after = unsafe { (*std::ptr::addr_of!(CONTROL_PROBE)).cadence };
+        assert_eq!(after, before, "discovery is descriptive and must not consume probe cadence");
+
+        unsafe { CONTROL_GROUND_RGB = None; }
+    }
+
+    /// **A due ground reading never reads the frame it is due on.** The kick only queues a copy;
+    /// the answer is collected on a later call, once a drawn frame has ended since AND the GPU has
+    /// passed the copy — never before either. Then the cadence resumes counting. Observed RED
+    /// against the synchronous shape (a due call answered `Collect` on the frame itself: the
+    /// `glReadPixels` drain behind every thirtieth Detail frame of `fps:push-100`).
+    #[test]
+    fn a_due_ground_reading_is_queued_and_collected_only_once_the_gpu_has_passed_it() {
+        let mut c = ProbeCadence::new(30);
+        assert_eq!(c.step(false, 100, true, true), ProbeStep::Kick, "nothing latched: queue one");
+        assert_eq!(c.step(false, 100, true, true), ProbeStep::Keep, "same frame: the copy is not even flushed");
+        assert_eq!(c.step(false, 101, false, true), ProbeStep::Keep, "a frame later, but the GPU is behind");
+        assert_eq!(c.step(false, 102, true, true), ProbeStep::Collect);
+        // latched now: the next reading is due on the thirtieth call after the collect
+        let mut steps = Vec::new();
+        for i in 0..30 {
+            steps.push(c.step(true, 103 + i, true, true));
+        }
+        assert!(steps[..29].iter().all(|s| *s == ProbeStep::Keep), "{steps:?}");
+        assert_eq!(steps[29], ProbeStep::Kick);
+        assert_eq!(c.step(true, 132, true, true), ProbeStep::Keep, "kicked this frame");
+        assert_eq!(c.step(true, 133, true, true), ProbeStep::Collect);
+    }
+
+    /// An invalidation drops a reading still in flight for the OLD item — collecting it would
+    /// latch the previous hero's ground — and queues a fresh one on the very next call.
+    #[test]
+    fn an_invalidated_probe_drops_its_reading_in_flight_and_queues_a_fresh_one() {
+        let mut c = ProbeCadence::new(30);
+        assert_eq!(c.step(true, 1, true, true), ProbeStep::Kick, "a fresh probe is dirty");
+        c.invalidate();
+        assert_eq!(c.step(true, 5, true, true), ProbeStep::Kick, "not the old kick's collect");
+        assert_eq!(c.step(true, 6, true, true), ProbeStep::Collect);
+        assert_eq!(c.step(true, 7, true, true), ProbeStep::Keep, "clean again once collected");
+    }
+
+    /// A due reading with nothing to copy from is OWED, not lost and not counted: the cadence does
+    /// not go in flight, and the first call that has a source queues it — even when the due
+    /// moment (the thirtieth frame) has passed. The bar's case when no band image is current.
+    #[test]
+    fn a_due_reading_with_no_source_is_owed_until_one_exists() {
+        let mut c = ProbeCadence::new(30);
+        assert_eq!(c.step(false, 100, true, false), ProbeStep::Keep, "nothing to copy from");
+        assert_eq!(c.step(false, 101, true, false), ProbeStep::Keep);
+        assert_eq!(c.pending, None, "nothing is in flight");
+        assert_eq!(c.step(false, 102, true, true), ProbeStep::Kick, "the first call with a source queues it");
+        assert_eq!(c.step(false, 103, true, true), ProbeStep::Collect);
+        // latched, and the thirtieth-frame moment passes with no source: still owed afterwards
+        for i in 0..40 {
+            assert_eq!(c.step(true, 104 + i, true, false), ProbeStep::Keep);
+        }
+        assert_eq!(c.pending, None);
+        assert_eq!(c.step(true, 144, true, true), ProbeStep::Kick, "owed since the due frame");
+    }
+
+    /// **A copy of a band image is owed to the frame boundary, and is not read back before it is
+    /// made.** The call only queues (`queued`, `pending`); the target holds nothing yet, and the
+    /// sim (no fences) would read it at once if `read_due` did not look at `queued`.
+    #[test]
+    fn an_image_copy_is_owed_to_the_boundary_and_not_read_back_before_it_is_made() {
+        let taps = ImageTaps::<5> {
+            texture: std::rc::Rc::new(BackdropTexture(0)),
+            origins: [(0, 0); 5],
+            composite: (1.0, [[0.0; 3]; 5]),
+        };
+        let mut p = GroundProbe::<5>::new(30, GROUND_TAP_PX);
+        assert!(!p.read_due(), "nothing in flight");
+        assert!(unsafe { p.step(false, Some(TapSource::Image(taps)), "test") }.is_none());
+        assert!(p.cadence.pending.is_some() && p.queued.is_some(), "kicked, and the copy is queued");
+        assert!(p.target.is_none(), "an image copy is not made on the call");
+        assert!(!p.read_due(), "still owed to the boundary");
+        p.queued = None; // what `kick_queued` does once the copy is made
+        assert!(p.read_due(), "kicked, made, not read");
+        p.ready = Some(Vec::new());
+        assert!(!p.read_due(), "already read");
+    }
+
+    /// With no band image (no walk here; also `flattabs`, a video plane, the first frame, a
+    /// refused source job) the bar answers its last reading, queues nothing and goes nowhere near
+    /// the framebuffer — the case that used to keep a mid-page copy alive.
+    #[test]
+    fn a_bar_with_no_band_image_keeps_its_last_reading_and_copies_nothing() {
+        let _g = plx_base::testlock::serial();
+        let last = Some([0.25f32, 0.5, 0.75]);
+        unsafe {
+            GROUND_RGB = last;
+            (*std::ptr::addr_of_mut!(GROUND_PROBE)).invalidate();
+        }
+        let was = set_page_frozen(false);
+        for _ in 0..4 {
+            assert_eq!(sample_ground([620.5, 36.0, 679.0, 76.0], true), last);
+        }
+        set_page_frozen(was);
+        unsafe {
+            let probe = &*std::ptr::addr_of!(GROUND_PROBE);
+            assert_eq!(ground_source(), GroundSource::Absent, "no band image: the tell says so");
+            assert!(probe.queued.is_none() && probe.target.is_none(), "no copy was owed or made");
+            assert_eq!(probe.cadence.pending, None);
+            GROUND_RGB = None;
+            (*std::ptr::addr_of_mut!(GROUND_PROBE)).invalidate();
+        }
+        assert!(backdrop::member_image(Rect::new(620.5, 36.0, 679.0, 76.0)).is_none(), "no walk, no band");
+    }
+
+    /// A refused call is not a call that found nothing: it returns before the probe's `step`, and
+    /// `groundlog` printed whichever `src=` the last unrefused call left. Each refusal (the caller's
+    /// `may_read`, a frozen page) says `held`; the next unrefused call says what it found.
+    #[test]
+    fn a_refused_call_reads_held_and_not_the_last_calls_source() {
+        let _g = plx_base::testlock::serial();
+        let r = [620.5f32, 36.0, 679.0, 76.0];
+        unsafe {
+            GROUND_RGB = Some([0.25, 0.5, 0.75]);
+            (*std::ptr::addr_of_mut!(GROUND_PROBE)).invalidate();
+        }
+        let was = set_page_frozen(false);
+        sample_ground(r, true);
+        assert_eq!(ground_source(), GroundSource::Absent, "no walk: looked, found no band");
+        sample_ground(r, false);
+        assert_eq!(ground_source(), GroundSource::Held, "the caller refused");
+        sample_ground(r, true);
+        assert_eq!(ground_source(), GroundSource::Absent, "held does not stick");
+        set_page_frozen(true);
+        sample_ground(r, true);
+        assert_eq!(ground_source(), GroundSource::Held, "a frozen page refused");
+        set_page_frozen(was);
+        assert_eq!(
+            [GroundSource::Held, GroundSource::Absent, GroundSource::Found].map(GroundSource::word),
+            ["held", "none", "image"]
+        );
+        unsafe {
+            GROUND_RGB = None;
+            (*std::ptr::addr_of_mut!(GROUND_PROBE)).invalidate();
+        }
+    }
+
+    /// The region and image size the chain produces for a band holding `track`, at a 1920x1080
+    /// drawable: `blur_region_for` aligned to the direct path's step, halved to texels.
+    fn band_image(track: [f32; 4]) -> ([f32; 4], (c_int, c_int)) {
+        let reg = blur_region_for(false, track[0], track[1], track[2], track[3]);
+        let (rx, ry, rw, rh) = blur_region_px_align(reg, 1920, 1080, 4);
+        let live = [rx as f32, ry as f32, rw as f32, rh as f32];
+        (live, (rw / 2, rh / 2))
+    }
+
+    /// The tap geometry, against an independent statement of it: a texel is `dims / region` per
+    /// authored px, counted from the region's origin, and from its bottom edge when the image is
+    /// stored bottom-up. Both parities, at the two widths the bar takes (679 px at Home's narrower
+    /// tab sets, 1544 px at the widest).
+    #[test]
+    fn the_taps_land_in_the_band_image_at_its_own_scale() {
+        for (x, w) in [(620.5f32, 679.0f32), (188.0, 1544.0)] {
+            let track = [x, 36.0, w, 76.0];
+            let (reg, dims) = band_image(track);
+            let points = ground_tap_points::<GROUND_TAPS>(track);
+            for bottom_up in [false, true] {
+                let o = image_tap_origins(&points, reg, dims, bottom_up, GROUND_TAP_PX).expect("an image holds a box");
+                let (kx, ky) = (dims.0 as f32 / reg[2], dims.1 as f32 / reg[3]);
+                for (i, &(px_, py_)) in points.iter().enumerate() {
+                    let cx = ((px_ - reg[0]) * kx).floor() as c_int;
+                    let row = ((py_ - reg[1]) * ky).floor() as c_int;
+                    let cy = if bottom_up { dims.1 - 1 - row } else { row };
+                    assert!(
+                        (o[i].0 + GROUND_TAP_PX / 2 - cx).abs() <= 1 && (o[i].1 + GROUND_TAP_PX / 2 - cy).abs() <= 1,
+                        "w {w} tap {i} bottom_up {bottom_up}: origin {:?} for centre ({cx}, {cy})",
+                        o[i]
+                    );
+                    assert!(o[i].0 >= 0 && o[i].1 >= 0 && o[i].0 + GROUND_TAP_PX <= dims.0 && o[i].1 + GROUND_TAP_PX <= dims.1);
+                }
+                // five distinct places, left to right, a fifth of the track apart (in texels)
+                let pitch = (w / GROUND_TAPS as f32 * kx).round() as c_int;
+                for i in 1..GROUND_TAPS {
+                    assert!(((o[i].0 - o[i - 1].0) - pitch).abs() <= 1, "w {w}: pitch {pitch}, got {:?}", o);
+                }
+                // 679 px is a texel pitch of ~136 / 2: the boxes (13 texels) never overlap
+                assert!(pitch > GROUND_TAP_PX, "w {w}: boxes overlap at pitch {pitch}");
+            }
+        }
+    }
+
+    /// Boxes clamp to the IMAGE: a track at a screen edge pulls its outer boxes inside rather than
+    /// reading off the texture, and an image smaller than one box is refused, not clamped.
+    #[test]
+    fn taps_clamp_to_the_image_edges_and_a_tiny_image_is_refused() {
+        // a narrow bar in the top-left corner: the first box wants a centre 2 texels in
+        let corner = [0.0f32, 0.0, 40.0, 10.0];
+        let (reg, dims) = band_image(corner);
+        let points = ground_tap_points::<GROUND_TAPS>(corner);
+        for bottom_up in [false, true] {
+            let o = image_tap_origins(&points, reg, dims, bottom_up, GROUND_TAP_PX).unwrap();
+            for &(x, y) in &o {
+                assert!(x >= 0 && y >= 0 && x + GROUND_TAP_PX <= dims.0 && y + GROUND_TAP_PX <= dims.1, "{o:?} in {dims:?}");
+            }
+            assert_eq!(o[0].0, 0, "the outermost box sits against the left edge");
+        }
+        // and the far edge: a point past the region's right edge clamps to the last whole box
+        let off = [(reg[0] + reg[2] + 500.0, reg[1] + reg[3] * 0.5); 5];
+        let o = image_tap_origins(&off, reg, dims, false, GROUND_TAP_PX).unwrap();
+        assert!(o.iter().all(|&(x, _)| x == dims.0 - GROUND_TAP_PX));
+        // smaller than a box in either axis: no source
+        assert!(image_tap_origins(&points, reg, (GROUND_TAP_PX - 1, dims.1), false, GROUND_TAP_PX).is_none());
+        assert!(image_tap_origins(&points, reg, (dims.0, GROUND_TAP_PX - 1), false, GROUND_TAP_PX).is_none());
+        assert!(image_tap_origins(&points, [0.0, 0.0, 0.0, 10.0], dims, false, GROUND_TAP_PX).is_none());
+    }
+
+    /// The composite terms are `fs_glass.frag`'s `mix(ground, c + wash, alpha)`, folded: identity
+    /// when nothing is owed, a mix toward the app ground under a layer alpha, and a wash that is
+    /// scaled by that alpha because it is added before the mix.
+    #[test]
+    fn the_composite_terms_are_the_glass_shaders_source_expression() {
+        let ground = [0.1f32, 0.2, 0.3];
+        let (s, o) = tap_composite::<2>(1.0, ground, [[0.0; 3]; 2]);
+        assert_eq!((s, o), (1.0, [[0.0; 3]; 2]), "nothing owed: the image is the reading");
+        let c = [0.8f32, 0.6, 0.4];
+        let wash = [[0.05f32, -0.1, 0.0], [0.0; 3]];
+        let (s, o) = tap_composite::<2>(0.5, ground, wash);
+        for ch in 0..3 {
+            let shader = ground[ch] + (c[ch] + wash[0][ch] - ground[ch]) * 0.5; // mix(ground, c + wash, alpha)
+            assert!((c[ch] * s + o[0][ch] - shader).abs() < 1e-6, "channel {ch}");
+        }
+    }
+
+    /// The table-driven mean is the `powf` mean to the bit, on every 8-bit value and on a real
+    /// probe-sized box of mixed texels.
+    #[test]
+    fn the_u8_ground_mean_is_the_powf_mean_to_the_bit() {
+        for v in 0..=255u8 {
+            assert_eq!(lin_u8(v).to_bits(), lin(v as f32 / 255.0).to_bits(), "value {v}");
+        }
+        let mut x = 0x2545_f491u32;
+        let texels: Vec<[u8; 4]> = (0..49 * 49)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                let b = x.to_le_bytes();
+                [b[0], b[1], b[2], 255]
+            })
+            .collect();
+        let fast = diffuse_ground_mean_u8(texels.iter().map(|t| &t[..]));
+        let slow = diffuse_ground_mean(
+            texels.iter().map(|t| [t[0] as f32 / 255.0, t[1] as f32 / 255.0, t[2] as f32 / 255.0]),
+        );
+        assert_eq!(fast.map(f32::to_bits), slow.map(f32::to_bits));
+    }
+
+    /// Box `i` of a collected atlas is exactly its own `px x px` texels, row by row.
+    #[test]
+    fn a_probe_tap_is_its_own_box_of_the_atlas() {
+        let (px, n) = (3usize, 4usize);
+        let w = px * n;
+        let buf: Vec<u8> = (0..w * px).flat_map(|t| [(t % w / px) as u8, 0, 0, 255]).collect();
+        for i in 0..n {
+            let texels: Vec<&[u8]> = probe_tap(&buf, i, px as c_int, n).collect();
+            assert_eq!(texels.len(), px * px);
+            assert!(texels.iter().all(|p| p[0] == i as u8), "box {i}: {texels:?}");
+        }
+    }
+
+    #[test]
+    fn the_dither_policy_refuses_small_fields() {
+        plx_machine::idle::frame_begin(1.0 / 60.0);
+        let broad = 700.0;
+        assert_eq!(
+            dither_for_field(40.0, broad),
+            0.0,
+            "a chip-narrow field is too small for a plateau to be findable"
+        );
+        assert_eq!(dither_for_field(broad, broad), DITHER_LSB);
+    }
+
+    /// Thick diffuse material collects radiance across the WHOLE support. It must not inherit the
+    /// hue of one authored corner (the green-envelope failure), nor choose the brightest tap like the
+    /// top-bar contrast sampler: equal red and blue grounds produce their linear-light mean.
+    #[test]
+    fn control_ground_is_a_broad_linear_light_mean() {
+        let got = diffuse_ground_mean([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]);
+        let want = 0.735_356_9;
+        assert!((got[0] - want).abs() < 1e-5);
+        assert!(got[1].abs() < 1e-6);
+        assert!((got[2] - want).abs() < 1e-5);
+    }
+
+    /// The card path's UV rect is EXACTLY the identity `vs_img.vert` used to hard-code before it
+    /// took a general offset — `(a_pos - 0.5) * s + 0.5`. Graded at both ends of the quad rather
+    /// than on the numbers, because "the offset is 0.5 - 0.5*s" is the claim that matters and the
+    /// arithmetic is the thing that would silently drift.
+    #[test]
+    fn a_padded_uv_rect_still_maps_the_quad_back_onto_the_card() {
+        let (w, h) = (250.0f32, 375.0f32); // a poster
+        for pad in [0.0f32, 1.0, 24.0] {
+            let (qw, qh) = (w + 2.0 * pad, h + 2.0 * pad);
+            let uv = uv_rect_padded(w, h, pad, pad, qw, qh);
+            let at = |a: f32, i: usize| uv[i] + a * uv[i + 2];
+            // the card's own edges sit at UV 0 and 1; the shadow ring falls outside, symmetrically
+            let (u0, u1) = (at(pad / qw, 0), at((pad + w) / qw, 0));
+            let (v0, v1) = (at(pad / qh, 1), at((pad + h) / qh, 1));
+            assert!(
+                (u0).abs() < 1e-5 && (u1 - 1.0).abs() < 1e-5,
+                "x edges wrong at pad={pad}: {u0} {u1}"
+            );
+            assert!(
+                (v0).abs() < 1e-5 && (v1 - 1.0).abs() < 1e-5,
+                "y edges wrong at pad={pad}: {v0} {v1}"
+            );
+        }
+        // pad == 0 must be the identity, or every flat blit resamples itself
+        assert_eq!(uv_rect_padded(w, h, 0.0, 0.0, w, h), [0.0, 0.0, 1.0, 1.0]);
+        // a degenerate card must not divide by zero into a NaN UV (a black quad on device)
+        assert!(uv_rect_padded(0.0, 0.0, 4.0, 4.0, 8.0, 8.0)
+            .iter()
+            .all(|v| v.is_finite()));
+    }
+
+    /// The risen shadow's own reason for [`uv_rect_padded`] taking separate `left`/`top`: a quad
+    /// inflated MORE below than above (as [`draw_tex_impl`] now builds for a focused card, `dy`>0)
+    /// must still map the card's own true edges to UV 0/1 exactly, even though the padding on each
+    /// side differs — this is what makes the texture land back on the card rather than smearing
+    /// toward whichever edge got the bigger margin.
+    #[test]
+    fn an_asymmetric_padded_uv_rect_still_maps_the_quad_back_onto_the_card() {
+        let (w, h) = (250.0f32, 375.0f32);
+        let (blur, dy) = (44.0f32, 18.0f32);
+        let (sides, top, bottom) = (blur + 1.0, blur - dy + 1.0, blur + dy + 1.0);
+        let (qw, qh) = (w + 2.0 * sides, h + top + bottom);
+        let uv = uv_rect_padded(w, h, sides, top, qw, qh);
+        let at = |a: f32, i: usize| uv[i] + a * uv[i + 2];
+        let (u0, u1) = (at(sides / qw, 0), at((sides + w) / qw, 0));
+        let (v0, v1) = (at(top / qh, 1), at((top + h) / qh, 1));
+        assert!((u0).abs() < 1e-5 && (u1 - 1.0).abs() < 1e-5, "x edges: {u0} {u1}");
+        assert!((v0).abs() < 1e-5 && (v1 - 1.0).abs() < 1e-5, "y edges: {v0} {v1}");
+        // top < bottom here (the card rises) — the whole point of the asymmetric split.
+        assert!(top < bottom);
+    }
+
+    /// A picture's crop rides UNDER the shadow inflation: the card's own edges land exactly on the
+    /// crop window's edges at every pad, so a cover-cropped headshot and its shadow ring agree, and
+    /// the whole-texture crop leaves the padded rect untouched (no draw that never asked for a crop
+    /// resamples itself).
+    #[test]
+    fn a_crop_composes_under_the_padding_and_the_full_window_is_its_identity() {
+        let (w, h) = (190.0f32, 190.0f32); // a cast circle
+        let crop = [0.0f32, 1.0 / 15.0, 1.0, 2.0 / 3.0]; // a 2:3 headshot, top-biased
+        for pad in [0.0f32, 12.0] {
+            let (qw, qh) = (w + 2.0 * pad, h + 2.0 * pad);
+            let inner = uv_rect_padded(w, h, pad, pad, qw, qh);
+            assert_eq!(uv_compose(UV_FULL, inner), inner, "the full window must be the identity");
+            let uv = uv_compose(crop, inner);
+            let at = |a: f32, i: usize| uv[i] + a * uv[i + 2];
+            let (u0, u1) = (at(pad / qw, 0), at((pad + w) / qw, 0));
+            let (v0, v1) = (at(pad / qh, 1), at((pad + h) / qh, 1));
+            assert!((u0 - crop[0]).abs() < 1e-5 && (u1 - (crop[0] + crop[2])).abs() < 1e-5);
+            assert!(
+                (v0 - crop[1]).abs() < 1e-5 && (v1 - (crop[1] + crop[3])).abs() < 1e-5,
+                "card edges must land on the crop window at pad={pad}: {v0} {v1}"
+            );
+        }
+    }
+
+    /// The backdrop window samples the SCREEN POSITION it is drawn at, out of a bottom-up snapshot.
+    /// The v axis therefore runs backwards; getting that wrong draws the page upside down under the
+    /// panel, which is the one failure that looks deliberate enough to survive a glance.
+    #[test]
+    fn b_blur_uv_rect_reads_the_panel_s_own_place_on_screen() {
+        const FULL: [f32; 4] = [0.0, 0.0, SCR_W, SCR_H];
+        const ALL: [f32; 2] = [1.0, 1.0];
+        // a panel occupying the whole screen must map to the whole snapshot, either way up — and
+        // this is also the identity that says the region generalised the old expression rather than
+        // replacing it: whole screen grabbed, whole texture used, same four numbers as before.
+        assert_eq!(
+            blur_uv_rect(0.0, 0.0, SCR_W, SCR_H, FULL, ALL, true),
+            [0.0, 1.0, 1.0, -1.0]
+        );
+        assert_eq!(
+            blur_uv_rect(0.0, 0.0, SCR_W, SCR_H, FULL, ALL, false),
+            [0.0, 0.0, 1.0, 1.0]
+        );
+        let (x, y, w, h) = (640.0f32, 240.0f32, 480.0f32, 600.0f32);
+        for bottom_up in [true, false] {
+            let uv = blur_uv_rect(x, y, w, h, FULL, ALL, bottom_up);
+            let at = |a: f32, i: usize| uv[i] + a * uv[i + 2];
+            // a_pos 0 is the panel's TOP-left in screen space, whichever way the snapshot is stored
+            assert!(
+                (at(0.0, 0) - x / SCR_W).abs() < 1e-6,
+                "left edge (bottom_up={bottom_up})"
+            );
+            assert!(
+                (at(1.0, 0) - (x + w) / SCR_W).abs() < 1e-6,
+                "right edge (bottom_up={bottom_up})"
+            );
+            let (top, bot) = if bottom_up {
+                (1.0 - y / SCR_H, 1.0 - (y + h) / SCR_H)
+            } else {
+                (y / SCR_H, (y + h) / SCR_H)
+            };
+            assert!(
+                (at(0.0, 1) - top).abs() < 1e-6,
+                "top edge (bottom_up={bottom_up})"
+            );
+            assert!(
+                (at(1.0, 1) - bot).abs() < 1e-6,
+                "bottom edge (bottom_up={bottom_up})"
+            );
+            assert_eq!(
+                uv[3] < 0.0,
+                bottom_up,
+                "the v axis runs backwards only bottom-up"
+            );
+        }
+    }
+
+    /// A REGION-limited snapshot must put the panel in the same place on screen as a full-screen one
+    /// did — the whole point being that only the grab changed, never what the glass shows.
+    ///
+    /// The trap this pins is that there are now TWO scale factors between a screen pixel and a
+    /// texel: the region is a fraction of the screen, and the region is itself only a fraction of
+    /// the (still full-size) target it was rendered into. Drop either and the backdrop is offset or
+    /// zoomed — visible as the glass showing something plausible that is not what is behind it.
+    #[test]
+    fn f_a_region_snapshot_samples_exactly_what_a_full_screen_one_did() {
+        let panel = (640.0f32, 240.0f32, 480.0f32, 600.0f32);
+        let (x, y, w, h) = panel;
+        let reg = blur_region(x, y, w, h);
+        // the region is the panel plus the reach, and the panel is strictly inside it
+        assert!(reg[0] <= x - BLUR_REACH && reg[1] <= y - BLUR_REACH);
+        assert!(reg[0] + reg[2] >= x + w + BLUR_REACH && reg[1] + reg[3] >= y + h + BLUR_REACH);
+        // the region occupies this much of a full-size target (1920 -> 480 quarter-res, say)
+        let (rw, rh) = (reg[2] / SCR_W * 480.0, reg[3] / SCR_H * 270.0);
+        let span = [rw / 480.0, rh / 270.0];
+        for bottom_up in [true, false] {
+            let uv = blur_uv_rect(x, y, w, h, reg, span, bottom_up);
+            let full = blur_uv_rect(x, y, w, h, [0.0, 0.0, SCR_W, SCR_H], [1.0, 1.0], bottom_up);
+            // Both windows must cover the same FRACTION of a texel grid that has the same texel
+            // SIZE — i.e. the region window is the full-screen one scaled by the region's own share
+            // of the screen. Sizes first: a mismatch here is the panel showing a zoomed backdrop.
+            assert!(
+                (uv[2] - full[2]).abs() < 1e-5,
+                "u span (bottom_up={bottom_up})"
+            );
+            assert!(
+                (uv[3] - full[3]).abs() < 1e-5,
+                "v span (bottom_up={bottom_up})"
+            );
+            // ...then the origin, in TEXELS of the quarter-res target, against where the panel
+            // actually is inside the region. This is the half that a forgotten region offset breaks.
+            let want_u = (x - reg[0]) / SCR_W * 480.0;
+            assert!(
+                (uv[0] * 480.0 - want_u).abs() < 1e-3,
+                "u origin (bottom_up={bottom_up})"
+            );
+        }
+    }
+
+    /// The appear SLIDE never changes the requested region. Cached glass therefore needs no second
+    /// snapshot for the slide; a dynamic policy may still refresh for source or underlay changes.
+    ///
+    /// A popover's first draw is at `appear == 0`, a full `rise` from where it settles. If the
+    /// region were keyed on the rect being drawn, every later frame would ask for a region shifted
+    /// a pixel or two and miss. `BLUR_MARGIN` carries the slide so containment holds for the whole
+    /// slide; any later recapture is then a policy decision, not an accidental geometry miss.
+    #[test]
+    fn g_the_appear_slide_never_forces_a_second_snapshot() {
+        let (x, y, w, h) = (640.0f32, 240.0f32, 480.0f32, 600.0f32);
+        // grabbed once, around the panel at REST
+        let reg = blur_region(x, y, w, h);
+        for step in 0..=32 {
+            // every frame of a rise-from-below appear, from fully displaced to settled
+            let slide = POPOVER_MAX_RISE * (1.0 - step as f32 / 32.0);
+            assert!(
+                blur_region_covers(reg, x, y + slide, w, h),
+                "missed at slide {slide}"
+            );
+        }
+        // and the guard that keeps that true: the grab must exceed the reach by the whole slide
+        assert!(BLUR_MARGIN >= BLUR_REACH + POPOVER_MAX_RISE);
+        // a panel somewhere else entirely is NOT covered — containment must still be a real test,
+        // or a second panel would silently reuse the first one's backdrop
+        assert!(!blur_region_covers(reg, 40.0, 40.0, w, h));
+    }
+
+    /// A glass that never rises is grabbed `BLUR_REACH` out and no further, and `BLUR_REACH` is
+    /// what the lens and the kernel can read: [`GLASS_LENS`] plus the chain's own spread.
+    ///
+    /// Why the blurred pixels of the panel cannot change with the band between `BLUR_REACH` and
+    /// `BLUR_MARGIN`: an output pixel inside the panel samples the snapshot at most `GLASS_LENS`
+    /// (38) outward of itself (the lens displaces along the outward normal) and then the blur taps
+    /// spread about 10 px around that sample (0.35 and 0.75 texels at quarter res, the up pass, the
+    /// reductions' box), 48 px from the panel in all. `BLUR_REACH` (68) is that plus ~20 of slack,
+    /// and it is the figure `blur_region_covers` has always accepted a cached grab on. A draw
+    /// farther out than 68 therefore feeds no tap of any panel pixel.
+    #[test]
+    fn j_a_glass_that_never_rises_is_grabbed_reach_out_and_no_further() {
+        // The tab track on Home: bottom edge 130, so the rising grab ends at 218 and the
+        // non-rising one at 198 — above the focused card's top edge at 211.
+        let (x, y, w, h) = (96.0f32, 54.0f32, 1130.0f32, 76.0f32);
+        let still = blur_region_for(false, x, y, w, h);
+        let rising = blur_region_for(true, x, y, w, h);
+        assert_eq!(still[1] + still[3], y + h + BLUR_REACH);
+        assert_eq!(rising[1] + rising[3], y + h + BLUR_MARGIN);
+        assert_eq!(still[0], x - BLUR_REACH);
+        assert_eq!(still[0] + still[2], x + w + BLUR_REACH);
+        assert!(still[1] + still[3] < 211.0 && rising[1] + rising[3] > 211.0);
+        // it still holds everything a pixel of the panel can read...
+        assert!(BLUR_REACH >= GLASS_LENS + 10.0);
+        assert!(blur_region_covers(still, x, y, w, h));
+        // ...and the rising default is exactly the old `blur_region`
+        assert_eq!(rising, blur_region(x, y, w, h));
+        // a still glass hands the rim exactly the margin a cached grab is later tested against
+        assert!(still[2] * still[3] < rising[2] * rising[3]);
+    }
+
+    /// Two glass surfaces in one frame must converge to ONE grab, and it must SHRINK again when one
+    /// of them goes away.
+    ///
+    /// This is the whole argument for taking the snapshot at the previous frame's union rather than
+    /// at the caller's own region. Replace-on-miss (what the first version did) makes a pair of
+    /// neighbouring controls ping-pong forever — each retakes the other's region every frame, two
+    /// full chains, strictly worse than never having limited the grab. Growing monotonically instead
+    /// fixes that and breaks the other direction: the union would keep a departed panel's area for
+    /// the rest of the session, so the tab bar would go on grabbing half the screen long after the
+    /// menu that needed it closed.
+    ///
+    /// Both halves are graded here, as the sequence the renderer actually runs.
+    #[test]
+    fn i_two_glass_surfaces_share_one_grab_and_give_it_back() {
+        let _g = plx_base::testlock::serial();
+        let bar = (500.0f32, 40.0, 900.0, 76.0);
+        let btn = (520.0f32, 150.0, 200.0, 60.0);
+        let take = |prev: [f32; 4], r: (f32, f32, f32, f32)| {
+            blur_region_union(prev, blur_region(r.0, r.1, r.2, r.3))
+        };
+
+        // FRAME 1 — the button appears beside the bar. Nothing was on record, so the bar grabs its
+        // own region and the button, not covered by it, has to take a second.
+        let bar_only = take([0.0; 4], bar);
+        assert!(
+            !blur_region_covers(bar_only, btn.0, btn.1, btn.2, btn.3),
+            "the pair really do not nest"
+        );
+        let want = blur_region_union(bar_only, blur_region(btn.0, btn.1, btn.2, btn.3));
+
+        // FRAME 2 — that union is what the frame ended holding, so the bar's retake takes it, and
+        // the button is served by the same capture. One chain for two surfaces.
+        assert!(
+            blur_region_covers(want, bar.0, bar.1, bar.2, bar.3),
+            "the bar is in the shared grab"
+        );
+        assert!(
+            blur_region_covers(want, btn.0, btn.1, btn.2, btn.3),
+            "so is the button"
+        );
+
+        // Keep neighbouring geometry from growing the shared AREA excessively. This is a geometry
+        // invariant, not a timing claim: the five-pass cost still has to be measured on hardware.
+        let grow = (want[2] * want[3]) / (bar_only[2] * bar_only[3]);
+        assert!(
+            grow < 1.5,
+            "a neighbour must ride the same grab, not double it (grew {grow}x)"
+        );
+
+        // FRAME 3 — the button is gone, so only the bar declares anything, and the region collapses
+        // back. A union that only ever grew would keep the button's area for the whole session.
+        let after = take([0.0; 4], bar);
+        assert_eq!(
+            after, bar_only,
+            "the grab shrinks back the frame after a surface leaves"
+        );
+    }
+
+    /// The region in drawable px: aligned to 4, inside the canvas, never empty.
+    ///
+    /// Four because the chain halves twice — a size that is not a multiple of 4 does not tile back
+    /// onto its source and the second reduction samples half a texel off, which shows up as the
+    /// backdrop creeping sideways as a panel moves rather than as anything obviously broken.
+    #[test]
+    fn h_the_region_lands_on_a_4_aligned_rect_inside_the_drawable() {
+        // Drawables whose size is not a multiple of 4 are included deliberately: they are the only
+        // shape whose last aligned column is short of the far edge.
+        for (gw, gh) in [(1920, 1080), (960, 540), (1366, 766), (1922, 1082)] {
+            for panel in [
+                (640.0f32, 240.0f32, 480.0f32, 600.0f32),
+                (0.0, 0.0, 1.0, 1.0),
+                (SCR_W - 2.0, SCR_H - 2.0, 2.0, 2.0),
+                (0.0, 0.0, SCR_W, SCR_H),
+                (SCR_W - 1.0, SCR_H - 1.0, 1.0, 1.0),
+            ] {
+                let reg = blur_region(panel.0, panel.1, panel.2, panel.3);
+                let (rx, ry, rw, rh) = blur_region_px(reg, gw, gh);
+                assert_eq!(
+                    (rw % 4, rh % 4),
+                    (0, 0),
+                    "4-aligned size ({gw}x{gh}, {panel:?})"
+                );
+                assert_eq!(
+                    (rx % 4, ry % 4),
+                    (0, 0),
+                    "4-aligned origin ({gw}x{gh}, {panel:?})"
+                );
+                assert!(rw > 0 && rh > 0, "never empty ({gw}x{gh}, {panel:?})");
+                assert!(
+                    rx >= 0 && ry >= 0 && rx + rw <= gw && ry + rh <= gh,
+                    "inside the canvas ({gw}x{gh}, {panel:?}) -> {rx},{ry} {rw}x{rh}"
+                );
+            }
+        }
+    }
+
+    /// The same containment, asserted at the helper's OWN boundary rather than through
+    /// [`blur_region`].
+    ///
+    /// **[`blur_region`] cannot currently reach this, and that is the point.** It expands every
+    /// region outward by [`BLUR_REACH`] (68 authored px) before clamping to the screen, so a
+    /// production region never starts within `align` drawable px of the far edge and the test above
+    /// passes against a clamp that runs off the surface. The helper is a general utility with a
+    /// stated contract — aligned, and INSIDE the drawable — and it is the contract that is graded
+    /// here: a region pinned hard against the right and bottom edges, on a drawable whose size is
+    /// not a multiple of the alignment, which is the shape the old `.clamp(align, (gw - x0)
+    /// .max(align))` answered by returning a rect ending past `gw`.
+    #[test]
+    fn h2_the_aligned_region_stays_inside_even_pinned_to_the_far_edge() {
+        for (gw, gh) in [(1366, 766), (1922, 1082), (1920, 1080), (6, 6)] {
+            for align in [4, 2] {
+                for reg in [
+                    [SCR_W, SCR_H, 0.0, 0.0],             // degenerate, hard against the corner
+                    [SCR_W - 1.0, SCR_H - 1.0, 1.0, 1.0], // the last authored pixel
+                    [SCR_W - 3.0, SCR_H - 3.0, 8.0, 8.0], // straddling the edge
+                    [0.0, 0.0, SCR_W, SCR_H],             // the whole canvas
+                ] {
+                    let (rx, ry, rw, rh) = blur_region_px_align(reg, gw, gh, align);
+                    let what =
+                        format!("{gw}x{gh} align={align} reg={reg:?} -> {rx},{ry} {rw}x{rh}");
+                    assert_eq!((rx % align, ry % align), (0, 0), "aligned origin ({what})");
+                    assert_eq!((rw % align, rh % align), (0, 0), "aligned size ({what})");
+                    assert!(
+                        rx >= 0 && ry >= 0 && rw >= 0 && rh >= 0,
+                        "non-negative ({what})"
+                    );
+                    assert!(
+                        rx + rw <= gw && ry + rh <= gh,
+                        "inside the drawable ({what})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The chain sizes itself off the DRAWABLE, which is the bug the simulator caught: hard-coded
+    /// 1920x1080 targets grabbed a rect that does not exist on a half-size surface, and every
+    /// number downstream was then measured against a canvas nothing had been copied into.
+    ///
+    /// Graded as a PROPERTY of the reduction count rather than against literals. The first version
+    /// asserted `(1920,1080) -> ((960,540),(480,270))`, which failed the moment [`BLUR_REDUCTIONS`]
+    /// was turned down — correctly, and usefully, and still the wrong thing to pin here: what makes
+    /// the count 2 is the direct path's source scale, and that equality is asserted where it lives.
+    #[test]
+    fn c_blur_dims_halve_exactly_from_whatever_the_drawable_is() {
+        for (vw, vh) in [(1920, 1080), (960, 540)] {
+            // the television, then the desktop simulator's half-size drawable
+            let ((mw, mh), (sw, sh)) = blur_dims(vw, vh);
+            assert_eq!(
+                (mw, mh),
+                (vw / 2, vh / 2),
+                "the first pass is always one exact halving"
+            );
+            let want = (vw >> BLUR_REDUCTIONS, vh >> BLUR_REDUCTIONS);
+            assert_eq!(
+                (sw, sh),
+                want,
+                "the tap target is {BLUR_REDUCTIONS} exact halvings down"
+            );
+            // **The up pass's radius depends on this exact factor of two.** Both paths spell the
+            // offset `BLUR_UP_TAP / c.mw` — the TARGET's width — which is the documented "1.25
+            // texels of the target" only while the source is half the target. It stopped being
+            // half for a day, and the direct path's up-filter silently doubled; see `BLUR_UP_TAP`.
+            assert_eq!(
+                (mw, mh),
+                (sw * 2, sh * 2),
+                "the tap target must be half the up target"
+            );
+        }
+        // odd dimensions floor rather than round up past the source (a target larger than its
+        // source is a magnification pass, which is not what any of this is for)
+        let ((mw, mh), (sw, sh)) = blur_dims(1919, 1079);
+        assert!(mw <= 1919 / 2 && mh <= 1079 / 2 && sw <= mw && sh <= mh);
+        // and a surface too small to halve must still give legal (>=1) targets, not a zero-sized
+        // texture the driver reports as an incomplete FBO
+        assert_eq!(blur_dims(1, 1), ((1, 1), (1, 1)));
+    }
+
+    /// The chain's shape, and the invariant that the two snapshot paths are ONE MATERIAL.
+    ///
+    /// This test used to assert the pass count was EVEN, which was true and is not a property — it
+    /// was an accident of one setting of a knob that existed to be changed. Then the knob WAS
+    /// changed, for the tab bar, which by then did not read it: what moved was every cached
+    /// popover's ground, down to a half-res source with no up-filter, which is a magnified image
+    /// rather than a blur. So the shape is graded against the other path now, not against a range.
+    #[test]
+    fn d_both_snapshot_paths_blur_at_one_source_scale() {
+        // The same equality the const assertion beside [`BLUR_REDUCTIONS`] makes at compile time,
+        // said once more where a person reading the suite will meet it.
+        assert_eq!(
+            1usize << BLUR_REDUCTIONS,
+            BLUR_DIRECT_SCALE as usize,
+            "the capture path halves down to the scale the direct path renders at",
+        );
+        assert_eq!(
+            BLUR_TAPS.len() % 2,
+            0,
+            "an odd tap count leaves the snapshot in `b`, which nothing samples"
+        );
+        assert!(
+            BLUR_TAPS.windows(2).all(|w| w[1] > w[0]),
+            "taps must WIDEN between passes"
+        );
+        // Both paths end with the SAME up pass back to half res — the half of a dual filter that
+        // stops the panel's own 2x magnification reading as enlarged pixels. Counted, because that
+        // is the only handle a host test has on it: the direct path's count is its taps plus one,
+        // and the capture path's is its reductions plus its taps plus the same one.
+        assert_eq!(blur_direct_passes(), BLUR_TAPS.len() + 1);
+        assert_eq!(blur_passes(), BLUR_REDUCTIONS + BLUR_TAPS.len() + 1);
+    }
+
+    /// The parity the whole chain hangs on, pinned at the CURRENT shape and tied to its reader.
+    ///
+    /// Anything that adds or removes a pass flips which way up the snapshot is stored, and that is
+    /// the failure with no symptom: the sampling window stays right, the panel still shows the page,
+    /// and what is behind the glass is simply upside down — invisible on a blurred, largely
+    /// symmetric backdrop. It very nearly shipped that way twice: once when the up pass landed
+    /// beside a pass count written out in two places, and again while merging the two reductions
+    /// into one (a change that turned out not to be worth making — see [`blur_snapshot`] — but
+    /// which did silently invert this on the way through).
+    #[test]
+    fn e_the_snapshots_stored_order_matches_what_reads_it() {
+        // grab (bottom-up, as `glCopyTexSubImage2D` leaves it) -> reduce -> reduce -> tap -> tap -> up
+        // (while the reduction count was 1 this was 3: one reduction, two taps, no up pass. Both
+        // counts are ODD, so the stored order — the thing this test exists to pin — did not move
+        // when the knob did. That is luck, not a property: re-derive it, do not assume it.)
+        assert_eq!(
+            blur_passes(),
+            5,
+            "two reductions, two taps, the up pass back to half"
+        );
+        assert!(
+            !blur_is_bottom_up(),
+            "five flips from a bottom-up grab leaves the snapshot top-down"
+        );
+        // **The two paths must agree**, because ONE `bottom_up` field serves both and a popover on
+        // a page whose own glass took the direct path samples a capture-path snapshot. They agreed
+        // by luck once and then stopped, silently, when a reduction was removed from one of them.
+        assert_eq!(
+            blur_is_bottom_up(),
+            blur_bottom_up(blur_direct_passes()),
+            "the capture and direct paths must store the snapshot the same way up"
+        );
+        // The two readers of that parity must not be able to disagree: the sampling window and the
+        // lens displacement both take it from `blur_is_bottom_up`, and a v axis that runs backwards
+        // in one and forwards in the other bends the backdrop the wrong way at the rim.
+        let uv = blur_uv_rect(
+            0.0,
+            0.0,
+            SCR_W,
+            SCR_H,
+            [0.0, 0.0, SCR_W, SCR_H],
+            [1.0, 1.0],
+            blur_is_bottom_up(),
+        );
+        assert_eq!(
+            uv[3] < 0.0,
+            blur_is_bottom_up(),
+            "the v span runs backwards iff stored bottom-up"
+        );
+    }
+
+    /// **The premultiplied draw is the straight draw's picture, to one code value.** A CPU model of the
+    /// two GL blends (`SRC_ALPHA, ONE_MINUS_SRC_ALPHA` of a straight texel, `ONE, ONE_MINUS_SRC_ALPHA` of
+    /// a premultiplied one through [`premultiplied_tint`]) over every premultiplied pixel the libass
+    /// facade can publish (a channel `p` at alpha `a`, `p <= a`), against the straight texel the facade
+    /// USED to publish (its conversion, frozen here: `(p * 255 + a / 2) / a`). The two disagree by the
+    /// rounding of that conversion alone: under half a code value before the framebuffer's own rounding,
+    /// and so at most one code value after it. The premultiplied side is the exact one.
+    #[test]
+    fn a_premultiplied_draw_leaves_the_framebuffer_a_straight_draw_would() {
+        fn old_straight(p: u32, a: u32) -> f32 {
+            if a == 0 { 0.0 } else { ((p * 255 + a / 2) / a).min(255) as f32 / 255.0 }
+        }
+        let code = |v: f32| (v * 255.0 + 0.5).floor();
+        let tints = [[1.0; 4], [0.85, 0.85, 0.85, 1.0], [0.55, 0.55, 0.55, 1.0], [1.0, 1.0, 1.0, 0.5], [0.7, 0.4, 0.2, 0.3]];
+        let (mut worst, mut worst_code) = (0.0_f32, 0.0_f32);
+        for a in 0..=255u32 {
+            for p in 0..=a {
+                for tint in tints {
+                    let pre = premultiplied_tint(tint);
+                    for dst in [0.0, 40.0 / 255.0, 0.5, 1.0] {
+                        // straight: colour * tint, blended by texel alpha * tint alpha
+                        let alpha = a as f32 / 255.0 * tint[3];
+                        let old = old_straight(p, a) * tint[0] * alpha + dst * (1.0 - alpha);
+                        // premultiplied: texel * premultiplied tint, added; same alpha
+                        let new = p as f32 / 255.0 * pre[0] + dst * (1.0 - a as f32 / 255.0 * pre[3]);
+                        worst = worst.max((old - new).abs() * 255.0);
+                        worst_code = worst_code.max((code(old) - code(new)).abs());
+                    }
+                }
+            }
+        }
+        assert!(worst <= 0.5 + 1e-3, "the two draws differ by {worst} codes before rounding");
+        assert!(worst_code <= 1.0, "and by {worst_code} codes after it");
+    }
+
+    /// The tint of a premultiplied draw: colour scaled by the fade as well, alpha as it is (a fade that
+    /// scaled only the colour would leave the picture opaque over what it fades into).
+    #[test]
+    fn a_premultiplied_tint_scales_the_colour_by_its_alpha() {
+        assert_eq!(premultiplied_tint([1.0; 4]), [1.0; 4], "white and opaque is the texel as it is");
+        assert_eq!(premultiplied_tint([0.85, 0.85, 0.85, 1.0]), [0.85, 0.85, 0.85, 1.0], "an ink rung scales colour only");
+        assert_eq!(premultiplied_tint([1.0, 1.0, 1.0, 0.5]), [0.5, 0.5, 0.5, 0.5], "a fade scales both");
+        assert_eq!(premultiplied_tint([0.8, 0.5, 0.25, 0.5]), [0.4, 0.25, 0.125, 0.5]);
+        assert_eq!(premultiplied_tint([1.0, 0.5, 0.2, 0.0]), [0.0, 0.0, 0.0, 0.0], "a fully faded draw adds nothing");
+    }
+
+    /// **`glClearColor` has one caller: [`set_clear_color`].** A flat ground is a clear in a colour of
+    /// its own and puts back the colour the context held, which it knows only if every set went
+    /// through the record. A second call anywhere in this file (the app's own, in another crate,
+    /// has no extern left to make it with) leaves [`CLEAR_COLOR`] stale, and the next clear that
+    /// sets no colour of its own would paint it.
+    #[test]
+    fn glclearcolor_is_called_only_by_set_clear_color() {
+        let src = include_str!("gfx.rs");
+        let prod = &src[..src.find("\n#[cfg(test)]\nmod tests").expect("the unit tests")];
+        let calls = prod
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//") && l.contains("glClearColor(") && !l.contains("fn glClearColor"))
+            .count();
+        assert_eq!(calls, 1, "a glClearColor outside set_clear_color");
+        let from = prod.find("pub fn set_clear_color(").expect("set_clear_color is gone");
+        let set = &prod[from..from + prod[from..].find("\n}\n").expect("its end")];
+        assert!(set.contains("glClearColor(") && set.contains("CLEAR_COLOR = ["), "the one call records what it sets");
+    }
+
+    /// The wiring no host test can drive: `draw_ambient_impl` decides the flat clear AFTER the cull
+    /// and the overdraw gate (a culled or refused draw must not clear) and BEFORE it picks a program.
+    #[test]
+    fn a_flat_ambient_is_decided_after_the_cull_and_before_the_program() {
+        let src = include_str!("gfx.rs");
+        let prod = &src[..src.find("\n#[cfg(test)]\nmod tests").expect("the unit tests")];
+        let from = prod.find("fn draw_ambient_impl(").expect("draw_ambient_impl");
+        let draw = &prod[from..from + prod[from..].find("\n}\n").expect("its end")];
+        let at = |needle: &str| draw.find(needle).unwrap_or_else(|| panic!("`{needle}` is gone"));
+        assert!(
+            at("gate(Class::Ambient") < at("flat_clear(corners, dim, ink.is_some())")
+                && at("flat_clear(") < at("clear_flat_ground(")
+                && at("clear_flat_ground(") < at("ambient_program("),
+            "cull, gate, then the flat decision, then the program"
+        );
+    }
+
+    /// **The flat-ground rule**: four equal corners and no ink ramp are one colour, handed over as
+    /// the corners times `dim` on exact 8-bit codes; every other draw is the shader's.
+    #[test]
+    fn four_equal_corners_without_ink_are_a_flat_colour_on_exact_codes() {
+        let code = |v: u8| v as f32 / 255.0;
+        let on_code = |c: [f32; 3]| {
+            c.iter().all(|&v| (0.0..=1.0).contains(&v) && ((v * 255.0) - (v * 255.0).round()).abs() < 1e-4)
+        };
+        let wash = [code(40), code(18), code(200)];
+        assert_eq!(flat_clear([wash; 4], 1.0, false), Some(wash), "an on-code wash comes back unchanged");
+        // Off-code input (a cascade mix, a dim) is snapped, so the clear never depends on GL_DITHER.
+        let off = [0.2001, 0.5004, 0.9996];
+        let got = flat_clear([off; 4], 1.0, false).unwrap();
+        assert!(on_code(got), "{got:?}");
+        assert_eq!(got, [code(51), code(128), code(255)]);
+        let dimmed = flat_clear([[0.5, 0.25, 1.0]; 4], 0.5, false).unwrap();
+        assert_eq!(dimmed, [code(64), code(32), code(128)], "dim scales BEFORE the snap: 63.75 is 64, 31.875 is 32");
+        assert_eq!(flat_clear([[2.0, -1.0, 0.5]; 4], 1.0, false), Some([1.0, 0.0, code(128)]), "clamped to the range");
+        // Any one corner or channel that differs is a gradient.
+        for corner in 1..4 {
+            for ch in 0..3 {
+                let mut k = [wash; 4];
+                k[corner][ch] += 1.0 / 255.0;
+                assert_eq!(flat_clear(k, 1.0, false), None, "corner {corner} channel {ch}");
+            }
+        }
+        let mut first = [wash; 4];
+        first[0][1] += 0.5;
+        assert_eq!(flat_clear(first, 1.0, false), None, "the first corner differs from the rest");
+        // An ink ramp is a gradient the shader carries, even over a flat wash.
+        assert_eq!(flat_clear([wash; 4], 1.0, true), None);
+        // NaN is not equal to itself: never a clear.
+        assert_eq!(flat_clear([[f32::NAN; 3]; 4], 1.0, false), None);
+    }
+
+    /// Where a flat ground's clear lands: a box that fills what is open clears as it stands, a
+    /// smaller one is scissored, and nothing is nothing.
+    #[test]
+    fn a_flat_grounds_clear_is_the_open_area_a_scissored_box_or_nothing() {
+        let view: PxBox = [0, 0, 1920, 1080];
+        let full = [0, 0, 1920, 1080];
+        // The whole surface, test off: one bare clear.
+        assert_eq!(ground_clear(full, view, None, true), Some(ClearBox::Open));
+        // A rect larger than the surface is cut to it, so it is the same.
+        assert_eq!(ground_clear([-40, -40, 2000, 1200], view, None, true), Some(ClearBox::Open));
+        // A smaller rect (Home's grid under a header strip) is scissored to its own box.
+        assert_eq!(ground_clear([0, 0, 1920, 900], view, None, true), Some(ClearBox::Within([0, 0, 1920, 900])));
+        // A letterboxed surface: its bars are not the ground's, so even the full viewport is scissored.
+        let boxed: PxBox = [0, 135, 1920, 1215];
+        assert_eq!(ground_clear(boxed, boxed, None, false), Some(ClearBox::Within(boxed)));
+        // ...and so is one whose viewport starts at the origin but stops short of the drawable (the
+        // centring floors a 1-px remainder to an offset of zero): not bare, so scissored to the box.
+        assert_eq!(ground_clear(full, view, None, false), Some(ClearBox::Within(full)));
+        // A live clip: a box that IS the clip clears under it; a larger rect is cut to it and does too.
+        let clip = Some([100, 200, 900, 700]);
+        assert_eq!(ground_clear([100, 200, 900, 700], view, clip, true), Some(ClearBox::Open));
+        assert_eq!(ground_clear(full, view, clip, true), Some(ClearBox::Open));
+        // A rect inside the clip is smaller than what is open: scissored to its own box.
+        assert_eq!(ground_clear([300, 300, 500, 400], view, clip, true), Some(ClearBox::Within([300, 300, 500, 400])));
+        // A rect straddling the clip's edge is cut to the clip first.
+        assert_eq!(ground_clear([0, 0, 500, 400], view, clip, true), Some(ClearBox::Within([100, 200, 500, 400])));
+        // Off the surface, off the clip, or empty: nothing.
+        assert_eq!(ground_clear([2000, 0, 2100, 1080], view, None, true), None);
+        assert_eq!(ground_clear([0, 0, 50, 1080], view, clip, true), None);
+        assert_eq!(ground_clear([300, 300, 300, 400], view, None, true), None);
+        // A render-target override is never bare: the whole of its box without a clip is still a box.
+        let tap: PxBox = [0, 0, 480, 270];
+        assert_eq!(ground_clear([0, 0, 480, 270], tap, None, false), Some(ClearBox::Within(tap)));
+        assert_eq!(ground_clear([0, 0, 480, 270], tap, Some(tap), false), Some(ClearBox::Open), "under its live box");
+    }
+}
+
+#[cfg(test)]
+mod clear_probe_tests {
+    use std::cell::RefCell;
+
+    thread_local! { static LOG: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) }; }
+
+    #[test]
+    fn a_frame_brackets_its_first_clear_once() {
+        super::install_clear_probe(
+            || LOG.with(|l| l.borrow_mut().push("waiting")),
+            || LOG.with(|l| l.borrow_mut().push("acquired")),
+        );
+        let clear = || LOG.with(|l| l.borrow_mut().push("clear"));
+        let panel = || true;
+        super::probed_clear(panel, clear);
+        super::arm_clear_probe();
+        super::probed_clear(panel, clear);
+        super::probed_clear(panel, clear);
+        super::arm_clear_probe();
+        super::probed_clear(panel, clear);
+        let log = LOG.with(|l| std::mem::take(&mut *l.borrow_mut()));
+        assert_eq!(
+            log,
+            ["clear", "waiting", "clear", "acquired", "clear", "waiting", "clear", "acquired"],
+            "an unarmed clear is bare; an armed frame gets one pair, and its second clear none"
+        );
+    }
+
+    /// A frame that rebuilds a glass source clears the tap target first (the page's own clear,
+    /// replayed into the source) and the presented framebuffer second. The probe prices the back
+    /// buffer wait, which only the second can be, so the first must leave it armed.
+    #[test]
+    fn an_fbo_clear_leaves_the_probe_for_the_presented_one() {
+        super::install_clear_probe(
+            || LOG.with(|l| l.borrow_mut().push("waiting")),
+            || LOG.with(|l| l.borrow_mut().push("acquired")),
+        );
+        let clear = || LOG.with(|l| l.borrow_mut().push("clear"));
+        super::arm_clear_probe();
+        super::probed_clear(|| false, clear);
+        super::probed_clear(|| true, clear);
+        super::probed_clear(|| true, clear);
+        let log = LOG.with(|l| std::mem::take(&mut *l.borrow_mut()));
+        assert_eq!(
+            log,
+            ["clear", "waiting", "clear", "acquired", "clear"],
+            "the source pass's clear is bare; the presented clear after it takes the pair"
+        );
+    }
+
+}
+
+#[cfg(test)]
+mod recording_clear_tests {
+    #[test]
+    fn text_prewarm_cannot_clear_the_visible_frame() {
+        let _guard = plx_base::testlock::serial();
+        let old = super::set_page_frozen(false);
+        assert!(super::frame_clear_allowed());
+        super::without_frame_clear(|| {
+            assert!(!super::frame_clear_allowed(), "pending screen raw clear must be refused");
+        });
+        assert!(super::frame_clear_allowed());
+        super::set_page_frozen(old);
+    }
+
+    #[test]
+    fn recording_clear_scope_restores_after_nesting_and_unwind() {
+        let _guard = plx_base::testlock::serial();
+        let old = super::set_page_frozen(false);
+        super::without_frame_clear(|| {
+            let _ = std::panic::catch_unwind(|| super::without_frame_clear(|| panic!("screen")));
+            assert!(!super::frame_clear_allowed());
+        });
+        assert!(super::frame_clear_allowed());
+        super::set_page_frozen(true);
+        super::without_frame_clear(|| {});
+        assert!(!super::frame_clear_allowed(), "must preserve the independent modal freeze");
+        super::set_page_frozen(old);
+    }
+}
+
+#[cfg(test)]
+mod shadow_band_tests {
+    use super::{shadow_bands, shadow_skip_rect};
+
+    /// `fs_shadow.frag`'s `sdBox`, line for line.
+    fn sd_box(p: [f32; 2], b: [f32; 2], r: f32) -> f32 {
+        let q = [p[0].abs() - b[0] + r, p[1].abs() - b[1] + r];
+        let len = (q[0].max(0.0).powi(2) + q[1].max(0.0).powi(2)).sqrt();
+        len + q[0].max(q[1]).min(0.0) - r
+    }
+
+    /// `fs_shadow.frag`'s `CUT_AA`, parsed from the shader itself.
+    fn cut_aa() -> f32 {
+        let src = super::FS_SHADOW.to_str().unwrap();
+        let at = src.find("#define CUT_AA").expect("the cut's ramp half-width");
+        src[at..].lines().next().unwrap().split_whitespace().nth(2).unwrap().parse().unwrap()
+    }
+
+    /// `fs_shadow.frag`'s discard test (the cut's coverage is exactly 0) for a fragment at `pos`
+    /// (authored px) of `quad`.
+    fn discards(quad: [f32; 4], blur: f32, radius: f32, off: f32, cut: f32, pos: [f32; 2]) -> bool {
+        let p = [pos[0] - (quad[0] + quad[2] * 0.5), pos[1] - (quad[1] + quad[3] * 0.5)];
+        let hsz = [(quad[2] * 0.5 - blur).max(0.0), (quad[3] * 0.5 - blur).max(0.0)];
+        let pq = [p[0], p[1] + off];
+        if cut >= 0.0 {
+            sd_box(pq, hsz, cut.min(hsz[0].min(hsz[1]))) <= -cut_aa()
+        } else {
+            pq[0].abs() < hsz[0] - (radius + 1.0) && pq[1].abs() < hsz[1] - (radius + 1.0)
+        }
+    }
+
+    fn area(r: &[f32; 4]) -> f64 {
+        r[2] as f64 * r[3] as f64
+    }
+
+    fn overlap(a: &[f32; 4], b: &[f32; 4]) -> f64 {
+        let w = (a[0] + a[2]).min(b[0] + b[2]) as f64 - a[0].max(b[0]) as f64;
+        let h = (a[1] + a[3]).min(b[1] + b[3]) as f64 - a[1].max(b[1]) as f64;
+        w.max(0.0) * h.max(0.0)
+    }
+
+    /// (box w, box h, radius, blur, off, cut): the glass menu, a chip, radius >= half size, a
+    /// large-offset case, and both cut modes of each.
+    fn cases() -> Vec<(f32, f32, f32, f32, f32, f32)> {
+        let mut v = Vec::new();
+        for &(w, h, r) in &[(500.0, 400.0, 28.0), (500.0, 400.0, 40.0), (80.0, 40.0, 20.0), (60.0, 60.0, 30.0), (300.0, 40.0, 100.0), (220.0, 330.0, 12.0)] {
+            for &(blur, off) in &[(60.0, 24.0), (24.0, 8.0), (60.0, 0.0), (10.0, 40.0)] {
+                v.push((w, h, r, blur, off, r)); // cut >= 0: the occluder's own radius
+                v.push((w, h, r, blur, off, r + 7.0));
+                v.push((w, h, r, blur, off, 0.0));
+                v.push((w, h, r, blur, off, -1.0)); // cut < 0: the opaque tile's box cut
+            }
+        }
+        v
+    }
+
+    fn quad_of(w: f32, h: f32, blur: f32) -> [f32; 4] {
+        [100.25 - blur, 50.5 - blur, w + 2.0 * blur, h + 2.0 * blur]
+    }
+
+    /// The bands tile quad minus inner exactly and never overlap.
+    #[test]
+    fn shadow_bands_tile_the_quad_minus_the_skip_rect() {
+        for &scale in &[1.0f32, 2.0 / 3.0] {
+            for (w, h, r, blur, off, cut) in cases() {
+                let quad = quad_of(w, h, blur);
+                let inner = shadow_skip_rect(quad, blur, r, off, cut);
+                let (bands, n) = shadow_bands(quad, inner, scale);
+                let bands = &bands[..n];
+                let hole = area(&quad) - bands.iter().map(area).sum::<f64>();
+                // The hole is the skip rect snapped inward: inside it, and within a pixel of it.
+                match inner {
+                    Some(i) if n > 1 => {
+                        let px = 1.0 / scale as f64;
+                        let shrunk = (i[2] as f64 - 2.0 * px).max(0.0) * (i[3] as f64 - 2.0 * px).max(0.0);
+                        assert!(hole <= area(&i) + 1e-3, "hole {hole} exceeds the skip rect {}", area(&i));
+                        assert!(hole >= shrunk - 1e-3, "hole {hole} lost more than a pixel per side of {}", area(&i));
+                    }
+                    _ => assert!(hole.abs() < 1e-3 || n > 1, "whole quad expected"),
+                }
+                for (a, ra) in bands.iter().enumerate() {
+                    assert!(ra[2] > 0.0 && ra[3] > 0.0, "empty band kept");
+                    for rb in &bands[a + 1..] {
+                        assert!(overlap(ra, rb) < 1e-4, "bands overlap: {ra:?} {rb:?}");
+                    }
+                    assert!(ra[0] >= quad[0] && ra[1] >= quad[1] && ra[0] + ra[2] <= quad[0] + quad[2] + 1e-3 && ra[1] + ra[3] <= quad[1] + quad[3] + 1e-3);
+                }
+            }
+        }
+    }
+
+    /// A clean tiling check with a known inner rect.
+    #[test]
+    fn shadow_bands_areas_sum_to_quad_minus_inner() {
+        let quad = [0.0, 0.0, 100.0, 80.0];
+        let (b, n) = shadow_bands(quad, Some([20.0, 10.0, 50.0, 40.0]), 1.0);
+        assert_eq!(n, 4);
+        let sum: f64 = b[..n].iter().map(area).sum();
+        assert_eq!(sum, 100.0 * 80.0 - 50.0 * 40.0);
+        let (b, n) = shadow_bands(quad, None, 1.0);
+        assert_eq!((n, b[0]), (1, quad));
+    }
+
+    /// Everything inside the skip rect (corners included) is a fragment the shader discards: its cut
+    /// coverage is exactly 0, so skipping it changes no pixel.
+    #[test]
+    fn shadow_skip_rect_is_certainly_discarded() {
+        for (w, h, r, blur, off, cut) in cases() {
+            let quad = quad_of(w, h, blur);
+            let Some(i) = shadow_skip_rect(quad, blur, r, off, cut) else { continue };
+            for a in 0..=24 {
+                for b in 0..=24 {
+                    let pos = [i[0] + i[2] * a as f32 / 24.0, i[1] + i[3] * b as f32 / 24.0];
+                    assert!(
+                        discards(quad, blur, r, off, cut, pos),
+                        "case {w}x{h} r{r} blur{blur} off{off} cut{cut}: {pos:?} in {i:?} is kept"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Seams (inner edges) are on the drawable grid for scale 1 and 2/3.
+    #[test]
+    fn shadow_bands_seams_lie_on_the_pixel_grid() {
+        for &scale in &[1.0f32, 2.0 / 3.0] {
+            for (w, h, r, blur, off, cut) in cases() {
+                let quad = quad_of(w, h, blur);
+                let inner = shadow_skip_rect(quad, blur, r, off, cut);
+                let (bands, n) = shadow_bands(quad, inner, scale);
+                if n < 2 {
+                    continue;
+                }
+                let on_grid = |v: f32| ((v * scale).round() - v * scale).abs() < 1e-3;
+                for r in &bands[..n] {
+                    // A band edge is either the quad's own edge or a seam.
+                    for (v, q0, q1) in [(r[0], quad[0], quad[0] + quad[2]), (r[0] + r[2], quad[0], quad[0] + quad[2]), (r[1], quad[1], quad[1] + quad[3]), (r[1] + r[3], quad[1], quad[1] + quad[3])] {
+                        let is_quad_edge = (v - q0).abs() < 1e-4 || (v - q1).abs() < 1e-4;
+                        assert!(is_quad_edge || on_grid(v), "scale {scale}: seam {v} off the grid");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Blur larger than the box, tiny boxes, and an occluder pushed off the quad all fall back to
+    /// the whole quad or to well-formed bands.
+    /// **The cut's box pre-test only skips work, never a decision.** `fs_shadow.frag` evaluates the
+    /// occluder's rounded `sdBox` only for a fragment inside the occluder's bounding box grown by
+    /// `CUT_AA`: outside it, a component of `q` is >= the corner radius + `CUT_AA`, so
+    /// `sdBox >= CUT_AA`, the coverage ramp is full and the fragment is kept at full strength.
+    /// Graded on the replica over every case and a dense grid, and the shader must run the box test
+    /// BEFORE the SDF it skips. Red on the build whose cut ran `sdBox` on every band fragment (most
+    /// of them far outside the panel).
+    #[test]
+    fn the_cuts_box_pretest_is_exact_and_runs_first() {
+        let code: String = super::FS_SHADOW
+            .to_str()
+            .unwrap()
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let cut = code.find("if (u_cut >= 0.0)").expect("the cut branch");
+        let tail = &code[cut..];
+        let sdf = tail.find("sdBox(pq").expect("the cut's SDF");
+        let boxed = tail.find("all(lessThan(abs(pq), hsz + vec2(CUT_AA)))");
+        assert!(boxed.is_some_and(|b| b < sdf), "the bounding-box test must guard the cut's sdBox");
+        for (w, h, r, blur, off, cut) in cases().into_iter().filter(|c| c.5 >= 0.0) {
+            let quad = quad_of(w, h, blur);
+            let hsz = [(quad[2] * 0.5 - blur).max(0.0), (quad[3] * 0.5 - blur).max(0.0)];
+            let (cx, cy) = (quad[0] + quad[2] * 0.5, quad[1] + quad[3] * 0.5);
+            for i in 0..=96 {
+                for j in 0..=96 {
+                    let pos = [quad[0] + quad[2] * i as f32 / 96.0, quad[1] + quad[3] * j as f32 / 96.0];
+                    let pq = [pos[0] - cx, pos[1] - cy + off];
+                    if !(pq[0].abs() < hsz[0] + cut_aa() && pq[1].abs() < hsz[1] + cut_aa()) {
+                        let sd = sd_box(pq, hsz, cut.min(hsz[0].min(hsz[1])));
+                        assert!(sd >= cut_aa() - 1e-3, "{w}x{h} r{r} cut{cut}: {pos:?} outside the grown box has coverage < 1 (sd {sd})");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shadow_bands_degenerate_inputs_fall_back() {
+        let q = [10.0, 10.0, 40.0, 30.0];
+        assert_eq!(shadow_skip_rect(q, 20.0, 4.0, 0.0, 4.0), None); // blur eats the box
+        assert_eq!(shadow_skip_rect(q, 25.0, 4.0, 0.0, -1.0), None);
+        assert_eq!(shadow_skip_rect([0.0, 0.0, 3.0, 3.0], 1.0, 20.0, 0.0, 20.0), None); // inset swallows it
+        assert_eq!(shadow_skip_rect([0.0, 0.0, 100.0, 100.0], 10.0, 4.0, 500.0, 4.0), None); // occluder off the quad
+        let (b, n) = shadow_bands(q, None, 1.0);
+        assert_eq!((n, b[0]), (1, q));
+        let (b, n) = shadow_bands(q, Some([20.0, 20.0, 0.0, 5.0]), 1.0);
+        assert_eq!((n, b[0]), (1, q));
+        let (b, n) = shadow_bands(q, Some([20.2, 20.2, 0.5, 5.0]), 1.0); // snaps to nothing
+        assert_eq!((n, b[0]), (1, q));
+        for (w, h, r, blur, off, cut) in cases() {
+            let _ = (w, h);
+            for &(bw, bh) in &[(1.0f32, 1.0f32), (40.0, 30.0), (0.3, 70.0)] {
+                let quad = [5.0, 5.0, 2.0 * blur + bw, 2.0 * blur + bh];
+                let (bands, n) = shadow_bands(quad, shadow_skip_rect(quad, blur, r, off, cut), 2.0 / 3.0);
+                assert!((1..=4).contains(&n));
+                assert!(bands[..n].iter().all(|r| r[2] > 0.0 && r[3] > 0.0));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod card_split_tests {
+    use super::{
+        bands_around, card_cut, card_interior, card_pixel_boxes, card_plan, card_whole_refused, clip_px,
+        image_card_geometry, plain_texture_program, snap_inner, CardBoxes, CardCut, CardPart, CardPath, Class,
+        Piece, PxBox, SCR_H,
+    };
+
+    /// The viewport box `[x0, y0, x1, y1]` of a 1920x1080 canvas at `s` px per authored px whose
+    /// window origin is `(vx, vy)`: what `card_boxes` hands `card_pixel_boxes`.
+    fn view(vx: i32, vy: i32, s: f32) -> PxBox {
+        [vx, vy, vx + (1920.0 * s).round() as i32, vy + (1080.0 * s).round() as i32]
+    }
+
+    /// `fs_img.frag`'s PLAIN program, line for line up to the three exits that write
+    /// `vec4(tex, ta)`: does the fragment at card-centred `p` leave through one of them?
+    /// Returns which (1 = `u_card.z < 0.5`, 2 = `straight < u_card.w`, 3 = `d < -2`), 0 = it
+    /// goes on to the rim, the anti-aliased edge and the shadow.
+    fn plain_exit(geo: [f32; 4], p: [f32; 2]) -> u8 {
+        if geo[2] < 0.5 {
+            return 1;
+        }
+        let q = [p[0].abs() - geo[0], p[1].abs() - geo[1]];
+        let straight = q[0].max(q[1]);
+        if straight < geo[3] {
+            return 2;
+        }
+        let mut d = straight - geo[2];
+        if q[0].min(q[1]) > 0.0 {
+            d = (q[0] * q[0] + q[1] * q[1]).sqrt() - geo[2];
+        }
+        if d < -2.0 { 3 } else { 0 }
+    }
+
+    /// (card w, h, corner radius, rim width, shadow pad) of every shape the app draws through
+    /// `Painter::tex_carded`: `RowStyle::HOME` (250x375, `CARD_RING_RAD` 14), the episode still
+    /// (420x236), the grid and detail posters at other sizes, a small thumbnail, the circular rows
+    /// (cast 190, profiles 220: radius = half the width), radii around the shader's 2 px
+    /// threshold, a rim wider than the 1 px the shader allows, and the resting shadow's pad
+    /// (`blur_r + 1`, 4..12 px).
+    fn cards() -> Vec<(f32, f32, f32, f32, f32)> {
+        vec![
+            (250.0, 375.0, 14.0, 1.0, 12.0),
+            (420.0, 236.0, 14.0, 1.0, 12.0),
+            (200.0, 300.0, 14.0, 1.0, 8.0),
+            (140.0, 210.0, 14.0, 1.0, 8.0),
+            (64.0, 96.0, 14.0, 1.0, 4.0),
+            (64.0, 96.0, 8.0, 0.5, 4.0),
+            (190.0, 190.0, 95.0, 1.0, 12.0),
+            (220.0, 220.0, 110.0, 1.0, 12.0),
+            (250.0, 375.0, 24.0, 1.5, 12.0),
+            (250.0, 375.0, 40.0, 1.0, 12.0),
+            (250.0, 375.0, 2.0, 1.0, 12.0),
+            (250.0, 375.0, 1.9, 1.0, 12.0),
+            (250.0, 375.0, 0.5, 1.0, 12.0),
+            (250.0, 375.0, 0.5, 0.0, 12.0),
+            (30.0, 30.0, 6.0, 1.0, 3.0),
+            (500.0, 40.0, 14.0, 1.0, 6.0),
+        ]
+    }
+
+    /// Where the drawable puts the card, so the pixel snap meets fractional authored coordinates:
+    /// the TV (1.0), the simulator's half drawable, an in-between and a 2x render scale.
+    const SCALES: [f32; 4] = [1.0, 0.5, 2.0 / 3.0, 2.0];
+    const AT: [(f32, f32); 3] = [(120.0, 80.0), (100.25, 50.5), (333.7, 211.3)];
+    /// The drawable's centring offset (`surface::viewport`): none, and a letterboxed one.
+    const ORIGINS: [(i32, i32); 2] = [(0, 0), (7, -3)];
+
+    /// The quad `draw_tex_impl` builds for a resting card (`dy` 0: `sides == top == bottom == pad`).
+    fn quad_of(c: (f32, f32, f32, f32, f32), at: (f32, f32)) -> ([f32; 4], [f32; 4]) {
+        let (w, h, _, _, pad) = c;
+        ([at.0, at.1, w, h], [at.0 - pad, at.1 - pad, w + 2.0 * pad, h + 2.0 * pad])
+    }
+
+    type Case = ((f32, f32, f32, f32, f32), (f32, f32), f32, [f32; 4], [f32; 4], [f32; 4]);
+
+    /// Every (card, position, scale) of the tables that has an interior, with its quad and the
+    /// interior's edges.
+    fn holes() -> Vec<Case> {
+        let mut v = Vec::new();
+        for c in cards() {
+            for at in AT {
+                for scale in SCALES {
+                    let (card, quad) = quad_of(c, at);
+                    if let Some(h) = card_interior(quad, card, c.2, c.3, scale) {
+                        v.push((c, at, scale, card, quad, h));
+                    }
+                }
+            }
+        }
+        v
+    }
+
+    /// The window pixel `(px, py)` (GL rows, bottom-up) as the authored point at its centre.
+    fn centre_of(px: i32, py: i32, vx: i32, vy: i32, s: f32) -> [f32; 2] {
+        [(px as f32 + 0.5 - vx as f32) / s, SCR_H - (py as f32 + 0.5 - vy as f32) / s]
+    }
+
+    fn all_boxes(b: &CardBoxes) -> Vec<PxBox> {
+        let mut v = b.ring.to_vec();
+        v.push(b.interior);
+        v
+    }
+
+    fn inside(b: &PxBox, x: i32, y: i32) -> bool {
+        x >= b[0] && x < b[2] && y >= b[1] && y < b[3]
+    }
+
+    /// The claim the whole split rests on, tested on the pixels themselves: EVERY pixel the interior
+    /// box shades - at its centre, converted back to the card-centred coordinate the vertex shader
+    /// hands the fragment shader - leaves the PLAIN program through `straight < u_card.w`, the box
+    /// exit that comes before the rim, the anti-aliased edge and the shadow are even computed. (The
+    /// real program is the same arithmetic at `mediump`/`highp`; the 2 px + rim margin in
+    /// `card_interior` is what float error has to eat.)
+    #[test]
+    fn every_interior_pixel_takes_the_plain_exit() {
+        let all = holes();
+        assert!(all.len() > 100, "the table should mostly split: {}", all.len());
+        let (vx, vy) = ORIGINS[1];
+        for (c, at, scale, card, quad, hole) in all {
+            let (w, h, r, rim, pad) = c;
+            let geo = image_card_geometry(w * 0.5, h * 0.5, r);
+            let centre = [quad[0] + quad[2] * 0.5, quad[1] + quad[3] * 0.5];
+            let b = card_pixel_boxes(hole, view(vx, vy, scale), scale).interior;
+            assert!(b[2] > b[0] && b[3] > b[1], "{c:?}: empty interior box {b:?}");
+            for py in b[1]..b[3] {
+                for px in b[0]..b[2] {
+                    let at_px = centre_of(px, py, vx, vy, scale);
+                    let p = [at_px[0] - centre[0], at_px[1] - centre[1]];
+                    assert_eq!(
+                        plain_exit(geo, p), 2,
+                        "card {w}x{h} r{r} rim{rim} pad{pad} at {at:?} scale {scale}: pixel {px},{py} ({at_px:?}) is shaded"
+                    );
+                }
+            }
+            // Inside the card itself, with its whole rim to spare.
+            assert!(hole[0] >= card[0] + r + rim && hole[1] >= card[1] + r + rim, "{c:?}: {hole:?} reaches the corner arc");
+            assert!(hole[2] <= card[0] + card[2] - r - rim && hole[3] <= card[1] + card[3] - r - rim);
+        }
+    }
+
+    /// The same predicate says what it must about the ring: a fragment on the card's own edge is NOT
+    /// plain, so the full card math still runs where it matters (a rim, an anti-aliased edge, a
+    /// shadow). A split that took the whole card would pass the test above and fail this one - and
+    /// so would a `card_interior` that returned the whole card, because the edge fragments are
+    /// followed to the PIXEL the production boxes put them in: it must be a ring band's, never the
+    /// interior's.
+    #[test]
+    fn the_ring_still_runs_the_card_math() {
+        let mut checked = 0;
+        for (c, at, scale, card, quad, hole) in holes() {
+            let (w, h, r, _, _) = c;
+            if r < 2.0 || r * 2.0 >= w.min(h) {
+                continue;
+            }
+            let geo = image_card_geometry(w * 0.5, h * 0.5, r);
+            let centre = [card[0] + w * 0.5, card[1] + h * 0.5];
+            let (vx, vy) = ORIGINS[1];
+            let boxes = card_pixel_boxes(hole, view(vx, vy, scale), scale);
+            // card-centred points on the edge, just inside it, just outside it (the shadow)
+            for p in [[w * 0.5 - 0.5, 0.0], [w * 0.5 + 1.0, 0.0], [0.0, h * 0.5 - 0.5], [0.0, h * 0.5 + 3.0], [-(w * 0.5) + 0.5, 0.0]] {
+                assert_eq!(plain_exit(geo, p), 0, "{c:?}: edge fragment {p:?} would be drawn plain");
+                // the window pixel that point falls in (GL rows, bottom-up), and the box that draws it
+                let (ax, ay) = (centre[0] + p[0], centre[1] + p[1]);
+                let (px, py) = (vx + (ax * scale).floor() as i32, vy + ((SCR_H - ay) * scale).floor() as i32);
+                assert!(!inside(&boxes.interior, px, py), "{c:?} at {at:?} scale {scale}: edge fragment {p:?} is in the interior box");
+                assert!(boxes.ring.iter().any(|b| inside(b, px, py)), "{c:?}: edge fragment {p:?} is in no ring band (quad {quad:?})");
+                checked += 1;
+            }
+            // And the fast-path uniform really is the "plain everywhere" one.
+            assert_eq!(plain_exit(image_card_geometry(w * 0.5, h * 0.5, 0.0), [w * 0.5, h * 0.5]), 1);
+        }
+        assert!(checked > 200, "the table barely exercised the ring: {checked}");
+    }
+
+    /// Interior and ring together are the whole target, each pixel in exactly one box: this is what
+    /// makes five draws of one quad equal one draw of it (a pixel in two boxes would blend twice, in
+    /// none would not be drawn at all). Checked over a window of pixels that reaches well past the
+    /// quad on every side, for the whole table.
+    #[test]
+    fn the_boxes_tile_the_target_once() {
+        for (c, at, scale, _card, quad, hole) in holes() {
+            for (vx, vy) in ORIGINS {
+                let boxes = all_boxes(&card_pixel_boxes(hole, view(vx, vy, scale), scale));
+                // The quad in window pixels, GL rows, with a margin.
+                let (x0, x1) = (vx + (quad[0] * scale).floor() as i32 - 6, vx + ((quad[0] + quad[2]) * scale).ceil() as i32 + 6);
+                let (y0, y1) = (
+                    vy + ((SCR_H - quad[1] - quad[3]) * scale).floor() as i32 - 6,
+                    vy + ((SCR_H - quad[1]) * scale).ceil() as i32 + 6,
+                );
+                for y in y0..y1 {
+                    for x in x0..x1 {
+                        let n = boxes.iter().filter(|b| inside(b, x, y)).count();
+                        assert_eq!(n, 1, "{c:?} at {at:?} scale {scale} origin ({vx},{vy}): pixel {x},{y} is in {n} boxes");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The interior box is the hole, whole pixels and nothing else: its size in pixels is the hole's
+    /// size in authored px times the scale (the hole is on the pixel grid, so exactly), and the box
+    /// lies inside the hole.
+    #[test]
+    fn the_interior_box_is_the_hole_in_pixels() {
+        for (c, at, scale, _card, _quad, hole) in holes() {
+            for (vx, vy) in ORIGINS {
+                let b = card_pixel_boxes(hole, view(vx, vy, scale), scale).interior;
+                let (w, h) = ((hole[2] - hole[0]) * scale, (hole[3] - hole[1]) * scale);
+                assert_eq!(((b[2] - b[0]) as f32, (b[3] - b[1]) as f32), (w.round(), h.round()), "{c:?} at {at:?} scale {scale}");
+                assert!((w - w.round()).abs() < 1e-2 && (h - h.round()).abs() < 1e-2, "{c:?}: hole {hole:?} is off the grid");
+                // The box's pixel edges, back in authored px, are the hole's.
+                let (tl, br) = (
+                    [(b[0] - vx) as f32 / scale, SCR_H - (b[3] - vy) as f32 / scale],
+                    [(b[2] - vx) as f32 / scale, SCR_H - (b[1] - vy) as f32 / scale],
+                );
+                for (got, want) in [(tl[0], hole[0]), (tl[1], hole[1]), (br[0], hole[2]), (br[1], hole[3])] {
+                    assert!((got - want).abs() < 1e-3, "{c:?} at {at:?} scale {scale}: edge {got} vs {want}");
+                }
+            }
+        }
+    }
+
+    /// A clip the caller already holds (a scrolling list's) cuts every box, never widens one, and the
+    /// pieces that remain still tile exactly what the clip leaves.
+    #[test]
+    fn the_callers_clip_cuts_the_boxes() {
+        let (c, at, scale, _card, _quad, hole) = holes().into_iter().find(|h| h.2 == 1.0).unwrap();
+        let boxes = all_boxes(&card_pixel_boxes(hole, view(0, 0, scale), scale));
+        let (x0, y0) = (hole[0] as i32 - 20, (SCR_H - hole[3]) as i32 - 20);
+        let (x1, y1) = (hole[2] as i32 + 20, (SCR_H - hole[1]) as i32 + 20);
+        for live in [
+            [x0, y0, x1, y1],
+            [x0 + 30, y0 + 30, x1 - 30, y1 - 30],
+            [(hole[0] + hole[2]) as i32 / 2, y0, x1 + 50, (hole[1] + hole[3]) as i32 / 2],
+        ] {
+            let cut: Vec<PxBox> = boxes.iter().filter_map(|b| clip_px(*b, Some(live))).collect();
+            for y in y0 - 5..y1 + 5 {
+                for x in x0 - 5..x1 + 5 {
+                    let want = usize::from(inside(&live, x, y));
+                    let got = cut.iter().filter(|b| inside(b, x, y)).count();
+                    assert_eq!(got, want, "{c:?} at {at:?}: live {live:?}, pixel {x},{y}");
+                }
+            }
+        }
+        // No clip at all is the box itself, and a clip that misses it leaves nothing.
+        assert_eq!(clip_px([1, 2, 30, 40], None), Some([1, 2, 30, 40]));
+        assert_eq!(clip_px([1, 2, 30, 40], Some([30, 0, 90, 90])), None);
+        assert_eq!(clip_px([-(1 << 20), -(1 << 20), 1 << 20, 5], Some([10, 0, 20, 90])), Some([10, 0, 20, 5]));
+    }
+
+    /// **The ring is bounded by the viewport the quad is drawn into**, not by a far-off sentinel:
+    /// whatever the hole's place - on the canvas, over each of its edges, wholly off it - every box
+    /// lies inside the viewport box, none is inverted, and the five still tile that viewport exactly
+    /// once (a coarse grid of window pixels each in one box, and the areas add up to the viewport's).
+    #[test]
+    fn the_boxes_stay_inside_the_viewport_and_tile_it() {
+        let (w, h) = (1920.0, 1080.0);
+        let holes = [
+            [100.0, 100.0, 300.0, 400.0],
+            [-50.0, 100.0, 300.0, 400.0],
+            [100.0, -50.0, 300.0, 400.0],
+            [100.0, 100.0, w + 50.0, 400.0],
+            [100.0, 100.0, 300.0, h + 50.0],
+            [-300.0, -300.0, -100.0, -100.0],
+            [w + 100.0, h + 100.0, w + 300.0, h + 300.0],
+        ];
+        for scale in SCALES {
+            for (vx, vy) in ORIGINS {
+                let v = view(vx, vy, scale);
+                for hole in holes {
+                    let all = all_boxes(&card_pixel_boxes(hole, v, scale));
+                    for b in &all {
+                        assert!(b[0] >= v[0] && b[2] <= v[2] && b[1] >= v[1] && b[3] <= v[3], "{b:?} leaves the viewport {v:?} (hole {hole:?}, scale {scale})");
+                        assert!(b[2] >= b[0] && b[3] >= b[1], "{b:?} is inverted (hole {hole:?}, scale {scale})");
+                    }
+                    let area = |b: &PxBox| i64::from(b[2] - b[0]) * i64::from(b[3] - b[1]);
+                    assert_eq!(all.iter().map(area).sum::<i64>(), area(&v), "the boxes do not add up to the viewport (hole {hole:?}, scale {scale})");
+                    for y in (v[1]..v[3]).step_by(7) {
+                        for x in (v[0]..v[2]).step_by(7) {
+                            let n = all.iter().filter(|b| inside(b, x, y)).count();
+                            assert_eq!(n, 1, "pixel {x},{y} is in {n} boxes (hole {hole:?}, scale {scale}, origin {vx},{vy})");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// **What the split does to the scissor state**, as data (`card_plan` is what `draw_tex_core_in`
+    /// runs): with no clip held, the five pieces in draw order (the ring's four, then the interior -
+    /// the only one drawn with the plain `u_card`) and nothing to restore but the test being off;
+    /// under a clip, every piece cut to it, those it misses left out, and exactly that clip put back
+    /// afterwards, including when no piece survives.
+    #[test]
+    fn the_plan_cuts_the_pieces_to_the_callers_clip_and_puts_it_back() {
+        let (_, _, scale, _, _, hole) = holes().into_iter().find(|h| h.2 == 1.0).unwrap();
+        let v = view(0, 0, scale);
+        let boxes = card_pixel_boxes(hole, v, scale);
+        let drawn = |plan: &super::CardPlan| plan.pieces.iter().flatten().copied().collect::<Vec<Piece>>();
+
+        let free = card_plan(&boxes, None, |_| false);
+        assert_eq!(free.restore, None, "no clip was held: the test goes back off");
+        let free = drawn(&free);
+        assert_eq!(free.iter().map(|p| p.scissor).collect::<Vec<_>>(), all_boxes(&boxes), "the ring in order, then the interior");
+        assert_eq!(free.iter().map(|p| p.interior).collect::<Vec<_>>(), [false, false, false, false, true]);
+
+        let int = boxes.interior;
+        let live = [int[0], int[1] - 5, (int[0] + int[2]) / 2, int[3] + 5];
+        let plan = card_plan(&boxes, Some(live), |_| false);
+        assert_eq!(plan.restore, Some(live), "the clip the caller held is the one put back");
+        let cut = drawn(&plan);
+        for p in &cut {
+            assert!(p.scissor[0] >= live[0] && p.scissor[1] >= live[1] && p.scissor[2] <= live[2] && p.scissor[3] <= live[3], "{p:?} escapes {live:?}");
+        }
+        assert_eq!(cut.len(), 3, "the rows above and below and the interior meet the clip; the columns beside the card do not: {cut:?}");
+        assert!(cut.last().unwrap().interior && cut.iter().filter(|p| p.interior).count() == 1);
+        for y in live[1] - 3..live[3] + 3 {
+            for x in live[0] - 3..live[2] + 3 {
+                let n = cut.iter().filter(|p| inside(&p.scissor, x, y)).count();
+                assert_eq!(n, usize::from(inside(&live, x, y)), "pixel {x},{y} under the clip {live:?}");
+            }
+        }
+
+        let off = [v[2] + 10, v[1], v[2] + 40, v[3]];
+        let plan = card_plan(&boxes, Some(off), |_| false);
+        assert!(drawn(&plan).is_empty(), "a clip off the viewport draws nothing");
+        assert_eq!(plan.restore, Some(off), "and is still put back");
+    }
+
+    /// **A `drawmask` part skips exactly its pieces and nothing else** (`card.interior`,
+    /// `card.ring`): over the whole table of cards, scales and origins, and with and without a clip
+    /// the caller holds. Whatever is refused, what is left is the unrefused plan's own pieces - the
+    /// same boxes, in the same order, cut to the same clip - minus the refused kind, the scissor to
+    /// put back is untouched, and refusing the other part (`card.focus`, which is not a piece of a
+    /// split card) changes nothing at all.
+    #[test]
+    fn a_part_mask_skips_exactly_its_pieces() {
+        let mut checked = 0;
+        for (c, at, scale, _card, _quad, hole) in holes() {
+            let boxes = card_pixel_boxes(hole, view(0, 0, scale), scale);
+            let int = boxes.interior;
+            // no clip held, a clip that holds the interior and bites into the ring on every side, and
+            // one that takes the interior's left half and cuts the ring's top and bottom bands off
+            let half = (int[0] + int[2]) / 2;
+            for live in [None, Some([int[0] - 9, int[1] - 3, int[2] + 9, int[3] + 3]), Some([int[0] - 5, int[1], half.max(int[0] + 1), int[3]])] {
+                let whole = card_plan(&boxes, live, |_| false);
+                let kind = |p: &Option<Piece>| p.map(|p| p.interior);
+                assert!(whole.pieces.iter().any(|p| kind(p) == Some(true)), "{c:?} at {at:?}: no interior in the plan {live:?}");
+                for (refuse, why) in [
+                    (&[CardPart::Interior][..], "card.interior"),
+                    (&[CardPart::Ring][..], "card.ring"),
+                    (&[CardPart::Interior, CardPart::Ring][..], "card.interior + card.ring"),
+                    (&[CardPart::Focus][..], "card.focus"),
+                    (&[][..], "nothing"),
+                ] {
+                    let plan = card_plan(&boxes, live, |p| refuse.contains(&p));
+                    assert_eq!(plan.restore, whole.restore, "{c:?} {why}: the clip put back must not change");
+                    for (i, (got, was)) in plan.pieces.iter().zip(&whole.pieces).enumerate() {
+                        let refused = match kind(was) {
+                            Some(true) => refuse.contains(&CardPart::Interior),
+                            Some(false) => refuse.contains(&CardPart::Ring),
+                            None => false,
+                        };
+                        let want = if refused { None } else { *was };
+                        assert_eq!(*got, want, "{c:?} at {at:?} scale {scale}, {why}: piece {i} of {live:?}");
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert!(checked > 5000, "the table barely exercised the masks: {checked}");
+    }
+
+    /// Refusing a part is a plan like any other: one that has nothing left is empty (the draw loop
+    /// then touches no GL state), the interior part is the one draw that carries the plain
+    /// `u_card`, and the ring part is the four that do not.
+    #[test]
+    fn the_parts_are_the_interior_draw_and_the_four_ring_draws() {
+        let (_, _, scale, _, _, hole) = holes().into_iter().find(|h| h.2 == 1.0).unwrap();
+        let boxes = card_pixel_boxes(hole, view(0, 0, scale), scale);
+        let left = |refuse: &[CardPart]| card_plan(&boxes, None, |p| refuse.contains(&p)).pieces.into_iter().flatten().collect::<Vec<Piece>>();
+        let no_interior = left(&[CardPart::Interior]);
+        assert_eq!(no_interior.len(), 4);
+        assert!(no_interior.iter().all(|p| !p.interior), "card.interior left an interior draw: {no_interior:?}");
+        let no_ring = left(&[CardPart::Ring]);
+        assert_eq!(no_ring.len(), 1);
+        assert!(no_ring[0].interior && no_ring[0].scissor == boxes.interior, "card.ring left more than the interior: {no_ring:?}");
+        assert!(left(&[CardPart::Interior, CardPart::Ring]).is_empty());
+        assert_eq!(left(&[CardPart::Focus]).len(), 5, "card.focus is not a piece of a split card");
+        assert_eq!(left(&[]).len(), 5);
+    }
+
+    /// `card.focus` refuses the cards drawn whole through the focus program and no other card: not
+    /// the ones whole for another reason, and not by way of the pieces' parts. (Which cards are on
+    /// the focus path is `card_cut`'s, tested above; here is what a part does with each path.)
+    #[test]
+    fn only_a_focus_program_card_is_a_part_of_its_own() {
+        let paths = [CardPath::Split, CardPath::Focus, CardPath::Clipped, CardPath::NoInterior, CardPath::Plain, CardPath::Off];
+        for path in paths {
+            assert_eq!(card_whole_refused(path, |p| p == CardPart::Focus), path == CardPath::Focus, "{path:?} under card.focus");
+            assert!(!card_whole_refused(path, |p| p != CardPart::Focus), "{path:?} under card.interior + card.ring");
+            assert!(!card_whole_refused(path, |_| false), "{path:?} under no mask");
+        }
+        // and the paths a real draw takes: a risen or popped card is `Focus` whatever else it is
+        let rect = [1.0, 2.0, 3.0, 4.0];
+        let refused = |class, radius, focus, dy| match card_cut(class, radius, focus, dy, true, rect) {
+            CardCut::Whole(path) => card_whole_refused(path, |p| p == CardPart::Focus),
+            CardCut::Pieces(_) | CardCut::None => false,
+        };
+        assert!(refused(Class::Card, 14.0, 0.01, 0.0), "a card still springing back (pop 0.01)");
+        assert!(refused(Class::Card, 14.0, 0.0, 0.5), "a risen shadow");
+        assert!(refused(Class::Card, 0.0, 0.3, 0.0), "a focused card with square corners is still the focus program");
+        assert!(!refused(Class::Card, 14.0, 0.0, 0.0), "a resting card is split, not whole");
+        assert!(!refused(Class::Card, 0.0, 0.0, 0.0), "a square resting card is the plain path");
+        assert!(!refused(Class::Image, 14.0, 0.3, 0.0), "an image is not a card");
+    }
+
+    /// The same, from the trigger's own text: what `/tmp/plxnative-drawmask` says reaches the plan
+    /// and the whole-card refusal through the real mask, and `card` (the whole class) is not any of
+    /// them, so a part leg still draws the card class's logical composite.
+    #[cfg(feature = "devtriggers")]
+    #[test]
+    fn the_drawmask_text_reaches_the_pieces() {
+        use crate::overdraw::{gate, set_mask};
+        let (_, _, scale, _, _, hole) = holes().into_iter().find(|h| h.2 == 1.0).unwrap();
+        let boxes = card_pixel_boxes(hole, view(0, 0, scale), scale);
+        let pieces = || card_plan(&boxes, None, super::masked_part).pieces.into_iter().flatten().map(|p| p.interior).collect::<Vec<bool>>();
+        let focus = || card_whole_refused(CardPath::Focus, super::masked_part);
+
+        assert_eq!((pieces(), focus()), (vec![false, false, false, false, true], false), "unarmed");
+        set_mask("card.interior");
+        assert_eq!((pieces(), focus()), (vec![false; 4], false));
+        assert!(!gate(Class::Card, 0.0, 0.0, 10.0, 10.0), "the card class is still drawn under card.interior");
+        set_mask("card.ring");
+        assert_eq!((pieces(), focus()), (vec![true], false));
+        assert!(!gate(Class::Card, 0.0, 0.0, 10.0, 10.0));
+        set_mask("card.focus");
+        assert_eq!((pieces(), focus()), (vec![false, false, false, false, true], true));
+        set_mask("card.ring, card.focus");
+        assert_eq!((pieces(), focus()), (vec![true], true));
+        set_mask("card.interior card.ring");
+        assert_eq!((pieces(), focus()), (Vec::<bool>::new(), false));
+        set_mask("card");
+        assert!(gate(Class::Card, 0.0, 0.0, 10.0, 10.0), "the whole class is refused");
+        assert_eq!((pieces(), focus()), (vec![false, false, false, false, true], false), "and a class mask is not a part mask");
+        set_mask("");
+        assert_eq!((pieces(), focus()), (vec![false, false, false, false, true], false), "disarmed");
+    }
+
+    /// The wiring no host test can drive: `draw_tex_core_in` hands the plan and the whole-card
+    /// refusal the real mask, and the refusal comes AFTER the card is booked in the card-path ledger
+    /// (the leg must book what its control books) and BEFORE the draw call.
+    #[test]
+    fn the_card_compositor_asks_the_mask_after_booking_and_before_drawing() {
+        let src = include_str!("gfx.rs");
+        let prod = &src[..src.find("\n#[cfg(test)]\nmod tests").expect("the unit tests")];
+        let from = prod.find("fn draw_tex_core_in(").expect("draw_tex_core_in");
+        let draw = &prod[from..from + prod[from..].find("\n}\n").expect("its end")];
+        let whole = draw.find("CardCut::Whole(path) =>").expect("the whole-card arm");
+        let (booked, refused, drawn) = (
+            draw[whole..].find("note_card_path(path").expect("booked"),
+            draw[whole..].find("card_whole_refused(path, masked_part)").expect("refused through the real mask"),
+            draw.find("glDrawArrays(GL_TRIANGLE_STRIP, 0, 4,").expect("drawn"),
+        );
+        assert!(booked < refused && whole + refused < drawn, "booked {booked}, refused {refused}, drawn {drawn}");
+        let split = draw.find("CardCut::Pieces(rect) =>").expect("the split arm");
+        assert!(draw[split..].find("note_card_path(CardPath::Split").is_some(), "a split card is booked before its parts are refused");
+    }
+
+    /// **The `LIVE_SCISSOR` invariant, pinned in the source.** The split cuts each piece to the clip
+    /// the caller held and puts that clip back, which is only right while `LIVE_SCISSOR` is the box
+    /// GL holds. So the GL scissor is touched in exactly three places: `scissor_box` and
+    /// `scissor_off` (which keep the record) and the piece loop of `draw_tex_core_in` (which leaves
+    /// through them). A fourth `glScissor` / `glEnable(GL_SCISSOR_TEST)` / `glDisable(GL_SCISSOR_TEST)`
+    /// anywhere in this file fails here, and so does an assignment of the record outside the two.
+    #[test]
+    fn only_scissor_box_scissor_off_and_the_piece_loop_touch_the_gl_scissor() {
+        let src = include_str!("gfx.rs");
+        let prod = &src[..src.find("\n#[cfg(test)]\nmod tests").expect("the unit tests")];
+        let code = |needle: &str| {
+            prod.lines().filter(|l| !l.trim_start().starts_with("//") && l.contains(needle) && !l.contains("fn glScissor")).count()
+        };
+        let body = |head: &str| {
+            let from = prod.find(head).unwrap_or_else(|| panic!("`{head}` is gone"));
+            let rest = &prod[from..];
+            &rest[..rest.find("\n}\n").expect("the end of the function")]
+        };
+        assert_eq!(code("glScissor("), 2, "a glScissor outside scissor_box and the card pieces");
+        assert_eq!(code("glEnable(GL_SCISSOR_TEST)"), 2, "a glEnable(GL_SCISSOR_TEST) outside scissor_box and the card pieces");
+        assert_eq!(code("glDisable(GL_SCISSOR_TEST)"), 1, "a glDisable(GL_SCISSOR_TEST) outside scissor_off");
+        assert_eq!(code("LIVE_SCISSOR = Some("), 1);
+        assert_eq!(code("LIVE_SCISSOR = None"), 1);
+        let on = body("unsafe fn scissor_box(");
+        assert!(on.contains("glEnable(GL_SCISSOR_TEST)") && on.contains("glScissor(") && on.contains("LIVE_SCISSOR = Some("));
+        let off = body("unsafe fn scissor_off(");
+        assert!(off.contains("glDisable(GL_SCISSOR_TEST)") && off.contains("LIVE_SCISSOR = None"));
+        let draw = body("fn draw_tex_core_in(");
+        assert!(draw.contains("card_plan(&boxes, LIVE_SCISSOR, masked_part)"), "the plan is cut to the record");
+        assert!(draw.contains("glScissor(") && draw.contains("glEnable(GL_SCISSOR_TEST)"), "the piece loop moved");
+        assert!(
+            draw.contains("Some(b) => scissor_box(") && draw.contains("None => scissor_off()"),
+            "the loop must leave the scissor through the two functions that keep the record"
+        );
+    }
+
+    /// A circle (radius = half the width) and anything whose inset swallows it has no interior:
+    /// it is drawn whole, as it always was. Same for a degenerate or invalid pixel grid.
+    #[test]
+    fn a_card_with_no_interior_is_not_split() {
+        for scale in SCALES {
+            let card = [10.0, 10.0, 190.0, 190.0];
+            let quad = [-2.0, -2.0, 214.0, 214.0];
+            assert!(card_interior(quad, card, 95.0, 1.0, scale).is_none(), "a circle has no box interior");
+            assert!(card_interior(quad, card, 100.0, 1.0, scale).is_none(), "a radius past half the width");
+        }
+    }
+
+    #[test]
+    fn a_split_needs_a_pixel_grid() {
+        let card = [10.0, 10.0, 250.0, 375.0];
+        let quad = [-2.0, -2.0, 274.0, 399.0];
+        for bad in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert!(card_interior(quad, card, 14.0, 1.0, bad).is_none(), "scale {bad}");
+        }
+        assert!(card_interior(quad, card, 14.0, 1.0, 1.0).is_some());
+    }
+
+    /// How each kind of draw is cut: only a resting, rounded card of the card class is a candidate
+    /// for pieces, and every other card says WHY it is whole (the counter books it by reason).
+    #[test]
+    fn only_a_resting_rounded_card_is_split() {
+        let rect = [1.0, 2.0, 3.0, 4.0];
+        let cut = |class, radius, focus, dy, on| card_cut(class, radius, focus, dy, on, rect);
+        assert_eq!(cut(Class::Card, 14.0, 0.0, 0.0, true), CardCut::Pieces(rect));
+        assert_eq!(cut(Class::Card, 14.0, -1.0, 0.0, true), CardCut::Pieces(rect), "a negative focus is still at rest");
+        assert_eq!(cut(Class::Card, 14.0, 0.0, -3.0, true), CardCut::Pieces(rect), "a negative dy clamps to rest");
+        assert_eq!(cut(Class::Card, 14.0, 0.01, 0.0, true), CardCut::Whole(CardPath::Focus), "the focus program");
+        assert_eq!(cut(Class::Card, 14.0, 0.0, 0.5, true), CardCut::Whole(CardPath::Focus), "a risen shadow moves the quad's centre off the card's");
+        assert_eq!(cut(Class::Card, 0.0, 0.0, 0.0, true), CardCut::Whole(CardPath::Plain), "radius 0 is the shader's whole-quad plain branch");
+        assert_eq!(cut(Class::Card, 0.49, 0.0, 0.0, true), CardCut::Whole(CardPath::Plain));
+        assert_eq!(cut(Class::Card, 14.0, 0.0, 0.0, false), CardCut::Whole(CardPath::Off), "the dev switch is its own bucket");
+        assert_eq!(cut(Class::Card, 14.0, 0.3, 0.0, false), CardCut::Whole(CardPath::Focus), "a focused card is the focus path whatever the switch says");
+        assert_eq!(cut(Class::Image, 14.0, 0.0, 0.0, true), CardCut::None, "a rounded image without a pad is not a card");
+        assert_eq!(cut(Class::Glass, 14.0, 0.0, 0.0, true), CardCut::None);
+    }
+
+    /// **The plain texture program is chosen exactly where the shader takes its first exit.** Graded
+    /// against the replica of `fs_img.frag` ([`plain_exit`]) over every card shape, a ladder of radii
+    /// around the 0.5 threshold and a spread of points: a draw is routed to the plain program iff the
+    /// shader would return 1 (`u_card.z < 0.5`) for ALL of them, whatever the rim and pad say, and a
+    /// card [`card_cut`] splits (rounded, resting) is never one. The interior piece of that split is
+    /// drawn with a radius of 0 and is routed, and the replica agrees it is plain at every point.
+    #[test]
+    fn the_plain_program_is_chosen_exactly_where_the_shader_takes_its_first_exit() {
+        let radii = [-2.0f32, 0.0, 0.25, 0.4999, 0.5, 0.5001, 1.0, 2.0, 14.0, 95.0, 125.0];
+        for (w, h, _, rimw, pad) in cards() {
+            let (chw, chh) = (w * 0.5, h * 0.5);
+            let points = [[0.0, 0.0], [chw - 1.0, 0.0], [0.0, chh - 1.0], [chw, chh], [chw + pad, chh + pad], [-chw, chh]];
+            for radius in radii {
+                let geo = image_card_geometry(chw, chh, radius);
+                let routed = plain_texture_program(Some(()), false, radius).is_some();
+                for p in points {
+                    assert_eq!(
+                        plain_exit(geo, p) == 1,
+                        routed,
+                        "card {w}x{h} r{radius} rim {rimw} pad {pad}: shader replica and routing disagree at {p:?}"
+                    );
+                }
+                let rect = [0.0, 0.0, w, h];
+                if matches!(card_cut(Class::Card, radius, 0.0, 0.0, true, rect), CardCut::Pieces(_)) {
+                    assert!(!routed, "card {w}x{h} r{radius}: a split card's ring is never the plain program");
+                }
+            }
+            let interior = image_card_geometry(chw, chh, 0.0);
+            assert!(plain_texture_program(Some(()), false, 0.0).is_some(), "the interior piece is routed");
+            for p in points {
+                assert_eq!(plain_exit(interior, p), 1, "the interior piece's u_card is the shader's plain exit at {p:?}");
+            }
+        }
+    }
+
+    /// `bands_around` of a snapped hole and `snap_inner` agree with the shadow's own contract
+    /// (`shadow_bands`): same hole, same bands.
+    #[test]
+    fn the_hole_is_the_shadows_snapped_inner() {
+        let quad = [0.0, 0.0, 100.0, 80.0];
+        let hole = snap_inner(quad, [20.2, 10.1, 50.0, 40.0], 1.0).unwrap();
+        assert_eq!(hole, [21.0, 11.0, 70.0, 50.0]);
+        let (b, n) = bands_around(quad, hole);
+        assert_eq!(n, 4);
+        let sum: f64 = b[..n].iter().map(|r| r[2] as f64 * r[3] as f64).sum();
+        assert_eq!(sum, 100.0 * 80.0 - 49.0 * 39.0);
+        assert_eq!(snap_inner(quad, [20.2, 20.2, 0.5, 5.0], 1.0), None);
+    }
+
+    /// What the split buys: the share of a resting card's quad (and of the card itself) that no
+    /// longer runs the card math. Printed so a run states it (`cargo test -- --nocapture`); asserted
+    /// only as a floor. The quad's own ring is the shadow's pad (12 px a side at rest) plus the
+    /// card's border band, which is why the quad's share is lower than the card's.
+    #[test]
+    fn most_of_a_poster_quad_is_interior() {
+        for (name, c) in [
+            ("Home poster 250x375", (250.0, 375.0, 14.0, 1.0, 12.0)),
+            ("episode still 420x236", (420.0, 236.0, 14.0, 1.0, 12.0)),
+            ("grid poster 200x300", (200.0, 300.0, 14.0, 1.0, 8.0)),
+        ] {
+            let (card, quad) = quad_of(c, (120.0, 80.0));
+            let hole = card_interior(quad, card, c.2, c.3, 1.0).expect("a poster has an interior");
+            let inner = ((hole[2] - hole[0]) * (hole[3] - hole[1])) as f64;
+            let (of_quad, of_card) = (inner / (quad[2] * quad[3]) as f64, inner / (card[2] * card[3]) as f64);
+            eprintln!(
+                "{name}: interior {inner:.0} px = {:.1}% of the quad ({:.0} px), {:.1}% of the card; the ring is {:.0} px",
+                of_quad * 100.0, quad[2] * quad[3], of_card * 100.0, (quad[2] * quad[3]) as f64 - inner
+            );
+            assert!(of_quad > 0.60 && of_card > 0.70, "{name}: {of_quad} {of_card}");
+        }
+    }
+}

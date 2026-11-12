@@ -1,0 +1,123 @@
+//! Shared fixtures and helpers for the `ui::widgets` test modules split out below.
+
+use super::*;
+use crate::tile::Resume;
+
+// ── The poster's state mark: one vocabulary, one mark at a time ───────────────────────────
+//
+// `card` needs a GL context, so the CHOICE is what a host test can reach — and the choice is
+// where this has been wrong before: the mark used to say "unwatched" in amber, which is the
+// opposite claim, and the bar/disc precedence is only observable on an item PMS reports as both.
+
+/// A MOVIE's facts at a given watched state, `in_progress` being the application's answer to its
+/// resume rule (30 of 100 minutes in, when it is). For a LEAF the two flags really are each
+/// other's negation — which is exactly what stops being true for a container, hence the show cases
+/// below. The resume rule's own edges (an offset past the end, no runtime) are the application's
+/// and are graded where it applies them, in `screens::registry::tile_facts`.
+pub(super) fn row(watched: bool, in_progress: bool) -> TileFacts<'static> {
+    TileFacts {
+        watched,
+        unwatched: !watched,
+        resume: in_progress.then_some(Resume { frac: 0.3, left_ms: 70 * 60 * 1000 }),
+        ..Default::default()
+    }
+}
+
+// ── PageGround: the policy every browsing screen shares ────────────────────────────────────
+//
+// Pure over `theme` tokens and the real corner springs, as the block above is.
+
+pub(super) fn ground_hash(ground: &PageGround) -> u64 {
+    let mut c = plx_machine::machine::Canon::new();
+    ground.write_motion(&mut c);
+    c.finish()
+}
+
+pub(super) struct StatusMetrics;
+
+impl plx_machine::machine::Measure for StatusMetrics {
+    fn width(&self, _: &core::ffi::CStr, size: i32, bold: bool) -> f32 {
+        // the status note wraps in the reason rung's regular face; everything else measured is
+        // the action pill
+        if size == STATUS_REASON_SZ && !bold {
+            return 96.0;
+        }
+        assert_eq!(size, STATUS_CAP_SZ);
+        assert!(bold, "the action uses the Button's bold face");
+        96.0
+    }
+    fn cap_h(&self, _: i32) -> f32 { panic!("status layout uses line boxes") }
+    fn line_h(&self, size: i32) -> f32 {
+        match size {
+            STATUS_FAILED_VERDICT_SZ => 52.0,
+            STATUS_CAP_SZ => 40.0,
+            STATUS_REASON_SZ => 28.0,
+            _ => panic!("no status rung is {size}"),
+        }
+    }
+}
+
+// ---- the legibility contract itself -------------------------------------------------------
+
+/// One sRGB channel, linearized (WCAG 2.x) — see the `AmbientWash` block above for why this
+/// yardstick lives in the tests rather than in the app.
+pub(super) fn srgb_lin(c: f32) -> f32 {
+    if c <= 0.03928 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// The contrast ratio an ink gets over `art` (a flat encoded grey standing in for a backdrop)
+/// once a scrim of total alpha `a` is composited over it. The panel is plain 888 with no sRGB
+/// framebuffer anywhere in the tree, so token values ARE sRGB codes and GL's blend is a
+/// straight lerp in that space: `c = art·(1−a) + SCRIM_INK·a`.
+pub(super) fn contrast_over_art(ink: [f32; 4], art: f32, a: f32) -> f32 {
+    let comp: Vec<f32> = (0..3)
+        .map(|i| art * (1.0 - a) + theme::SCRIM_INK[i] * a)
+        .collect();
+    let l1 = 0.2126 * srgb_lin(ink[0]) + 0.7152 * srgb_lin(ink[1]) + 0.0722 * srgb_lin(ink[2]);
+    let l2 =
+        0.2126 * srgb_lin(comp[0]) + 0.7152 * srgb_lin(comp[1]) + 0.0722 * srgb_lin(comp[2]);
+    (l1.max(l2) + 0.05) / (l1.min(l2) + 0.05)
+}
+
+/// Two DISPLAY-48 lines: the first cap top through the second line's baseline. The cap height
+/// is quoted from the device font; the shared leading remains the source for the inter-line step.
+pub(super) const HERO_CAP_H: f32 = 35.0 + theme::hero::TITLE_LEAD;
+
+/// The same line on the detail page, where the band's anchor is `TITLE_BOTTOM` outright.
+pub(super) fn detail_title_cap_top() -> f32 {
+    crate::detail_layout::TITLE_BOTTOM - HERO_CAP_H
+}
+
+/// A spread of pill widths. Deliberately wider than the device's (a real "TV" pill measures
+/// ≈67px at `size::BODY`, "Kids & Family Movies" ≈350) so a modest pill count crosses
+/// [`TAB_VIEW_MAX`] and the overflow arithmetic is exercised without inventing 30 libraries —
+/// the thresholds below are therefore about the geometry, not about a particular server.
+pub(super) fn widths_for(n: usize) -> Vec<f32> {
+    (0..n).map(|i| 140.0 + (i % 5) as f32 * 60.0).collect()
+}
+
+// `Spring::step` is `gfx::spring`, pure and already driven frame-by-frame by `card_row.rs`'s
+// tests, so capsule MOTION is fully host-testable. What is not: anything through
+// `with_tab_metrics` (it measures with SDL2_ttf), which is why these drive the pure
+// `Capsule`/`TabStrip` against `widths_for` spans instead of the real row.
+
+/// One frame at the app's own cadence, the value `card_row.rs`'s tests step with.
+pub(super) const DT: f32 = 1.0 / 60.0;
+
+/// Pill `i`'s content-space `(x, w)` in the fixture strip — the same pair
+/// [`StripRender::update`] hands the strip, built from the same two functions.
+pub(super) fn span_of(w: &[f32], i: usize) -> (f32, f32) {
+    (tab_pill_x(w, i), w[i])
+}
+
+/// The capsule/strip tests drive `Capsule::step`, whose landing frame `Spring::jump`s — and
+/// `Spring::jump` reports to `plx_machine::idle`'s process-global dirty flag. So they are serial by
+/// obligation, not precaution (`xfade.rs`'s rule): under parallel libtest they intermittently
+/// failed OTHER modules' "a settled screen asks for nothing" assertions.
+pub(super) fn serial_for_motion() -> plx_base::testlock::Serial {
+    plx_base::testlock::serial()
+}
