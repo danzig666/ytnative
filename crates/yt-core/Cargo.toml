@@ -13,3 +13,5 @@ serde_json.workspace = true
 uuid.workspace = true
 reqwest.workspace = true
 sha2 = "0.10"
+# Already in the tree via rustls: PBKDF2 for account passwords, CSPRNG for nonces.
+ring = "0.17"

@@ -2096,6 +2096,7 @@ dependencies = [
  "anyhow",
  "regex",
  "reqwest",
+ "ring",
  "serde",
  "serde_json",
  "sha2",
@@ -2126,6 +2127,7 @@ dependencies = [
  "plx_platform",
  "plx_ui",
  "reqwest",
+ "serde",
  "serde_json",
  "yt-core",
 ]

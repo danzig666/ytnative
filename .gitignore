@@ -6,6 +6,8 @@
 
 # secrets / personal data (never commit: the repo is public)
 token.json
+accounts.json
+accounts.json.tmp
 *.token.json
 login.log
 

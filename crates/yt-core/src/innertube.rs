@@ -54,7 +54,19 @@ pub struct Api<'a> {
 }
 
 impl Api<'_> {
-    pub fn call(&self, client: Client, endpoint: &str, mut body: Value, bearer: Option<&str>) -> Result<Value> {
+    pub fn call(&self, client: Client, endpoint: &str, body: Value, bearer: Option<&str>) -> Result<Value> {
+        self.call_with(client, endpoint, body, bearer, &[])
+    }
+
+    /// `call` with extra request headers (e.g. `X-Goog-PageId` for a brand account).
+    pub fn call_with(
+        &self,
+        client: Client,
+        endpoint: &str,
+        mut body: Value,
+        bearer: Option<&str>,
+        headers: &[(&str, &str)],
+    ) -> Result<Value> {
         let (ctx, name_id, version) = client.context(self.cfg);
         body["context"] = json!({ "client": ctx });
         let mut req = self
@@ -70,6 +82,9 @@ impl Api<'_> {
         }
         if let Some(t) = bearer {
             req = req.bearer_auth(t);
+        }
+        for (k, v) in headers {
+            req = req.header(*k, *v);
         }
         let resp = req.send()?;
         let status = resp.status();
