@@ -465,6 +465,7 @@ impl Screen<YtHost> for BrowseScreen {
             ui::reset_focused_caption();
             Part::draw(&mut view, f, Rect::new(0.0, 0.0, 1920.0, 1080.0));
             ui::draw_focused_caption(p, f.measure, 20.0);
+            ui::draw_row_arrows(p, LEFT, 1920.0 - LEFT + 40.0);
             view.record_stops(f);
         } else if src.cards.is_empty() {
             common::empty_state(p, feed, Rect::new(LEFT, 150.0, 1920.0 - 2.0 * LEFT, 800.0));

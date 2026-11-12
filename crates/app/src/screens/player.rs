@@ -493,7 +493,8 @@ impl Screen<YtHost> for PlayerScreen {
             let on = i == 0 && subs_on;
             ui::fill(p, b, b.h / 2.0, if hot { [1.0, 1.0, 1.0, 0.9] } else if on { [1.0, 1.0, 1.0, 0.22] } else { [1.0, 1.0, 1.0, 0.10] });
             let ink = if hot { [0.0, 0.0, 0.0, 1.0] } else { ui::WHITE };
-            ui::text(p, label, b.x + b.w / 2.0, b.y + 9.0, 24, ink, ui::ALIGN_CENTER, on || hot);
+            let (size, dy) = if i == 1 { (30, 5.0) } else { (24, 9.0) };
+            ui::text(p, label, b.x + b.w / 2.0, b.y + dy, size, if i == 1 && !hot { ui::WHITE } else { ink }, ui::ALIGN_CENTER, on || hot);
         }
         if cx.views.store.settings.show_clock {
             ui::text(p, &common::clock(&cx.views), 1824.0, 28.0, 34, ui::WHITE, ui::ALIGN_RIGHT, false);

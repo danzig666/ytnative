@@ -66,8 +66,44 @@ thread_local! {
     static MARQUEE: std::cell::RefCell<(String, Option<std::time::Instant>)> = const { std::cell::RefCell::new((String::new(), None)) };
 }
 
+thread_local! {
+    /// Drawn cards per row this frame: (row centre y, height, leftmost x, rightmost edge).
+    static ROWS_DRAWN: std::cell::RefCell<Vec<(f32, f32, f32, f32)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn note_card(r: Rect) {
+    ROWS_DRAWN.with(|v| {
+        let mut v = v.borrow_mut();
+        let cy = r.y + r.h / 2.0;
+        match v.iter_mut().find(|e| (e.0 - cy).abs() < r.h / 2.0) {
+            Some(e) => {
+                e.2 = e.2.min(r.x);
+                e.3 = e.3.max(r.x + r.w);
+            }
+            None => v.push((cy, r.h, r.x, r.x + r.w)),
+        }
+    });
+}
+
+/// Faint arrows at the ends of each card row that runs on past the screen edge (more videos
+/// to the left / right). Rows are what the cards drawn this frame span.
+pub fn draw_row_arrows(p: Painter, left: f32, right: f32) {
+    let rows = ROWS_DRAWN.with(|v| std::mem::take(&mut *v.borrow_mut()));
+    for (cy, _h, min_x, max_r) in rows {
+        if min_x < left - 6.0 {
+            fill(p, Rect::new(0.0, cy - 60.0, 64.0, 120.0), 0.0, [0.0, 0.0, 0.0, 0.35]);
+            text(p, "\u{2039}", 32.0, cy - 50.0, 72, [1.0, 1.0, 1.0, 0.55], ALIGN_CENTER, false);
+        }
+        if max_r > right + 6.0 {
+            fill(p, Rect::new(1856.0, cy - 60.0, 64.0, 120.0), 0.0, [0.0, 0.0, 0.0, 0.35]);
+            text(p, "\u{203A}", 1888.0, cy - 50.0, 72, [1.0, 1.0, 1.0, 0.55], ALIGN_CENTER, false);
+        }
+    }
+}
+
 /// Forgets a deferred caption (call before a page draws its cards).
 pub fn reset_focused_caption() {
+    ROWS_DRAWN.with(|v| v.borrow_mut().clear());
     FOCUSED_CAPTION.with(|f| *f.borrow_mut() = None);
 }
 
@@ -276,6 +312,9 @@ impl CardSource<YtHost> for CardsSrc<'_> {
         self.more
     }
     fn overlay(&self, p: Painter, i: usize, tile: &plx_ui::cards::Tile, m: &dyn plx_machine::machine::Measure) {
+        if tile.scale <= 1.01 {
+            note_card(p.to_screen(tile.rect).0);
+        }
         if titles_under() {
             // Title (two lines) and channel / views / age under every thumbnail, as SmartTube does.
             let (r, c) = (tile.rect, &self.cards[i]);
