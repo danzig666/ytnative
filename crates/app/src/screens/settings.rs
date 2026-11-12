@@ -181,7 +181,8 @@ fn items(page: SettingsPage) -> Vec<Item> {
             Info("On your phone", |_| "YouTube \u{203A} Cast \u{203A} Link with TV code".into()),
         ],
         SettingsPage::About => vec![
-            Action("Sign in / switch account", |fx| fx.push(Fx::Nav(NavOp::Push(YtArg::SignIn)))),
+            Action("Accounts (switch, add, remove)", |fx| fx.push(Fx::Nav(NavOp::Push(YtArg::Accounts)))),
+            Action("Sign in with a code", |fx| fx.push(Fx::Nav(NavOp::Push(YtArg::SignIn)))),
             Action("Sign out", |fx| {
                 fx.push(Fx::App(YtFx::SignOut));
                 fx.push(Fx::App(YtFx::Toast("Signed out".into())));

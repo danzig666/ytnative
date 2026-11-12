@@ -43,6 +43,8 @@ pub enum YtArg {
     Menu(u32),
     /// Player options panel.
     PlayerMenu,
+    Accounts,
+    Comments(String),
 }
 
 impl ScreenArg for YtArg {
@@ -59,6 +61,8 @@ impl ScreenArg for YtArg {
             YtArg::SignIn => 6,
             YtArg::Menu(_) => 7,
             YtArg::PlayerMenu => 8,
+            YtArg::Accounts => 9,
+            YtArg::Comments(_) => 10,
         })
     }
     fn title(&self) -> Option<&str> {
@@ -90,7 +94,21 @@ pub enum SignIn {
     Failed(String),
 }
 
+/// Things the user does to their account / content.
+#[derive(Clone, Debug)]
+pub enum UserAction {
+    Rate(String, yt_core::actions::Rating),
+    Subscribe { channel_id: String, subscribe: bool },
+    WatchLater(String),
+    /// One of a card's own YouTube menu items (Not interested, Remove from history, ...).
+    Menu(yt_core::actions::MenuAction),
+    SwitchAccount(String),
+    RemoveAccount(String),
+}
+
 pub enum YtFx {
+    Act(UserAction),
+    LoadComments { video_id: String, continuation: Option<String> },
     Load(FeedKey),
     More(FeedKey),
     Play { video_id: String, playlist: Option<String> },
@@ -114,6 +132,8 @@ pub enum YtMsg {
     Failed(FeedKey, String),
     Suggestions,
     SignIn,
+    Acted,
+    Comments,
 }
 
 /// Snapshot of playback state for the screens, refreshed once per frame.
@@ -170,6 +190,8 @@ impl Mounter<YtHost> for Mount {
             YtArg::SignIn => Box::new(screens::signin::SignInScreen::new(entry)),
             YtArg::Menu(elem) => Box::new(screens::menu::MenuScreen::card(entry, *elem, cx)),
             YtArg::PlayerMenu => Box::new(screens::menu::MenuScreen::player(entry, cx)),
+            YtArg::Accounts => Box::new(screens::accounts::AccountsScreen::new(entry)),
+            YtArg::Comments(v) => Box::new(screens::comments::CommentsScreen::new(entry, v.clone())),
         }
     }
 }
@@ -178,6 +200,8 @@ type Done = (Addr, Work);
 
 /// Results workers post back to the main thread.
 enum Work {
+    Toast { msg: String, accounts_changed: bool },
+    Comments { video_id: String, page: Option<yt_core::comments::CommentsPage>, append: bool },
     Page { key: FeedKey, page: yt_core::model::Page, append: bool, failed: Option<String> },
     Suggestions(Vec<String>),
     SignIn(SignIn),
@@ -204,9 +228,8 @@ pub struct AppRig {
 
 impl AppRig {
     pub fn new() -> Self {
-        let mut store = Store::new(Settings::load());
-        store.signed_in = yt_core::paths::data_file("token.json").exists();
-        AppRig {
+        let store = Store::new(Settings::load());
+        let mut rig = AppRig {
             mounter: Mount,
             store,
             player_view: PlayerView::default(),
@@ -221,7 +244,21 @@ impl AppRig {
             sb: Default::default(),
             sb_offer: None,
             pending_start: None,
-        }
+        };
+        rig.refresh_accounts();
+        rig
+    }
+
+    /// Re-reads the account list (cheap: one small JSON file).
+    pub fn refresh_accounts(&mut self) {
+        let list = yt_core::accounts::list().unwrap_or_default();
+        let current = yt_core::accounts::current().ok().flatten();
+        self.store.accounts = list
+            .iter()
+            .map(|a| crate::store::AccountRow { id: a.id.clone(), name: a.name.clone(), current: current.as_ref().is_some_and(|c| c.id == a.id) })
+            .collect();
+        self.store.signed_in = current.is_some();
+        self.store.account = current.map(|c| c.name);
     }
 
     fn next_addr(&mut self, to: MachineId) -> Addr {
@@ -268,16 +305,41 @@ impl AppRig {
                         out.push((addr, YtMsg::Loaded(key)));
                     }
                 }
+                Work::Toast { msg, accounts_changed } => {
+                    self.store.toast(msg, now_ms);
+                    if accounts_changed {
+                        self.store.feeds.clear();
+                        *self.session.lock().unwrap() = None;
+                        self.refresh_accounts();
+                    }
+                    out.push((addr, YtMsg::Acted));
+                }
+                Work::Comments { video_id, page, append } => {
+                    let c = self.store.comments.entry(video_id).or_default();
+                    match page {
+                        Some(p) => {
+                            if append {
+                                c.items.extend(p.comments);
+                            } else {
+                                c.items = p.comments;
+                            }
+                            c.next = p.next;
+                            c.error = None;
+                        }
+                        None => c.error = Some("Couldn't load comments".into()),
+                    }
+                    c.loading = false;
+                    out.push((addr, YtMsg::Comments));
+                }
                 Work::Suggestions(s) => {
                     self.store.suggestions = s;
                     out.push((addr, YtMsg::Suggestions));
                 }
                 Work::SignIn(s) => {
-                    if let SignIn::Done(name) = &s {
-                        self.store.signed_in = true;
-                        self.store.account = Some(name.clone());
+                    if let SignIn::Done(_) = &s {
                         self.store.feeds.clear();
                         *self.session.lock().unwrap() = None;
+                        self.refresh_accounts();
                     }
                     self.signin = s;
                     out.push((addr, YtMsg::SignIn));
@@ -351,6 +413,52 @@ pub fn sb_action(s: &Settings, c: &yt_core::ext::sponsorblock::Category) -> crat
         C::Preview => s.sb_preview,
         C::Filler => s.sb_filler,
         _ => SbAction::Off,
+    }
+}
+
+/// Worker: performs a user action; returns the message to show and whether accounts changed.
+fn run_action(session: &Mutex<Option<yt_core::session::Session>>, a: &UserAction) -> (String, bool) {
+    use yt_core::actions::Rating;
+    let r = match a {
+        UserAction::Rate(v, rating) => with_session(session, |s| s.rate(v, *rating)).map(|_| {
+            match rating {
+                Rating::Like => "Liked",
+                Rating::Dislike => "Disliked",
+                Rating::None => "Rating removed",
+            }
+            .to_string()
+        }),
+        UserAction::Subscribe { channel_id, subscribe } => with_session(session, |s| {
+            let info = s.subscribe_info(channel_id).ok().flatten();
+            if *subscribe {
+                s.subscribe(channel_id, info.as_ref().and_then(|i| i.subscribe_params.as_deref()))?;
+                Ok("Subscribed".to_string())
+            } else {
+                s.unsubscribe(channel_id, info.as_ref().and_then(|i| i.unsubscribe_params.as_deref()))?;
+                Ok("Unsubscribed".to_string())
+            }
+        }),
+        UserAction::WatchLater(v) => with_session(session, |s| s.watch_later_add(v)).map(|_| "Saved to Watch later".to_string()),
+        UserAction::Menu(m) => with_session(session, |s| s.run_menu_action(m)).map(|ok| if ok { "Done".to_string() } else { "Not available".to_string() }),
+        UserAction::SwitchAccount(id) => {
+            return match yt_core::accounts::switch(id) {
+                Ok(()) => ("Switched account".into(), true),
+                Err(e) => (format!("Couldn't switch: {e}"), false),
+            }
+        }
+        UserAction::RemoveAccount(id) => {
+            return match yt_core::accounts::remove(id) {
+                Ok(_) => ("Account removed".into(), true),
+                Err(e) => (format!("Couldn't remove: {e}"), false),
+            }
+        }
+    };
+    match r {
+        Ok(m) => (m, false),
+        Err(e) => {
+            crate::log(&format!("action {a:?}: {e:#}"));
+            ("That didn't work, try again".into(), false)
+        }
     }
 }
 
@@ -471,12 +579,41 @@ impl Rig<YtHost> for AppRig {
             }
             YtFx::SignInCancel => self.signin_cancel.store(true, std::sync::atomic::Ordering::SeqCst),
             YtFx::SignOut => {
+                if let Ok(Some(cur)) = yt_core::accounts::current() {
+                    let _ = yt_core::accounts::remove(&cur.id);
+                }
                 let _ = std::fs::remove_file(yt_core::paths::data_file("token.json"));
-                self.store.signed_in = false;
-                self.store.account = None;
                 self.store.feeds.clear();
                 *self.session.lock().unwrap() = None;
                 self.signin = SignIn::Idle;
+                self.refresh_accounts();
+            }
+            YtFx::Act(action) => {
+                self.spawn(from, "action", move |s| {
+                    let (r, changed) = run_action(s, &action);
+                    Work::Toast { msg: r, accounts_changed: changed }
+                });
+            }
+            YtFx::LoadComments { video_id, continuation } => {
+                let c = self.store.comments.entry(video_id.clone()).or_default();
+                if c.loading {
+                    return;
+                }
+                c.loading = true;
+                let append = continuation.is_some();
+                self.spawn(from, "comments", move |s| {
+                    let page = with_session(s, |s| {
+                        let token = match &continuation {
+                            Some(t) => t.clone(),
+                            None => s.watch(&video_id, None)?.comments_continuation.ok_or_else(|| anyhow::anyhow!("comments are off"))?,
+                        };
+                        s.comments(&token)
+                    });
+                    if let Err(e) = &page {
+                        crate::log(&format!("comments: {e:#}"));
+                    }
+                    Work::Comments { video_id, page: page.ok(), append }
+                });
             }
             YtFx::Toast(m) => self.store.toast(m, self.now_ms),
         }

@@ -141,7 +141,11 @@ impl Player {
         let (status, media_id) = (self.status.clone(), self.media_id.clone());
         let spawned = plx_base::task::spawn("play", move || {
             match run(luna, &video_id, &window_id, &session, &status, &media_id, prefs, start_ms) {
-                Ok(()) => load_extras(&video_id, &session, &status, &extras),
+                Ok(()) => {
+                    let (v, s2, st2) = (video_id.clone(), session.clone(), status.clone());
+                    let _ = plx_base::task::spawn("track", move || track_history(&v, &s2, &st2));
+                    load_extras(&video_id, &session, &status, &extras)
+                }
                 Err(e) => {
                     crate::log(&format!("player: {e:#}"));
                     status.lock().unwrap().phase = Phase::Failed(format!("{e:#}"));
@@ -314,6 +318,42 @@ fn on_event(status: &Mutex<Status>, msg: &str) {
     }
     drop(s);
     plx_machine::present::wake_from_worker();
+}
+
+/// Worker: reports playback to YouTube (watch history, resume position) on YouTube's own
+/// schedule until this video stops playing.
+fn track_history(video_id: &str, session: &Mutex<Option<yt_core::session::Session>>, status: &Arc<Mutex<Status>>) {
+    let mut t = match crate::host::with_session(session, |s| s.tracking_for(video_id)) {
+        Ok(t) => t,
+        Err(e) => {
+            crate::log(&format!("history: no tracking for {video_id}: {e:#}"));
+            return;
+        }
+    };
+    let pos = |s: &Status| s.position_ms as f64 / 1000.0;
+    let start = pos(&status.lock().unwrap());
+    if let Err(e) = crate::host::with_session(session, |s| s.report_start(&mut t, start)) {
+        crate::log(&format!("history: start ping failed: {e:#}"));
+    }
+    let mut last = start;
+    loop {
+        let wait = t.next_flush_secs().max(5);
+        for _ in 0..wait {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let s = status.lock().unwrap();
+            if s.video_id != video_id || matches!(s.phase, Phase::Idle | Phase::Failed(_) | Phase::Ended) {
+                let end = if s.video_id == video_id { pos(&s) } else { last };
+                drop(s);
+                let _ = crate::host::with_session(session, |se| se.report_end(&mut t, end));
+                return;
+            }
+            last = pos(&s);
+        }
+        let playing = status.lock().unwrap().phase == Phase::Playing;
+        if let Err(e) = crate::host::with_session(session, |s| s.report_progress(&mut t, last, playing)) {
+            crate::log(&format!("history: ping failed: {e:#}"));
+        }
+    }
 }
 
 static EXT: std::sync::OnceLock<yt_core::ext::Ext> = std::sync::OnceLock::new();

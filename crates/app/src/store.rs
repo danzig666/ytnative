@@ -146,8 +146,25 @@ pub struct Feed {
     pub gen: u32,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct AccountRow {
+    pub id: String,
+    pub name: String,
+    pub current: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Comments {
+    pub items: Vec<yt_core::comments::Comment>,
+    pub next: Option<String>,
+    pub loading: bool,
+    pub error: Option<String>,
+}
+
 #[derive(Default)]
 pub struct Store {
+    pub accounts: Vec<AccountRow>,
+    pub comments: HashMap<String, Comments>,
     pub feeds: HashMap<FeedKey, Feed>,
     pub settings: Settings,
     pub account: Option<String>,

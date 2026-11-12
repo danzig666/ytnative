@@ -101,7 +101,7 @@ impl BrowseScreen {
             }
             NavItem::Search => fx.push(Fx::Nav(NavOp::Push(YtArg::Search))),
             NavItem::Settings => fx.push(Fx::Nav(NavOp::Push(YtArg::Settings(crate::host::SettingsPage::Root)))),
-            NavItem::Account => fx.push(Fx::Nav(NavOp::Push(YtArg::SignIn))),
+            NavItem::Account => fx.push(Fx::Nav(NavOp::Push(if cx.views.store.signed_in { YtArg::Accounts } else { YtArg::SignIn }))),
         }
     }
 

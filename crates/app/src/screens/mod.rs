@@ -1,4 +1,6 @@
+pub mod accounts;
 pub mod browse;
+pub mod comments;
 pub mod common;
 pub mod feed;
 pub mod menu;

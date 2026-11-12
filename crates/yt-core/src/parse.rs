@@ -194,6 +194,7 @@ fn tile(t: &Value) -> Option<Item> {
         badge,
         progress,
         endpoint,
+        menu: crate::actions::menu_actions(t),
     })
 }
 
@@ -259,6 +260,7 @@ fn lockup(l: &Value) -> Option<Item> {
         badge,
         progress,
         endpoint,
+        menu: crate::actions::menu_actions(l),
     })
 }
 

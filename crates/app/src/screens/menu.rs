@@ -1,7 +1,7 @@
 //! Modal menus: a card's actions (hold OK on a card) and the player options (Up in the player).
 //! A panel on the right; OK runs an action, Left/Right change a player option in place.
 
-use crate::host::{YtArg, YtFx, YtHost};
+use crate::host::{UserAction, YtArg, YtFx, YtHost};
 use crate::settings::Repeat;
 use crate::store::FeedKey;
 use crate::ui::{self, Row, VList};
@@ -25,6 +25,8 @@ enum Act {
     OpenPlaylist(String),
     BlockChannel(String),
     SearchFor(String),
+    User(UserAction),
+    Comments(String),
     Speed,
     MaxQuality,
     Subtitles,
@@ -76,6 +78,21 @@ impl MenuScreen {
                     acts.push(("Open".into(), Act::OpenPlaylist(browse_id.clone())));
                 }
             }
+            if let Some(v) = card.video_id() {
+                acts.push(("Save to Watch later".to_string(), Act::User(UserAction::WatchLater(v.to_string()))));
+            }
+            // The card's own YouTube menu (Not interested, Don't recommend channel, Remove from
+            // history, ...). Lazy "More" panels and plain navigation entries are left out.
+            for m in &card.item.menu {
+                use yt_core::actions::{MenuCommand, MenuKind};
+                let useful = matches!(
+                    m.kind,
+                    MenuKind::NotInterested | MenuKind::DontRecommendChannel | MenuKind::RemoveFromHistory | MenuKind::RemoveFromWatchLater
+                ) || matches!(m.command, MenuCommand::Feedback { .. });
+                if useful && !m.label.is_empty() {
+                    acts.push((m.label.clone(), Act::User(UserAction::Menu(m.clone()))));
+                }
+            }
             if let Some(ch) = &card.item.channel {
                 acts.push((format!("More from {ch}"), Act::SearchFor(ch.clone())));
                 acts.push((format!("Block {ch}"), Act::BlockChannel(ch.clone())));
@@ -86,14 +103,41 @@ impl MenuScreen {
     }
 
     pub fn player(entry: EntryId, cx: &Cx<'_, YtHost>) -> Self {
-        let _ = cx;
-        let acts = vec![
+        let st = cx.views.player;
+        let mut acts = Vec::new();
+        if !st.video_id.is_empty() {
+            use yt_core::actions::Rating;
+            let liked = st.extras.watch.as_ref().map(|w| w.like_status);
+            let is_like = matches!(liked, Some(yt_core::watch::LikeStatus::Like));
+            let is_dislike = matches!(liked, Some(yt_core::watch::LikeStatus::Dislike));
+            acts.push((
+                if is_like { "Remove like".to_string() } else { "Like".to_string() },
+                Act::User(UserAction::Rate(st.video_id.clone(), if is_like { Rating::None } else { Rating::Like })),
+            ));
+            acts.push((
+                if is_dislike { "Remove dislike".to_string() } else { "Dislike".to_string() },
+                Act::User(UserAction::Rate(st.video_id.clone(), if is_dislike { Rating::None } else { Rating::Dislike })),
+            ));
+            if !st.channel_id.is_empty() {
+                let subscribed = st.extras.watch.as_ref().and_then(|w| w.subscribed).unwrap_or(false);
+                acts.push((
+                    if subscribed { format!("Unsubscribe from {}", st.author) } else { format!("Subscribe to {}", st.author) },
+                    Act::User(UserAction::Subscribe { channel_id: st.channel_id.clone(), subscribe: !subscribed }),
+                ));
+            }
+            acts.push(("Save to Watch later".to_string(), Act::User(UserAction::WatchLater(st.video_id.clone()))));
+            acts.push(("Comments".to_string(), Act::Comments(st.video_id.clone())));
+            if !st.channel_id.is_empty() {
+                acts.push((format!("Open {}", st.author), Act::OpenChannel(st.channel_id.clone())));
+            }
+        }
+        acts.extend(vec![
             ("Playback speed".to_string(), Act::Speed),
             ("Maximum quality".to_string(), Act::MaxQuality),
             ("Subtitles".to_string(), Act::Subtitles),
             ("When the video ends".to_string(), Act::RepeatMode),
             ("Close".to_string(), Act::Close),
-        ];
+        ]);
         Self::make(entry, "Player options".into(), acts)
     }
 
@@ -164,6 +208,14 @@ impl MenuScreen {
                 let i = R.iter().position(|r| *r == s.repeat).unwrap_or(0) as i32;
                 s.repeat = R[((i + dir).rem_euclid(R.len() as i32)) as usize];
             })))),
+            Act::User(a) => {
+                fx.push(Fx::App(YtFx::Act(a.clone())));
+                fx.push(Fx::Nav(NavOp::Pop));
+            }
+            Act::Comments(v) => {
+                fx.push(Fx::Nav(NavOp::Pop));
+                fx.push(Fx::Nav(NavOp::Push(YtArg::Comments(v.clone()))));
+            }
             Act::Close => fx.push(Fx::Nav(NavOp::Pop)),
         }
         fx.invalidate(plx_machine::present::Provenance::Input);

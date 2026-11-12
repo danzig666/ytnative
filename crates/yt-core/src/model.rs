@@ -39,6 +39,10 @@ pub struct Item {
     /// 0..=100 when the user has partially watched it.
     pub progress: Option<u8>,
     pub endpoint: Option<Endpoint>,
+    /// The card's own menu (Watch later, Not interested, Remove from history...), as YouTube
+    /// sent it. Home tiles often carry only a lazy "More" entry resolved with `menu_panel`.
+    #[serde(default)]
+    pub menu: Vec<crate::actions::MenuAction>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
