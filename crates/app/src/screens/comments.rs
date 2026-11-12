@@ -71,6 +71,8 @@ pub struct CommentsScreen {
     opened_ms: u32,
     /// Already gave the video back (BACK, then Unmount).
     released: bool,
+    /// BACK pressed at: the panel slides out over `CLOSE_MS` (ahead of the overlay's own fade).
+    closing_at: Option<u32>,
     /// Wheel travel not yet turned into whole rows (the pointer's edge scroll is fractional).
     wheel: f32,
     state: State,
@@ -88,6 +90,7 @@ impl CommentsScreen {
             scroll_to: 0.0,
             opened_ms: 0,
             released: false,
+            closing_at: None,
             wheel: 0.0,
         }
     }
@@ -148,6 +151,8 @@ impl Machine<YtHost> for CommentsScreen {
                 // Grow the video back and bring the player's captions at once; the panel's close
                 // fade runs alongside instead of before.
                 self.release(fx);
+                self.closing_at = Some(cx.views.now_ms);
+                fx.invalidate(plx_machine::present::Provenance::Input);
                 return Handled::No;
             }
             // The wheel scrolls the list; focus stays on its comment.
@@ -236,7 +241,19 @@ impl Screen<YtHost> for CommentsScreen {
         if ease < 1.0 {
             ui::animating();
         }
-        let p = p.translate(PANEL.w * (1.0 - ease), 0.0);
+        // Closing: slide out quickly, then draw nothing while the overlay finishes its fade.
+        let out = match self.closing_at {
+            Some(t0) => {
+                let k = (cx.views.now_ms.wrapping_sub(t0) as f32 / 160.0).clamp(0.0, 1.0);
+                if k >= 1.0 {
+                    return;
+                }
+                ui::animating();
+                k * k
+            }
+            None => 0.0,
+        };
+        let p = p.translate(PANEL.w * (1.0 - ease + out), 0.0);
         ui::fill(p, PANEL, 0.0, [0.06, 0.06, 0.08, 1.0]);
         {
             let n = self.len(cx);
