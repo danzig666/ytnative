@@ -42,6 +42,10 @@ tests against YouTube.
 - UI scale, card styles, context-menu ordering, voice search, live DVR seek: not started.
 - Engine B needs `libplayerAPIs.so.1` at launch (present on every known webOS release).
 
+**Backlog:**
+- Phone casting: DIAL now starts on the C3 (shares UDP 1900 with webOS, HTTP on :8090 answers),
+  but discovery from a phone's cast menu and the Lounge pairing that follows are untested.
+
 **TV validation checklist (when the user is watching):** sign-in + QR; sidebar sections and shelf
 rows; search; player HUD, seek preview, captions, SponsorBlock; like / subscribe / Watch later;
 comments; settings persist; Lounge pairing + DIAL from a phone; live via HLS; engine B (see

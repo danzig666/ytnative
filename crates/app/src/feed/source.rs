@@ -347,3 +347,141 @@ pub fn run_sabr(
         }
     }
 }
+
+/// How far behind the newest segment live playback starts (YouTube's own players sit ~2-3
+/// segments back; less risks stalling on a segment that is not published yet).
+pub const LIVE_DELAY_NS: i64 = 12_000_000_000;
+
+/// The newest segment of a live format: (head sequence number, head stream time in ns).
+pub fn live_head(http: &reqwest::blocking::Client, url: &str, ua: &str) -> anyhow::Result<(u64, i64)> {
+    let r = http.get(url).header("user-agent", ua).header("range", "bytes=0-0").send()?;
+    let h = |k: &str| r.headers().get(k).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<i64>().ok());
+    match (h("x-head-seqnum"), h("x-head-time-millis")) {
+        (Some(seq), Some(ms)) => Ok((seq as u64, ms * 1_000_000)),
+        _ => anyhow::bail!("no live head headers (HTTP {})", r.status()),
+    }
+}
+
+/// Live fetcher for one direct-URL format: every `&sq=N` segment is a complete fMP4 file
+/// (`ftyp moov emsg moof mdat`) on one continuous stream timeline, so each gets its own demuxer.
+/// A generation's target maps to a sequence number through the head (`x-head-seqnum` /
+/// `x-head-time-millis`); the whole DVR window back to sequence 0 is addressable. `edge` gets the
+/// head's stream time for the HUD.
+pub fn run_live(fmt: serde_json::Value, ua: String, lane: Arc<Lane>, ctl: Arc<SourceCtl>, kind: Kind, edge: Arc<AtomicI64>) {
+    use yt_core::demux::mp4::Mp4Demuxer;
+    let http = match reqwest::blocking::Client::builder().timeout(Duration::from_secs(20)).build() {
+        Ok(h) => h,
+        Err(e) => return lane.fail(format!("http: {e}")),
+    };
+    let Some(url) = fmt["url"].as_str().map(str::to_string) else { return lane.fail("live format without url".into()) };
+    let itag = fmt["itag"].as_i64().unwrap_or(0);
+    let seg_ns = (fmt["targetDurationSec"].as_f64().unwrap_or(5.0) * 1e9) as i64;
+    let (mut head, mut head_ns) = match live_head(&http, &url, &ua) {
+        Ok(h) => h,
+        Err(e) => return lane.fail(format!("itag {itag}: {e:#}")),
+    };
+    edge.fetch_max(head_ns, Relaxed);
+    // Sequence whose span covers stream time `t` (the head segment ends at `head_ns`).
+    let seq_for = |t: i64, head: u64, head_ns: i64| -> u64 {
+        let back = ((head_ns - t).max(0) + seg_ns - 1) / seg_ns;
+        head.saturating_sub(back as u64)
+    };
+    let lead = if kind == Kind::Audio { AUDIO_SEEK_LEAD_NS } else { 0 };
+    let (mut gen, target) = ctl.current();
+    let mut seq = seq_for(target - lead, head, head_ns);
+    let mut trim = Trim { target: Some(target) };
+    let mut framer: Option<Framer> = None;
+    let mut failures = 0u32;
+    let mut idle_since: Option<std::time::Instant> = None;
+    while !ctl.stop.load(Relaxed) {
+        let (g, t) = ctl.current();
+        if g != gen {
+            gen = g;
+            seq = seq_for(t - lead, head, head_ns);
+            trim = Trim { target: Some(t) };
+        }
+        if !lane.wait_room(&ctl, if kind == Kind::Video { VIDEO_MAX_BYTES } else { AUDIO_MAX_BYTES }) {
+            continue;
+        }
+        let r = http.get(format!("{url}&sq={seq}")).header("user-agent", &ua).send();
+        let resp = match r {
+            Ok(r) => r,
+            Err(e) => {
+                failures += 1;
+                crate::log(&format!("feed: live itag {itag} sq {seq}: {e}"));
+                if failures >= 8 {
+                    return lane.fail(format!("live itag {itag}: {e}"));
+                }
+                std::thread::sleep(Duration::from_millis(500 * failures as u64));
+                continue;
+            }
+        };
+        let hv = |k: &str| resp.headers().get(k).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<i64>().ok());
+        if let (Some(s), Some(ms)) = (hv("x-head-seqnum"), hv("x-head-time-millis")) {
+            if s as u64 > head {
+                idle_since = None;
+            }
+            head = head.max(s as u64);
+            head_ns = head_ns.max(ms * 1_000_000);
+            edge.fetch_max(head_ns, Relaxed);
+        }
+        let status = resp.status();
+        if !status.is_success() || status.as_u16() == 204 {
+            // Not published yet (ahead of the head), or the stream ended.
+            let since = *idle_since.get_or_insert_with(std::time::Instant::now);
+            if seq > head && since.elapsed() > Duration::from_secs(60) {
+                crate::log(&format!("feed: live itag {itag}: no new segment for 60 s, treating as ended"));
+                lane.finish(gen);
+                let _ = lane.wait_room(&ctl, 0);
+                continue;
+            }
+            if seq + 3 < head && status.as_u16() == 404 {
+                // Fell out of the DVR window: jump forward.
+                seq += 1;
+                continue;
+            }
+            std::thread::sleep(Duration::from_millis(1000));
+            continue;
+        }
+        let body = match resp.bytes() {
+            Ok(b) => b,
+            Err(e) => {
+                failures += 1;
+                crate::log(&format!("feed: live itag {itag} sq {seq} body: {e}"));
+                std::thread::sleep(Duration::from_millis(500));
+                continue;
+            }
+        };
+        failures = 0;
+        let mut d = Mp4Demuxer::new();
+        if let Err(e) = d.push(&body) {
+            crate::log(&format!("feed: live itag {itag} sq {seq}: {e:#}"));
+            seq += 1;
+            continue;
+        }
+        if framer.is_none() {
+            let Some(info) = d.tracks().first().cloned() else {
+                seq += 1;
+                continue;
+            };
+            match Framer::new(&info) {
+                Ok(f) => framer = Some(f),
+                Err(e) => return lane.fail(format!("{e:#}")),
+            }
+            lane.set_track(info);
+        }
+        let mut aus = Vec::new();
+        while let Some(a) = d.pop() {
+            aus.push(a);
+        }
+        if ctl.gen.load(Acquire) != gen {
+            continue;
+        }
+        for u in trim.apply(kind, frame_all(framer.as_ref().unwrap(), aus)) {
+            if !lane.push(gen, u) {
+                break;
+            }
+        }
+        seq += 1;
+    }
+}

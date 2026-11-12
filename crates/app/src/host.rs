@@ -794,7 +794,8 @@ impl Rig<YtHost> for AppRig {
                         crate::settings::Codec::Vp9 => crate::feed::VideoCodec::Vp9,
                         crate::settings::Codec::Av1 => crate::feed::VideoCodec::Av1,
                     };
-                    self.player.feed_prefs = (s.engine == "auto").then(|| crate::feed::Prefs::new(s.max_height as u32, codec));
+                    self.player.feed_prefs = Some(crate::feed::Prefs::new(s.max_height as u32, codec));
+                    self.player.prefer_feed = s.engine == "auto";
                 }
                 self.player.start(video_id, self.session.clone(), prefs, extras, start);
             }

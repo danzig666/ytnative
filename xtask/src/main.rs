@@ -78,7 +78,11 @@ fn run() -> Result<()> {
         Some("logs") => logs(args.get(1).and_then(|s| s.parse().ok()).unwrap_or(80)),
         Some("uninstall") => uninstall(),
         Some("ssh") => tv_ssh_print(&args[1..].join(" ")),
-        Some("key") => tv_ssh_print(&format!("echo {} > {TV_TMP}/remote", args[1..].join(" "))),
+        // Only while the app runs: with no reader the FIFO write would block forever.
+        Some("key") => tv_ssh_print(&format!(
+            "if pidof ytnative >/dev/null; then timeout 5 sh -c 'echo {} > {TV_TMP}/remote' || echo 'key: write timed out'; else echo 'key: app not running'; fi",
+            args[1..].join(" ")
+        )),
         Some("shot") => shot(args.get(1).map(String::as_str), args.get(2).map(String::as_str).unwrap_or("DISPLAY")),
         Some("pull-sysroot") => pull_sysroot(),
         Some("symcheck") => checks::symcheck(&binary()),

@@ -98,6 +98,9 @@ pub struct Status {
     pub audio_track: Option<String>,
     pub zoom: Zoom,
     pub rate: f32,
+    /// A live stream (engine B): `position_ms` is stream time, `live_edge_ms` the newest media.
+    pub live: bool,
+    pub live_edge_ms: u64,
     pub title: String,
     pub author: String,
     pub position_ms: u64,
@@ -113,8 +116,11 @@ pub struct Player {
     window: Option<CString>,
     media_id: Arc<Mutex<Option<String>>>,
     luna: Option<&'static Luna>,
-    /// Engine B settings; `Some` lets a video go to the Feed engine when it needs it (4K, VP9, AV1).
+    /// Engine B settings; `Some` lets a video go to the Feed engine when it needs it (4K, VP9, AV1)
+    /// and live streams (always).
     pub feed_prefs: Option<crate::feed::Prefs>,
+    /// The "Playback engine" setting: VOD goes to engine B only when this is on.
+    pub prefer_feed: bool,
     feed: crate::feed::FeedPlayer,
     /// A resolved video the worker hands to engine B (started on the main thread in `tick`).
     handoff: Arc<Mutex<Option<Handoff>>>,
@@ -127,14 +133,16 @@ struct Handoff {
     start_ms: Option<u64>,
 }
 
-/// Engine B is worth it: not live, and its best format is above 1080p or not H.264.
+/// Engine B takes live streams (LG's HLS player stalls on YouTube's split-audio live playlists)
+/// and, when preferred, videos whose best format is above 1080p or not H.264.
 #[cfg(not(windows))]
-fn wants_feed(resolved: &yt_core::streams::Resolved, prefs: &crate::feed::Prefs) -> bool {
-    if resolved.is_live || !crate::feed::FeedPlayer::available() {
+fn wants_feed(resolved: &yt_core::streams::Resolved, prefs: &crate::feed::Prefs, prefer: bool) -> bool {
+    if !crate::feed::FeedPlayer::available() {
         return false;
     }
     match crate::feed::FeedPlayer::choose(resolved, prefs) {
-        Some(c) => c.video_codec != crate::feed::VideoCodec::H264 || c.video["height"].as_u64().unwrap_or(0) > 1080,
+        Some(_) if resolved.is_live => true,
+        Some(c) => prefer && (c.video_codec != crate::feed::VideoCodec::H264 || c.video["height"].as_u64().unwrap_or(0) > 1080),
         None => false,
     }
 }
@@ -148,6 +156,7 @@ impl Player {
             media_id: Default::default(),
             luna: None,
             feed_prefs: None,
+            prefer_feed: false,
             feed: crate::feed::FeedPlayer::new(),
             handoff: Default::default(),
         }
@@ -201,7 +210,7 @@ impl Player {
             return;
         };
         let (status, media_id) = (self.status.clone(), self.media_id.clone());
-        let feed = self.feed_prefs.clone().map(|p| (p, self.handoff.clone()));
+        let feed = self.feed_prefs.clone().map(|p| (p, self.prefer_feed, self.handoff.clone()));
         let spawned = plx_base::task::spawn("play", move || {
             match run(luna, &video_id, &window_id, &session, &status, &media_id, prefs, start_ms, feed) {
                 Ok(()) => {
@@ -363,7 +372,7 @@ fn run(
     media_id: &Arc<Mutex<Option<String>>>,
     prefs: yt_core::streams::Prefs,
     start_ms: Option<u64>,
-    feed: Option<(crate::feed::Prefs, Arc<Mutex<Option<Handoff>>>)>,
+    feed: Option<(crate::feed::Prefs, bool, Arc<Mutex<Option<Handoff>>>)>,
 ) -> anyhow::Result<()> {
     let resolved = {
         let mut g = session.lock().unwrap();
@@ -388,8 +397,8 @@ fn run(
         s.audio_tracks = resolved.audio_tracks();
         s.audio_track = prefs.audio_track.clone();
     }
-    if let Some((fp, slot)) = feed {
-        if wants_feed(&resolved, &fp) {
+    if let Some((fp, prefer, slot)) = feed {
+        if wants_feed(&resolved, &fp, prefer) {
             crate::log("player: handing the video to engine B (Feed)");
             *slot.lock().unwrap() = Some(Handoff { video_id: video_id.to_string(), resolved, start_ms });
             plx_machine::present::wake_from_worker();

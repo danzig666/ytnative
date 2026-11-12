@@ -14,6 +14,7 @@ use crate::player::{Phase, Status};
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering::*};
+use std::sync::atomic::AtomicI64;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use yt_core::demux::{Codec, Kind, TrackInfo};
@@ -44,6 +45,8 @@ pub enum Cmd {
 #[derive(Clone)]
 pub enum Transport {
     Direct,
+    /// A live stream: `&sq=N` segments from the formats' URLs (see `source::run_live`).
+    Live,
     Sabr(yt_core::bootstrap::TvConfig),
 }
 
@@ -203,13 +206,31 @@ fn num(v: &Value) -> f64 {
 
 pub fn run(sh: Arc<Shared>, plan: Plan) {
     let ctl = Arc::new(SourceCtl::default());
-    let start_ns = plan.start_ms as i64 * 1_000_000;
+    let edge = Arc::new(AtomicI64::new(0));
+    let mut start_ns = plan.start_ms as i64 * 1_000_000;
+    if matches!(plan.transport, Transport::Live) {
+        // Start a little behind the newest segment, on the stream's own timeline.
+        let http = reqwest::blocking::Client::builder().timeout(Duration::from_secs(15)).build().unwrap_or_default();
+        match plan.video_fmt["url"].as_str().map(|u| source::live_head(&http, u, &plan.user_agent)) {
+            Some(Ok((_, head_ns))) => {
+                edge.store(head_ns, Relaxed);
+                start_ns = (head_ns - source::LIVE_DELAY_NS).max(0);
+            }
+            Some(Err(e)) => return fail(&sh, format!("live: {e:#}")),
+            None => return fail(&sh, "live: format without url".into()),
+        }
+        let mut s = sh.status.lock().unwrap();
+        s.live = true;
+        s.live_edge_ms = (edge.load(Relaxed) / 1_000_000) as u64;
+        s.position_ms = (start_ns / 1_000_000) as u64;
+        s.duration_ms = 0;
+    }
     ctl.target_ns.store(start_ns, Release);
     ctl.playhead_ns.store(start_ns, Relaxed);
     let (video, audio) = (Lane::new(), Lane::new());
     let has_audio = plan.audio_fmt.is_some();
-    spawn_fetchers(&plan, &video, &audio, &ctl);
-    let r = session(&sh, &plan, &ctl, &video, &audio, has_audio);
+    spawn_fetchers(&plan, &video, &audio, &ctl, &edge);
+    let r = session(&sh, &plan, &ctl, &video, &audio, has_audio, &edge);
     ctl.stop.store(true, Relaxed);
     video.wake();
     audio.wake();
@@ -218,7 +239,7 @@ pub fn run(sh: Arc<Shared>, plan: Plan) {
     }
 }
 
-fn spawn_fetchers(plan: &Plan, video: &Arc<Lane>, audio: &Arc<Lane>, ctl: &Arc<SourceCtl>) {
+fn spawn_fetchers(plan: &Plan, video: &Arc<Lane>, audio: &Arc<Lane>, ctl: &Arc<SourceCtl>, edge: &Arc<AtomicI64>) {
     let spawn = |name: &str, f: Box<dyn FnOnce() + Send>| {
         if std::thread::Builder::new().name(name.into()).stack_size(512 << 10).spawn(f).is_err() {
             crate::log(&format!("feed: could not spawn {name}"));
@@ -233,6 +254,14 @@ fn spawn_fetchers(plan: &Plan, video: &Arc<Lane>, audio: &Arc<Lane>, ctl: &Arc<S
                 spawn("feed-a", Box::new(move || source::run_ranged(af, ua, l, c, Kind::Audio)));
             }
         }
+        Transport::Live => {
+            let (f, ua, l, c, e) = (plan.video_fmt.clone(), plan.user_agent.clone(), video.clone(), ctl.clone(), edge.clone());
+            spawn("feed-lv", Box::new(move || source::run_live(f, ua, l, c, Kind::Video, e)));
+            if let Some(af) = plan.audio_fmt.clone() {
+                let (ua, l, c, e) = (plan.user_agent.clone(), audio.clone(), ctl.clone(), Arc::new(AtomicI64::new(0)));
+                spawn("feed-la", Box::new(move || source::run_live(af, ua, l, c, Kind::Audio, e)));
+            }
+        }
         Transport::Sabr(tv) => {
             let itag = |f: &Value| f["itag"].as_i64().unwrap_or(0) as i32;
             let itags = (itag(&plan.video_fmt), plan.audio_fmt.as_ref().map(itag));
@@ -242,7 +271,8 @@ fn spawn_fetchers(plan: &Plan, video: &Arc<Lane>, audio: &Arc<Lane>, ctl: &Arc<S
     }
 }
 
-fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: &Lane, has_audio: bool) -> Result<(), String> {
+fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: &Lane, has_audio: bool, edge: &AtomicI64) -> Result<(), String> {
+    let live = matches!(plan.transport, Transport::Live);
     // ---- wait for the tracks and the first keyframe ----
     let t0 = Instant::now();
     loop {
@@ -348,7 +378,12 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
             }
         }
         if let Some(ms) = seek_to {
-            let t = (ms as i64 * 1_000_000).clamp(0, (duration_ns - 1_000_000_000).max(0));
+            let t = if live {
+                // Anywhere in the DVR window, but not past what is published.
+                (ms as i64 * 1_000_000).clamp(0, (edge.load(Relaxed) - source::LIVE_DELAY_NS).max(0))
+            } else {
+                (ms as i64 * 1_000_000).clamp(0, (duration_ns - 1_000_000_000).max(0))
+            };
             if !priming && seeking.is_none() {
                 sys::pause();
             }
@@ -419,6 +454,9 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
             let content = pres + shift;
             ctl.playhead_ns.store(content, Relaxed);
             let mut st = sh.status.lock().unwrap();
+            if live {
+                st.live_edge_ms = (edge.load(Relaxed) / 1_000_000) as u64;
+            }
             let ms = (content.max(0) / 1_000_000) as u64;
             let mut changed = st.position_ms / 200 != ms / 200;
             st.position_ms = ms;

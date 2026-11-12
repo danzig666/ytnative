@@ -147,7 +147,7 @@ impl FeedPlayer {
         let plan = Plan {
             video_fmt: choice.video.clone(),
             audio_fmt: choice.audio.clone(),
-            transport: prefs.transport,
+            transport: if resolved.is_live { Transport::Live } else { prefs.transport },
             resolved,
             user_agent,
             app_id: plx_base::paths::app_id().to_string(),
@@ -207,11 +207,13 @@ impl FeedPlayer {
     }
 
     pub fn seek_by(&mut self, delta_ms: i64) {
-        let (pos, dur) = {
+        let (pos, end) = {
             let s = self.status.lock().unwrap();
-            (s.position_ms as i64, s.duration_ms as i64)
+            // Live: anywhere in the DVR window up to just behind the newest segment.
+            let end = if s.live { s.live_edge_ms as i64 - source::LIVE_DELAY_NS / 1_000_000 } else { s.duration_ms as i64 - 1000 };
+            (s.position_ms as i64, end)
         };
-        let to = (pos + delta_ms).clamp(0, (dur - 1000).max(0));
+        let to = (pos + delta_ms).clamp(0, end.max(0));
         self.seek_to(to as u64);
     }
 

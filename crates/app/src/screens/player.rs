@@ -177,6 +177,12 @@ impl Machine<YtHost> for PlayerScreen {
                         self.seek(-1, cx, fx);
                         Handled::Yes
                     }
+                    (_, WCODE_FF) if cx.views.player.live => {
+                        // Back to the live edge (the seek is clamped to it).
+                        fx.push(Fx::App(YtFx::SeekBy(i64::MAX / 4)));
+                        self.show_hud(cx, fx);
+                        Handled::Yes
+                    }
                     (Key::Right, _) | (_, WCODE_FF) => {
                         self.seek(1, cx, fx);
                         Handled::Yes
@@ -344,8 +350,17 @@ impl Screen<YtHost> for PlayerScreen {
             }
         }
         ui::fill(p, Rect::new(bar.x + bar.w * frac - 12.0, bar.y - 7.0, 24.0, 24.0), 12.0, ui::WHITE);
-        ui::text(p, &ui::fmt_time(st.position_ms), 96.0, 950.0, 30, ui::WHITE, ui::ALIGN_LEFT, false);
-        let mut right = ui::fmt_time(st.duration_ms);
+        if st.live {
+            let behind = st.live_edge_ms.saturating_sub(st.position_ms);
+            if behind < 20_000 {
+                ui::text(p, "\u{25CF} LIVE", 96.0, 950.0, 30, ui::accent(), ui::ALIGN_LEFT, true);
+            } else {
+                ui::text(p, &format!("\u{2212}{} behind live", ui::fmt_time(behind)), 96.0, 950.0, 30, ui::WHITE, ui::ALIGN_LEFT, false);
+            }
+        } else {
+            ui::text(p, &ui::fmt_time(st.position_ms), 96.0, 950.0, 30, ui::WHITE, ui::ALIGN_LEFT, false);
+        }
+        let mut right = if st.live { String::new() } else { ui::fmt_time(st.duration_ms) };
         if cx.views.store.settings.show_ending_time && st.duration_ms > st.position_ms {
             right = format!("{right}   \u{2022}   ends in {}", ui::fmt_time(st.duration_ms - st.position_ms));
         }
