@@ -173,7 +173,8 @@ impl Machine<YtHost> for CommentsScreen {
                 let n = self.len(cx);
                 if let Some(i) = self.list.index(*e, n) {
                     let c = &cx.views.store.comments[&self.video_id].items[i];
-                    if let Some(token) = &c.replies_continuation {
+                    // Only comments that have replies open a thread; the rest do nothing.
+                    if let Some(token) = c.replies_continuation.as_ref().filter(|_| c.reply_count > 0) {
                         fx.push(Fx::Nav(NavOp::Present(YtArg::Replies(token.clone(), c.author.clone()))));
                     }
                 }

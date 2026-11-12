@@ -65,6 +65,18 @@ pub fn parse_comments(resp: &Value) -> CommentsPage {
     page
 }
 
+/// A count as YouTube prints it: "12", "1,234", "1.2K", "3M replies".
+fn count(s: &str) -> Option<u32> {
+    let t: String = s.trim().chars().take_while(|c| c.is_ascii_digit() || matches!(c, ',' | '.' | 'K' | 'k' | 'M' | 'm')).collect();
+    let (num, mul) = match t.chars().last()? {
+        'K' | 'k' => (&t[..t.len() - 1], 1e3),
+        'M' | 'm' => (&t[..t.len() - 1], 1e6),
+        _ => (&t[..], 1.0),
+    };
+    let n: f64 = num.replace(',', "").parse().ok()?;
+    Some((n * mul) as u32)
+}
+
 fn comment(r: &Value) -> Option<Comment> {
     let id = r["commentId"].as_str()?.to_string();
     Some(Comment {
@@ -75,7 +87,7 @@ fn comment(r: &Value) -> Option<Comment> {
         text: text(&r["contentText"]).unwrap_or_default(),
         published_text: text(&r["publishedTimeText"]).unwrap_or_default(),
         like_count_text: text(&r["voteCount"]).filter(|s| !s.is_empty()),
-        reply_count: r["replyCount"].as_u64().map(|n| n as u32).or_else(|| text(&r["repliesCount"]).and_then(|s| s.replace(',', "").parse().ok())).unwrap_or(0),
+        reply_count: r["replyCount"].as_u64().map(|n| n as u32).or_else(|| text(&r["repliesCount"]).and_then(|s| count(&s))).unwrap_or(0),
         replies_continuation: first_token(&r["detailViewEndpoint"]),
         is_pinned: r.get("pinnedCommentBadge").is_some() || r.get("pinnedText").is_some() || r["isPinned"].as_bool() == Some(true),
         is_hearted: hearted(r),
@@ -203,5 +215,17 @@ mod tests {
             eprintln!("{}: {} comments", newest.title, n.comments.len());
             assert!(!n.comments.is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod count_tests {
+    #[test]
+    fn counts() {
+        assert_eq!(super::count("12"), Some(12));
+        assert_eq!(super::count("1,234"), Some(1234));
+        assert_eq!(super::count("1.2K replies"), Some(1200));
+        assert_eq!(super::count("3M"), Some(3_000_000));
+        assert_eq!(super::count("replies"), None);
     }
 }
