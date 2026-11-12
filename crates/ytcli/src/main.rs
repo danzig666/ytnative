@@ -46,6 +46,13 @@ fn run() -> Result<()> {
             whoami(&api)
         }
         Some("whoami") => whoami(&api),
+        // page <home|subs|history|library|search:<q>|browse:<id>> [pages]: parsed page summary.
+        Some("page") => page_cmd(args.get(1).map(String::as_str).unwrap_or("home"), args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1)),
+        Some("suggest") => {
+            let s = yt_core::session::Session::new()?;
+            println!("{:?}", s.suggestions(args.get(1).map(String::as_str).unwrap_or("bl"))?);
+            Ok(())
+        }
         // raw <endpoint> <json-body> <out-file> [anon]: dump a TV-client InnerTube response.
         Some("raw") => {
             let endpoint = args.get(1).context("endpoint")?;
@@ -277,4 +284,34 @@ fn mux_sample(ua: &str, video: &str, audio: &str, secs: u32) -> Result<()> {
 
 fn truncate(s: &str, n: usize) -> &str {
     &s[..s.char_indices().nth(n).map_or(s.len(), |(i, _)| i)]
+}
+
+fn page_cmd(what: &str, pages: usize) -> Result<()> {
+    use yt_core::session::{feeds, Session};
+    let mut s = Session::new()?;
+    let (endpoint, mut page) = match what {
+        "home" => ("browse", s.home()?),
+        "subs" => ("browse", s.subscriptions()?),
+        "history" => ("browse", s.history()?),
+        "library" => ("browse", s.browse(feeds::LIBRARY, None)?),
+        w if w.starts_with("search:") => ("search", s.search(&w[7..], None)?),
+        w if w.starts_with("browse:") => ("browse", s.browse(&w[7..], None)?),
+        _ => bail!("unknown page {what}"),
+    };
+    for n in 1..=pages {
+        println!("== page {n}: {} shelves, {} items, {} tabs", page.shelves.len(), page.item_count(), page.tabs.len());
+        for sh in &page.shelves {
+            println!("  [{}] {} items{}", sh.title, sh.items.len(), if sh.continuation.is_some() { " (+more)" } else { "" });
+            for it in sh.items.iter().take(3) {
+                println!("     {:?} {} | {} | {}", it.kind, it.id, it.title, it.lines.join(" / "));
+            }
+        }
+        let Some(c) = page.continuation.clone() else { break };
+        if n == pages {
+            println!("(more pages available)");
+            break;
+        }
+        page = s.more(endpoint, &c)?;
+    }
+    Ok(())
 }
