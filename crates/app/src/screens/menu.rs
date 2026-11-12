@@ -216,7 +216,6 @@ impl MenuScreen {
         acts.extend(vec![
             ("Playback speed".to_string(), Act::Speed),
             ("Audio language".to_string(), Act::AudioTrack),
-            ("Picture".to_string(), Act::ZoomMode),
             ("Sleep timer".to_string(), Act::Sleep),
             ("Maximum quality".to_string(), Act::MaxQuality),
             ("Subtitles".to_string(), Act::Subtitles),

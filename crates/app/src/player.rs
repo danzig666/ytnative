@@ -107,6 +107,8 @@ pub struct Status {
     pub duration_ms: u64,
     pub width: u32,
     pub height: u32,
+    /// Best height the stream offers within the quality setting, shown until the decoder reports.
+    pub quality_hint: u32,
     pub fps: u32,
 }
 
@@ -396,6 +398,14 @@ fn run(
         s.captions = resolved.captions.clone();
         s.audio_tracks = resolved.audio_tracks();
         s.audio_track = prefs.audio_track.clone();
+        s.quality_hint = resolved
+            .adaptive
+            .iter()
+            .filter(|f| f["mimeType"].as_str().is_some_and(|m| m.starts_with("video/")))
+            .filter_map(|f| f["height"].as_u64())
+            .filter(|h| *h <= prefs.max_height)
+            .max()
+            .unwrap_or(0) as u32;
     }
     if let Some((fp, prefer, slot)) = feed {
         if wants_feed(&resolved, &fp, prefer) {

@@ -223,7 +223,18 @@ impl Machine<YtHost> for PlayerScreen {
                         self.step_queue(if *key == Key::Up { -1 } else { 1 }, cx, fx);
                         Handled::Yes
                     }
-                    (Key::Up, _) | (Key::Down, _) => {
+                    (Key::Up, _) => {
+                        // Up shows / hides the on-screen controls.
+                        if self.hud {
+                            self.hud = false;
+                            fx.push(Fx::CancelTimer(T_HIDE));
+                            fx.invalidate(plx_machine::present::Provenance::Input);
+                        } else {
+                            self.show_hud(cx, fx);
+                        }
+                        Handled::Yes
+                    }
+                    (Key::Down, _) => {
                         fx.push(Fx::Nav(NavOp::Present(YtArg::PlayerMenu)));
                         Handled::Yes
                     }
@@ -309,8 +320,10 @@ impl Screen<YtHost> for PlayerScreen {
             return;
         }
         // Bottom scrim + title + progress
-        ui::fill(p, Rect::new(0.0, 700.0, 1920.0, 380.0), 0.0, [0.0, 0.0, 0.0, 0.55]);
-        ui::fill(p, Rect::new(0.0, 0.0, 1920.0, 140.0), 0.0, [0.0, 0.0, 0.0, 0.40]);
+        ui::fill(p, Rect::new(0.0, 755.0, 1920.0, 325.0), 0.0, [0.0, 0.0, 0.0, 0.55]);
+        if cx.views.store.settings.show_clock {
+            ui::fill(p, Rect::new(0.0, 0.0, 1920.0, 96.0), 0.0, [0.0, 0.0, 0.0, 0.40]);
+        }
         ui::text(p, &ui::ellipsize(&st.title, 80), 96.0, 780.0, 44, ui::WHITE, ui::ALIGN_LEFT, true);
         let mut byline = st.author.clone();
         if let Some(w) = &ex.watch {
@@ -363,8 +376,11 @@ impl Screen<YtHost> for PlayerScreen {
                     ui::fill(p, Rect::new(r.x - 4.0, r.y - 4.0, r.w + 8.0, r.h + 8.0), 10.0, ui::WHITE);
                     if tex != 0 && tw > 0.0 && th > 0.0 {
                         // Frame coordinates are in the sheet's own pixels; the texture size may differ.
-                        let (sw, sh) = (level.width as f32 * level.cols as f32, level.height as f32 * level.rows as f32);
-                        let uv = [fr.x as f32 / sw, fr.y as f32 / sh, (fr.x + fr.w) as f32 / sw, (fr.y + fr.h) as f32 / sh];
+                        // The sheet's real size: the last sheet of a video holds fewer rows than
+                        // `rows`, so a full-grid size maps its frames to the wrong place.
+                        let (sw, sh) = (tw, th);
+                        // plx's uv is [u, v, width, height] (`Rect::cover_uv`), not two corners.
+                        let uv = [fr.x as f32 / sw, fr.y as f32 / sh, fr.w as f32 / sw, fr.h as f32 / sh];
                         p.tex_uv(tex, uv, r, 8.0, ui::WHITE);
                     } else {
                         ui::fill(p, r, 8.0, [0.1, 0.1, 0.12, 1.0]);
@@ -396,16 +412,20 @@ impl Screen<YtHost> for PlayerScreen {
             _ => "\u{25B6}",
         };
         let mut info = state.to_string();
-        if st.height > 0 {
-            info.push_str(&format!("   {}p{}", st.height, if st.fps > 30 { st.fps.to_string() } else { String::new() }));
+        // Quality, always: the decoder's resolution, else the best the stream offers.
+        let h = if st.height > 0 { st.height } else { st.quality_hint };
+        if h > 0 {
+            info.push_str(&format!("   {}p{}", h, if st.fps > 30 { st.fps.to_string() } else { String::new() }));
+        } else if !matches!(st.phase, Phase::Failed(_)) {
+            info.push_str("   \u{2014}p");
         }
         if (st.rate - 1.0).abs() > 0.01 && st.rate > 0.0 {
             info.push_str(&format!("   {}x", st.rate));
         }
         ui::text(p, &info, 96.0, 1010.0, 26, ui::DIM, ui::ALIGN_LEFT, false);
-        ui::text(p, "\u{25B2} Options", 1824.0, 1010.0, 26, ui::FAINT, ui::ALIGN_RIGHT, false);
+        ui::text(p, "\u{25BC} Options", 1824.0, 1010.0, 26, ui::FAINT, ui::ALIGN_RIGHT, false);
         if cx.views.store.settings.show_clock {
-            ui::text(p, &common::clock(&cx.views), 1824.0, 50.0, 34, ui::WHITE, ui::ALIGN_RIGHT, false);
+            ui::text(p, &common::clock(&cx.views), 1824.0, 28.0, 34, ui::WHITE, ui::ALIGN_RIGHT, false);
         }
         common::toast(p, cx);
     }
