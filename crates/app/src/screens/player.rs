@@ -257,10 +257,7 @@ impl Machine<YtHost> for PlayerScreen {
                     match key {
                         Key::Left => self.osd_sel = Some(sel.saturating_sub(1)),
                         Key::Right => self.osd_sel = Some((sel + 1).min(OSD_N - 1)),
-                        Key::Down => {
-                            self.osd_sel = None;
-                            fx.push(Fx::Nav(NavOp::Present(YtArg::PlayerMenu)));
-                        }
+                        Key::Down => {}
                         Key::Ok => self.press_osd(sel, cx, fx),
                         Key::Up | Key::Back => self.osd_sel = None,
                         _ => {}
@@ -421,9 +418,17 @@ impl Screen<YtHost> for PlayerScreen {
             if let Some(cue) = yt_core::captions::cue_at(&ex.cues, st.position_ms) {
                 let lift = if self.hud { 330.0 } else { 0.0 };
                 let s = &cx.views.store.settings;
+                SUB_STYLE.with(|c| c.set(match s.subtitle_style.as_str() { "shadow" => 1, "box" => 2, _ => 0 }));
                 let ink = match s.subtitle_color.as_str() {
+                    "light gray" => [0.85, 0.85, 0.85, 1.0],
+                    "gray" => [0.70, 0.70, 0.70, 1.0],
+                    "dark gray" => [0.52, 0.52, 0.52, 1.0],
                     "yellow" => [1.0, 0.92, 0.25, 1.0],
+                    "light yellow" => [1.0, 0.97, 0.70, 1.0],
                     "cyan" => [0.45, 0.95, 1.0, 1.0],
+                    "green" => [0.55, 1.0, 0.55, 1.0],
+                    "orange" => [1.0, 0.72, 0.35, 1.0],
+                    "pink" => [1.0, 0.65, 0.85, 1.0],
                     _ => ui::WHITE,
                 };
                 if ui::comments_open() {
@@ -459,12 +464,23 @@ impl Screen<YtHost> for PlayerScreen {
                 byline.push_str(&format!("  \u{2022}  {d}"));
             }
         }
-        match (&ex.votes, ex.watch.as_ref().and_then(|w| w.like_count_text.clone())) {
-            (Some(v), _) => byline.push_str(&format!("  \u{2022}  \u{1F44D} {}   \u{1F44E} {}", short_num(v.likes), short_num(v.dislikes))),
-            (None, Some(l)) => byline.push_str(&format!("  \u{2022}  \u{1F44D} {l}")),
-            _ => {}
+        let votes: Option<(String, Option<String>)> = match (&ex.votes, ex.watch.as_ref().and_then(|w| w.like_count_text.clone())) {
+            (Some(v), _) => Some((short_num(v.likes), Some(short_num(v.dislikes)))),
+            (None, Some(l)) => Some((l, None)),
+            _ => None,
+        };
+        let mut bx = 96.0 + ui::text(p, &byline, 96.0, 842.0, 30, ui::DIM, ui::ALIGN_LEFT, false);
+        if let Some((likes, dislikes)) = votes {
+            bx += ui::text(p, "  \u{2022}  ", bx, 842.0, 30, ui::DIM, ui::ALIGN_LEFT, false);
+            ui::icon::draw(p, ui::icon::Kind::ThumbUp, Rect::new(bx, 846.0, 28.0, 28.0), ui::DIM, false);
+            bx += 36.0;
+            bx += ui::text(p, &likes, bx, 842.0, 30, ui::DIM, ui::ALIGN_LEFT, false) + 24.0;
+            if let Some(d) = dislikes {
+                ui::icon::draw(p, ui::icon::Kind::ThumbDown, Rect::new(bx, 850.0, 28.0, 28.0), ui::DIM, false);
+                bx += 36.0;
+                ui::text(p, &d, bx, 842.0, 30, ui::DIM, ui::ALIGN_LEFT, false);
+            }
         }
-        ui::text(p, &byline, 96.0, 842.0, 30, ui::DIM, ui::ALIGN_LEFT, false);
         if let Some(w) = &ex.watch {
             if let Some(i) = yt_core::watch::chapter_at(&w.chapters, st.position_ms) {
                 let t = format!("\u{25B6} {}", ui::ellipsize(&w.chapters[i].title, 60));
@@ -472,9 +488,30 @@ impl Screen<YtHost> for PlayerScreen {
             }
         }
         let bar = Rect::new(96.0, 920.0, 1728.0, 10.0);
-        ui::fill(p, bar, 5.0, [1.0, 1.0, 1.0, 0.25]);
         let frac = if st.duration_ms > 0 { (st.position_ms as f32 / st.duration_ms as f32).clamp(0.0, 1.0) } else { 0.0 };
-        ui::fill(p, Rect::new(bar.x, bar.y, bar.w * frac, bar.h), 5.0, ui::accent());
+        {
+            // One piece per chapter with a small clear gap between (no marks drawn over the bar).
+            let mut cuts: Vec<f32> = vec![0.0];
+            if st.duration_ms > 0 {
+                if let Some(w) = &ex.watch {
+                    cuts.extend(w.chapters.iter().skip(1).map(|c| (c.start_ms as f32 / st.duration_ms as f32).clamp(0.0, 1.0)));
+                }
+            }
+            cuts.push(1.0);
+            let px = bar.x + bar.w * frac;
+            for w in cuts.windows(2) {
+                let gap = if w[1] < 1.0 { 4.0 } else { 0.0 };
+                let (x0, x1) = (bar.x + bar.w * w[0], bar.x + bar.w * w[1] - gap);
+                if x1 <= x0 {
+                    continue;
+                }
+                ui::fill(p, Rect::new(x0, bar.y, x1 - x0, bar.h), 3.0, [1.0, 1.0, 1.0, 0.25]);
+                let f1 = x1.min(px);
+                if f1 > x0 {
+                    ui::fill(p, Rect::new(x0, bar.y, f1 - x0, bar.h), 3.0, ui::accent());
+                }
+            }
+        }
         if st.duration_ms > 0 {
             let x_of = |ms: u64| bar.x + bar.w * (ms as f32 / st.duration_ms as f32).clamp(0.0, 1.0);
             if cx.views.store.settings.sb_markers {
@@ -483,11 +520,6 @@ impl Screen<YtHost> for PlayerScreen {
                     let col = [((c >> 16) & 0xff) as f32 / 255.0, ((c >> 8) & 0xff) as f32 / 255.0, (c & 0xff) as f32 / 255.0, 0.95];
                     let (x0, x1) = (x_of(seg.start_ms), x_of(seg.end_ms));
                     ui::fill(p, Rect::new(x0, bar.y, (x1 - x0).max(3.0), bar.h), 2.0, col);
-                }
-            }
-            if let Some(w) = &ex.watch {
-                for ch in w.chapters.iter().skip(1) {
-                    ui::fill(p, Rect::new(x_of(ch.start_ms) - 2.0, bar.y - 4.0, 4.0, bar.h + 8.0), 1.0, [0.0, 0.0, 0.0, 0.8]);
                 }
             }
             // Storyboard preview above the playhead while seeking.
@@ -555,18 +587,18 @@ impl Screen<YtHost> for PlayerScreen {
         let rating = st.extras.watch.as_ref().map(|w| w.like_status);
         let liked = matches!(rating, Some(yt_core::watch::LikeStatus::Like));
         let disliked = matches!(rating, Some(yt_core::watch::LikeStatus::Dislike));
-        let labels = ["\u{1F44D}".to_string(), "\u{1F44E}".to_string(), "CC".to_string(), "\u{1F4AC}".to_string(), "\u{2699}".to_string()];
-        for (i, label) in labels.iter().enumerate() {
+        use ui::icon::Kind;
+        let kinds = [Kind::ThumbUp, Kind::ThumbDown, Kind::Cc, Kind::Chat, Kind::Gear];
+        for (i, k) in kinds.iter().enumerate() {
             let b = osd_button(i);
             let hot = self.pointer.is_some_and(|(x, y)| b.contains(x, y)) || self.osd_sel == Some(i);
             let on = (i == OSD_CC && subs_on) || (i == 0 && liked) || (i == 1 && disliked);
             ui::fill(p, b, b.h / 2.0, if hot { [1.0, 1.0, 1.0, 0.9] } else if on { [1.0, 1.0, 1.0, 0.22] } else { [1.0, 1.0, 1.0, 0.10] });
             let ink = if hot { [0.0, 0.0, 0.0, 1.0] } else { ui::WHITE };
-            let (size, dy) = if i == OSD_CC { (24, 9.0) } else { (30, 5.0) };
-            ui::text(p, label, b.x + b.w / 2.0, b.y + dy, size, if i != OSD_CC && !hot { ui::WHITE } else { ink }, ui::ALIGN_CENTER, true);
+            let s = 30.0;
+            ui::icon::draw(p, *k, Rect::new(b.x + (b.w - s) / 2.0, b.y + (b.h - s) / 2.0, s, s), ink, on && i < 2);
             if on {
-                // "On" mark under CC.
-                ui::fill(p, Rect::new(b.x + 22.0, b.y + b.h - 8.0, b.w - 44.0, 4.0), 2.0, ui::accent());
+                ui::fill(p, Rect::new(b.x + 22.0, b.y + b.h - 6.0, b.w - 44.0, 3.0), 1.5, ui::accent());
             }
         }
         if cx.views.store.settings.show_clock {
@@ -625,6 +657,15 @@ fn draw_caption(p: plx_ui::Painter, text: &str, size: i32, bottom: f32, ink: [f3
 
 /// Caption lines centred on `cx`, `bottom` px above the screen's bottom edge, outlined.
 fn draw_caption_at(p: plx_ui::Painter, text: &str, size: i32, bottom: f32, ink: [f32; 4], cx: f32) {
+    draw_caption_styled(p, text, size, bottom, ink, cx, SUB_STYLE.with(|s| s.get()));
+}
+
+thread_local! {
+    /// The subtitle style for this frame's captions (0 outline, 1 shadow, 2 box).
+    static SUB_STYLE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+fn draw_caption_styled(p: plx_ui::Painter, text: &str, size: i32, bottom: f32, ink: [f32; 4], cx: f32, style: u8) {
     let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     let lh = size as f32 * 1.3;
     let top = 1080.0 - bottom - lh * lines.len() as f32;
@@ -632,8 +673,19 @@ fn draw_caption_at(p: plx_ui::Painter, text: &str, size: i32, bottom: f32, ink: 
     let outline = [0.0, 0.0, 0.0, 0.92];
     for (i, line) in lines.iter().enumerate() {
         let y = top + i as f32 * lh;
-        for (dx, dy) in [(-o, 0.0), (o, 0.0), (0.0, -o), (0.0, o), (-o, -o), (o, -o), (-o, o), (o, o)] {
-            ui::text(p, line, cx + dx, y + dy, size, outline, ui::ALIGN_CENTER, true);
+        match style {
+            1 => {
+                ui::text(p, line, cx + o * 1.2, y + o * 1.2, size, [0.0, 0.0, 0.0, 0.85], ui::ALIGN_CENTER, true);
+            }
+            2 => {
+                let w = line.chars().count() as f32 * size as f32 * 0.52 + 32.0;
+                ui::fill(p, Rect::new(cx - w / 2.0, y - 4.0, w, lh), 6.0, [0.0, 0.0, 0.0, 0.72]);
+            }
+            _ => {
+                for (dx, dy) in [(-o, 0.0), (o, 0.0), (0.0, -o), (0.0, o), (-o, -o), (o, -o), (-o, o), (o, o)] {
+                    ui::text(p, line, cx + dx, y + dy, size, outline, ui::ALIGN_CENTER, true);
+                }
+            }
         }
         ui::text(p, line, cx, y, size, ink, ui::ALIGN_CENTER, true);
     }

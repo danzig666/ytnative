@@ -139,9 +139,14 @@ fn items(page: SettingsPage) -> Vec<Item> {
             Opt("Auto-translate when missing", |s| on_off(s.subtitle_auto_translate), |s, _| s.subtitle_auto_translate = !s.subtitle_auto_translate),
             Opt("Size", |s| s.subtitle_size.to_string(), |s, d| s.subtitle_size = cycle(&[32, 38, 44, 52, 60, 72], s.subtitle_size, d)),
             Opt("Colour", |s| s.subtitle_color.clone(), |s, d| {
-                const C: &[&str] = &["white", "yellow", "cyan"];
+                const C: &[&str] = &["white", "light gray", "gray", "dark gray", "yellow", "light yellow", "cyan", "green", "orange", "pink"];
                 let i = C.iter().position(|c| *c == s.subtitle_color).unwrap_or(0) as i32;
-                s.subtitle_color = C[((i + d).rem_euclid(3)) as usize].into();
+                s.subtitle_color = C[((i + d).rem_euclid(C.len() as i32)) as usize].into();
+            }),
+            Opt("Style", |s| s.subtitle_style.clone(), |s, d| {
+                const T: &[&str] = &["outline", "shadow", "box"];
+                let i = T.iter().position(|x| *x == s.subtitle_style).unwrap_or(0) as i32;
+                s.subtitle_style = T[((i + d).rem_euclid(T.len() as i32)) as usize].into();
             }),
             Opt("Position from bottom", |s| format!("{} px", s.subtitle_bottom_offset), |s, d| s.subtitle_bottom_offset = cycle(&[40, 90, 140, 200], s.subtitle_bottom_offset, d)),
         ],

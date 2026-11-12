@@ -111,6 +111,9 @@ pub struct BrowseScreen {
     section: Section,
     /// Sidebar slide position (0 hidden, 1 shown) and the clock it was last stepped at.
     nav_t: f32,
+    /// Last BACK on the sidebar (a second one soon after exits).
+    back_at: u32,
+    exit_armed: bool,
     nav_ms: u32,
     /// The sidebar was asked for (Left from the leftmost tile, or BACK): focus may stay there.
     nav_open: std::cell::Cell<bool>,
@@ -152,6 +155,8 @@ impl BrowseScreen {
             section,
             pending: None,
             nav_t: 0.0,
+            back_at: 0,
+            exit_armed: false,
             nav_ms: 0,
             nav_open: std::cell::Cell::new(false),
             focus_req: std::cell::Cell::new(None),
@@ -232,12 +237,33 @@ impl Machine<YtHost> for BrowseScreen {
             kind: plx_machine::machine::InputKind::Key { key: plx_machine::machine::Key::Back, edge, .. }, ..
         }) = ev {
             let on_nav = cx.focus.current.is_some_and(|k| k.entry == self.entry && k.elem >= NAV_BASE);
+            if on_nav {
+                // BACK twice on the sidebar leaves the app; once only warns.
+                if *edge == plx_machine::machine::Edge::Down {
+                    let now = cx.views.now_ms;
+                    if self.back_at != 0 && now.wrapping_sub(self.back_at) < 2500 {
+                        self.exit_armed = true;
+                        return Handled::No;
+                    }
+                    self.back_at = now;
+                    fx.push(Fx::App(YtFx::Toast("Press BACK again to exit".into())));
+                    return Handled::Yes;
+                }
+                return if self.exit_armed { Handled::No } else { Handled::Yes };
+            }
             if !on_nav {
                 if *edge == plx_machine::machine::Edge::Down {
                     self.nav_open.set(true);
                     self.focus_req.set(Some(self.nav.elem(self.nav_index_of_section(&items))));
                     fx.invalidate(plx_machine::present::Provenance::Input);
                 }
+                return Handled::Yes;
+            }
+        }
+        if let ScreenEvent::Input(plx_machine::machine::InputEvent { kind: plx_machine::machine::InputKind::Click { x, .. }, .. }) = ev {
+            if self.nav_open.get() && *x > NAV_W {
+                self.nav_open.set(false);
+                fx.invalidate(plx_machine::present::Provenance::Input);
                 return Handled::Yes;
             }
         }
@@ -474,14 +500,18 @@ impl Screen<YtHost> for BrowseScreen {
             Part::draw(&mut view, f, Rect::new(0.0, 0.0, 1920.0, 1080.0));
             ui::draw_focused_caption(p, f.measure, 20.0);
             ui::draw_row_arrows(p, LEFT, 1920.0 - LEFT + 40.0);
-            view.record_stops(f);
+            if !self.nav_open.get() {
+                view.record_stops(f);
+            }
         } else if src.cards.is_empty() {
             common::empty_state(p, feed, Rect::new(LEFT, 150.0, 1920.0 - 2.0 * LEFT, 800.0));
         } else {
             ui::reset_focused_caption();
             self.grid.draw(f, p, &src);
             ui::draw_focused_caption(p, f.measure, 20.0);
-            self.grid.record_stops(f, p, &src);
+            if !self.nav_open.get() {
+                self.grid.record_stops(f, p, &src);
+            }
         }
         // Sidebar
         // Page title over a header band, after the content: scrolled rows go under it.

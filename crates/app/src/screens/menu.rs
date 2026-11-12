@@ -42,6 +42,9 @@ enum Act {
     Sleep,
     MaxQuality,
     Subtitles,
+    SubSize,
+    SubColor,
+    SubStyle,
     RepeatMode,
     Close,
 }
@@ -68,6 +71,9 @@ pub struct MenuScreen {
     state: State,
 }
 
+const SUB_SIZES: &[u32] = &[32, 38, 44, 52, 60, 72];
+const SUB_COLORS: &[&str] = &["white", "light gray", "gray", "dark gray", "yellow", "light yellow", "cyan", "green", "orange", "pink"];
+const SUB_STYLES: &[&str] = &["outline", "shadow", "box"];
 const SPEEDS: &[f32] = &[0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
 
 /// Card-menu item kinds, in the default order, with their settings labels.
@@ -224,6 +230,9 @@ impl MenuScreen {
             ("Sleep timer".to_string(), Act::Sleep),
             ("Maximum quality".to_string(), Act::MaxQuality),
             ("Subtitles".to_string(), Act::Subtitles),
+            ("Subtitle size".to_string(), Act::SubSize),
+            ("Subtitle colour".to_string(), Act::SubColor),
+            ("Subtitle style".to_string(), Act::SubStyle),
             ("When the video ends".to_string(), Act::RepeatMode),
             ("Close".to_string(), Act::Close),
         ]);
@@ -269,6 +278,9 @@ impl MenuScreen {
                 m => format!("{m} min  \u{203A}"),
             },
             Act::Subtitles => format!("{}  \u{203A}", if s.subtitles { "On" } else { "Off" }),
+            Act::SubSize => format!("{}  \u{203A}", s.subtitle_size),
+            Act::SubColor => format!("{}  \u{203A}", crate::i18n::tr(&s.subtitle_color)),
+            Act::SubStyle => format!("{}  \u{203A}", crate::i18n::tr(&s.subtitle_style)),
             Act::RepeatMode => format!(
                 "{}  \u{203A}",
                 match s.repeat {
@@ -310,6 +322,9 @@ impl MenuScreen {
                     T.iter().position(|m| *m == cx.views.store.sleep_minutes).unwrap_or(0),
                 )
             }
+            Act::SubSize => (SUB_SIZES.iter().map(|v| v.to_string()).collect(), SUB_SIZES.iter().position(|v| *v == s.subtitle_size).unwrap_or(2)),
+            Act::SubColor => (SUB_COLORS.iter().map(|v| v.to_string()).collect(), SUB_COLORS.iter().position(|v| *v == s.subtitle_color).unwrap_or(0)),
+            Act::SubStyle => (SUB_STYLES.iter().map(|v| v.to_string()).collect(), SUB_STYLES.iter().position(|v| *v == s.subtitle_style).unwrap_or(0)),
             Act::RepeatMode => {
                 const R: &[Repeat] = &[Repeat::Autoplay, Repeat::Off, Repeat::One, Repeat::List];
                 (
@@ -398,6 +413,18 @@ impl MenuScreen {
                 fx.push(Fx::App(YtFx::Toast("Applies to the next video".into())));
             }
             Act::Subtitles => fx.push(Fx::App(YtFx::EditSettings(Box::new(|s| s.subtitles = !s.subtitles)))),
+            Act::SubSize => fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| {
+                let i = SUB_SIZES.iter().position(|v| *v == s.subtitle_size).unwrap_or(2) as i32;
+                s.subtitle_size = SUB_SIZES[(i + dir).clamp(0, SUB_SIZES.len() as i32 - 1) as usize];
+            })))),
+            Act::SubColor => fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| {
+                let i = SUB_COLORS.iter().position(|v| *v == s.subtitle_color).unwrap_or(0) as i32;
+                s.subtitle_color = SUB_COLORS[(i + dir).rem_euclid(SUB_COLORS.len() as i32) as usize].into();
+            })))),
+            Act::SubStyle => fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| {
+                let i = SUB_STYLES.iter().position(|v| *v == s.subtitle_style).unwrap_or(0) as i32;
+                s.subtitle_style = SUB_STYLES[(i + dir).rem_euclid(SUB_STYLES.len() as i32) as usize].into();
+            })))),
             Act::RepeatMode => fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| {
                 const R: &[Repeat] = &[Repeat::Autoplay, Repeat::Off, Repeat::One, Repeat::List];
                 let i = R.iter().position(|r| *r == s.repeat).unwrap_or(0) as i32;

@@ -90,7 +90,7 @@ fn note_card(r: Rect) {
 pub fn draw_row_arrows(p: Painter, left: f32, right: f32) {
     let rows = ROWS_DRAWN.with(|v| std::mem::take(&mut *v.borrow_mut()));
     for (cy, _h, min_x, max_r) in rows {
-        if min_x < left - 6.0 {
+        if min_x < left - 160.0 {
             fill(p, Rect::new(0.0, cy - 60.0, 64.0, 120.0), 0.0, [0.0, 0.0, 0.0, 0.35]);
             text(p, "\u{2039}", 32.0, cy - 50.0, 72, [1.0, 1.0, 1.0, 0.55], ALIGN_CENTER, false);
         }
@@ -549,5 +549,53 @@ impl ChoiceBox {
             .collect();
         self.list.draw(p, &rows, self.list.focused(f.cx, rows.len()));
         self.list.stops(f, rows.len());
+    }
+}
+
+/// Line icons (shapes after Lucide, ISC licence), drawn through plx's SVG mask renderer and tinted.
+pub mod icon {
+    use plx_ui::{Painter, Rect};
+    const HEAD: &str = r##"<svg viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">"##;
+    const THUMB_UP: &str = r##"<path d="M7 10v12"/><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z"/>"##;
+    const THUMB_DOWN: &str = r##"<path d="M17 14V2"/><path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22a3.13 3.13 0 0 1-3-3.88Z"/>"##;
+    const CHAT: &str = r##"<path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/>"##;
+    const GEAR: &str = r##"<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>"##;
+
+    #[derive(Clone, Copy, PartialEq)]
+    pub enum Kind {
+        ThumbUp,
+        ThumbDown,
+        Chat,
+        Gear,
+        Cc,
+    }
+
+    fn svg(k: Kind, filled: bool) -> &'static str {
+        use std::sync::OnceLock;
+        static S: OnceLock<Vec<String>> = OnceLock::new();
+        let all = S.get_or_init(|| {
+            let mut v = Vec::new();
+            for body in [THUMB_UP, THUMB_DOWN, CHAT, GEAR] {
+                v.push(format!("{HEAD}{body}</svg>"));
+                v.push(format!("{}{body}</svg>", HEAD.replace(r##"fill="none""##, r##"fill="#ffffff""##)));
+            }
+            v
+        });
+        let i = match k {
+            Kind::ThumbUp => 0,
+            Kind::ThumbDown => 2,
+            Kind::Chat => 4,
+            Kind::Gear | Kind::Cc => 6,
+        };
+        &all[i + filled as usize]
+    }
+
+    /// Draws icon `k` in the square `r`, `filled` for an active state.
+    pub fn draw(p: Painter, k: Kind, r: Rect, tint: [f32; 4], filled: bool) {
+        if k == Kind::Cc {
+            plx_ui::icons::draw(p, plx_ui::icons::Icon::Cc, r, tint);
+            return;
+        }
+        plx_ui::icons::draw_svg(p, plx_ui::icons::Svg::new(svg(k, filled)), r, tint);
     }
 }
