@@ -231,6 +231,8 @@ pub struct AppRig {
     pub sb_offer: Option<(u64, String)>,
     /// Start position for the next Play of this video (phone cast, resume).
     pub pending_start: Option<(String, u64)>,
+    /// Default speed to apply once the new video is playing.
+    pending_rate: Option<f32>,
 }
 
 impl AppRig {
@@ -251,6 +253,7 @@ impl AppRig {
             sb: Default::default(),
             sb_offer: None,
             pending_start: None,
+            pending_rate: None,
         };
         rig.refresh_accounts();
         rig
@@ -294,6 +297,11 @@ impl AppRig {
         if let Some((_, until)) = &self.store.toast {
             if now_ms > *until {
                 self.store.toast = None;
+            }
+        }
+        if self.player_view.phase == Phase::Playing {
+            if let Some(r) = self.pending_rate.take() {
+                self.player.set_rate(r);
             }
         }
         self.sponsorblock(now_ms);
@@ -593,6 +601,7 @@ impl Rig<YtHost> for AppRig {
                 };
                 self.sb = yt_core::ext::sponsorblock::SkipTracker::new(!s.sb_skip_once);
                 self.sb_offer = None;
+                self.pending_rate = ((s.speed - 1.0).abs() > 0.01).then_some(s.speed);
                 let start = self
                     .pending_start
                     .take()
