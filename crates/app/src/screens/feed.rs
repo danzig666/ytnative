@@ -16,6 +16,9 @@ use std::borrow::Cow;
 const STYLE: RowStyle = RowStyle { w: 380.0, h: 214.0, gap: 44.0, ..RowStyle::HOME };
 const SPEC: GridSpec = GridSpec::new(170.0, 96.0).columns(4, STYLE, 112.0);
 const G: GroupId = GroupId(1);
+const G_BTN: GroupId = GroupId(2);
+const SUB_BTN: u32 = 0x7900_0000;
+const SUB_RECT: Rect = Rect::new(112.0, 112.0, 300.0, 50.0);
 
 struct State(String);
 impl LogicalState for State {
@@ -42,6 +45,14 @@ impl FeedScreen {
         let f = cx.views.store.feed(&self.key);
         CardsSrc { cards: f.map(|f| f.cards.as_slice()).unwrap_or(&[]), more: f.is_some_and(|f| f.continuation.is_some()) }
     }
+    /// The channel id when this page is a channel.
+    fn channel(&self) -> Option<&str> {
+        match &self.key {
+            FeedKey::Browse { id, .. } if id.starts_with("UC") => Some(id),
+            _ => None,
+        }
+    }
+
     fn title(&self, cx: &Cx<'_, YtHost>) -> String {
         if let Some(t) = cx.views.store.feed(&self.key).map(|f| f.title.clone()).filter(|t| !t.is_empty()) {
             return t;
@@ -60,7 +71,21 @@ impl Machine<YtHost> for FeedScreen {
     type Ev = ScreenEvent<YtHost>;
     fn step(&mut self, ev: &Self::Ev, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) -> Handled {
         match ev {
-            ScreenEvent::Mount => fx.push(Fx::App(YtFx::Load(self.key.clone()))),
+            ScreenEvent::Mount => {
+                fx.push(Fx::App(YtFx::Load(self.key.clone())));
+                if let Some(ch) = self.channel() {
+                    fx.push(Fx::App(YtFx::LoadChannelInfo(ch.to_string())));
+                }
+            }
+            ScreenEvent::Activate(SUB_BTN) => {
+                if let Some(ch) = self.channel() {
+                    let now = cx.views.store.subscribed.get(ch).copied().unwrap_or(false);
+                    fx.push(Fx::App(YtFx::Act(crate::host::UserAction::Subscribe { channel_id: ch.to_string(), subscribe: !now })));
+                    fx.invalidate(plx_machine::present::Provenance::Input);
+                }
+                return Handled::Yes;
+            }
+            ScreenEvent::Async(..) => fx.invalidate(plx_machine::present::Provenance::Lifecycle),
             ScreenEvent::Async(_, YtMsg::Loaded(_) | YtMsg::Failed(..)) => fx.invalidate(plx_machine::present::Provenance::Lifecycle),
             _ => {}
         }
@@ -101,20 +126,44 @@ impl Machine<YtHost> for FeedScreen {
 
 impl Focusable<YtHost> for FeedScreen {
     fn groups(&self, cx: &Cx<'_, YtHost>, out: &mut Vec<GroupSpec>) {
+        if self.channel().is_some() {
+            out.push(GroupSpec {
+                id: G_BTN,
+                kind: plx_ui::screen::GroupKind::Row { wrap: false },
+                seat: plx_ui::screen::Seat::First,
+                reachable: plx_ui::screen::AxisMask::BOTH,
+                edge: [plx_ui::screen::EdgeRule::Geometric; 4],
+                extent: SUB_RECT,
+                len: 1,
+                elem: plx_ui::screen::ElemKind::Control,
+            });
+        }
         out.push(self.grid.group_spec(G, self.src(cx).cards.len()));
     }
-    fn group_of(&self, _key: &u32, _cx: &Cx<'_, YtHost>) -> Option<GroupId> {
-        Some(G)
+    fn group_of(&self, key: &u32, _cx: &Cx<'_, YtHost>) -> Option<GroupId> {
+        Some(if *key == SUB_BTN { G_BTN } else { G })
     }
     fn neighbour(&self, key: FocusKey<u32>, dir: Dir, cx: &Cx<'_, YtHost>) -> Step<u32> {
-        self.grid.neighbour(&self.src(cx), key, dir)
+        if key.elem == SUB_BTN {
+            return match (dir, self.src(cx).cards.first()) {
+                (Dir::Down, Some(c)) => Step::Move(FocusKey { entry: self.entry, elem: c.elem }),
+                _ => Step::Edge,
+            };
+        }
+        match self.grid.neighbour(&self.src(cx), key, dir) {
+            Step::Edge if dir == Dir::Up && self.channel().is_some() => Step::Move(FocusKey { entry: self.entry, elem: SUB_BTN }),
+            s => s,
+        }
     }
     fn place(&self, key: &u32, cx: &Cx<'_, YtHost>, at: At) -> Option<Placed> {
+        if *key == SUB_BTN {
+            return Some(Placed { rect: SUB_RECT, rest_rect: SUB_RECT, clip: Rect::new(0.0, 0.0, 1920.0, 1080.0), index: Some(0) });
+        }
         self.grid.place(cx, &self.src(cx), key, at)
     }
     fn reconcile(&self, want: FocusKey<u32>, cx: &Cx<'_, YtHost>) -> FocusKey<u32> {
         let src = self.src(cx);
-        if src.cards.iter().any(|c| c.elem == want.elem) {
+        if src.cards.iter().any(|c| c.elem == want.elem) || (want.elem == SUB_BTN && self.channel().is_some()) {
             return want;
         }
         src.cards.first().map_or(want, |c| FocusKey { entry: self.entry, elem: c.elem })
@@ -140,6 +189,18 @@ impl Screen<YtHost> for FeedScreen {
         let p = f.painter;
         let cx = f.cx;
         ui::text(p, &ui::ellipsize(&self.title(cx), 70), 112.0, 64.0, 46, ui::WHITE, ui::ALIGN_LEFT, true);
+        if let Some(ch) = self.channel() {
+            let sub = cx.views.store.subscribed.get(ch).copied();
+            let focused = cx.focus.current.is_some_and(|k| k.elem == SUB_BTN);
+            let (label, bg) = match sub {
+                Some(true) => ("Subscribed", [1.0, 1.0, 1.0, 0.16]),
+                Some(false) => ("Subscribe", ui::ACCENT),
+                None => ("\u{2026}", [1.0, 1.0, 1.0, 0.10]),
+            };
+            ui::fill(p, SUB_RECT, 25.0, if focused { ui::WHITE } else { bg });
+            let ink = if focused { [0.0, 0.0, 0.0, 1.0] } else { ui::WHITE };
+            ui::text(p, label, SUB_RECT.x + SUB_RECT.w / 2.0, SUB_RECT.y + 10.0, 26, ink, ui::ALIGN_CENTER, true);
+        }
         if let FeedKey::Search { params, .. } = &self.key {
             let f = &cx.views.store.search_filters;
             let hint = if params.is_some() && !f.is_default() { format!("{}   \u{25B2} Filters", f.summary()) } else { "\u{25B2} Filters".into() };

@@ -49,6 +49,8 @@ pub enum YtArg {
     Replies(String, String),
     /// Video info: description + chapters.
     Info,
+    /// "Save to playlist" picker for a video: (video id, title).
+    PlaylistPicker(String, String),
     SearchFilters(String),
 }
 
@@ -71,6 +73,7 @@ impl ScreenArg for YtArg {
             YtArg::SearchFilters(_) => 11,
             YtArg::Replies(..) => 12,
             YtArg::Info => 13,
+            YtArg::PlaylistPicker(..) => 14,
         })
     }
     fn title(&self) -> Option<&str> {
@@ -108,6 +111,9 @@ pub enum UserAction {
     Rate(String, yt_core::actions::Rating),
     Subscribe { channel_id: String, subscribe: bool },
     WatchLater(String),
+    /// Add (true) or remove a video from a playlist.
+    Playlist { playlist_id: String, video_id: String, add: bool },
+    NewPlaylist { title: String, video_id: String },
     /// One of a card's own YouTube menu items (Not interested, Remove from history, ...).
     Menu(yt_core::actions::MenuAction),
     SwitchAccount(String),
@@ -116,6 +122,8 @@ pub enum UserAction {
 
 pub enum YtFx {
     Act(UserAction),
+    LoadChannelInfo(String),
+    LoadPlaylists(String),
     SetQueue(Vec<String>, bool),
     EditFilters(Box<dyn FnOnce(&mut yt_core::search_filters::Filters) + Send>),
     /// `key` names the list in the store: a video id (top-level comments) or a replies token.
@@ -205,6 +213,7 @@ impl Mounter<YtHost> for Mount {
             YtArg::Comments(v) => Box::new(screens::comments::CommentsScreen::new(entry, v.clone(), None)),
             YtArg::Replies(token, author) => Box::new(screens::comments::CommentsScreen::new(entry, token.clone(), Some(author.clone()))),
             YtArg::Info => Box::new(screens::info::InfoScreen::new(entry)),
+            YtArg::PlaylistPicker(v, t) => Box::new(screens::menu::MenuScreen::playlists(entry, v.clone(), t.clone(), cx)),
             YtArg::SearchFilters(q) => Box::new(screens::menu::MenuScreen::filters(entry, q.clone())),
         }
     }
@@ -215,6 +224,8 @@ type Done = (Addr, Work);
 /// Results workers post back to the main thread.
 enum Work {
     Toast { msg: String, accounts_changed: bool },
+    ChannelInfo(String, Option<bool>),
+    Playlists(String, Vec<yt_core::actions::PlaylistOption>),
     /// DeArrow replacements: (video id, title, thumbnail url).
     Branding(Vec<(String, Option<String>, Option<String>)>),
     Comments { video_id: String, page: Option<yt_core::comments::CommentsPage>, append: bool },
@@ -356,6 +367,16 @@ impl AppRig {
                     }
                     c.loading = false;
                     out.push((addr, YtMsg::Comments));
+                }
+                Work::ChannelInfo(id, sub) => {
+                    if let Some(s) = sub {
+                        self.store.subscribed.insert(id, s);
+                    }
+                    out.push((addr, YtMsg::Acted));
+                }
+                Work::Playlists(v, opts) => {
+                    self.store.playlist_options.insert(v, opts);
+                    out.push((addr, YtMsg::Acted));
                 }
                 Work::Branding(list) => {
                     for (vid, title, thumb) in list {
@@ -513,6 +534,16 @@ fn run_action(session: &Mutex<Option<yt_core::session::Session>>, a: &UserAction
             }
         }),
         UserAction::WatchLater(v) => with_session(session, |s| s.watch_later_add(v)).map(|_| "Saved to Watch later".to_string()),
+        UserAction::Playlist { playlist_id, video_id, add } => with_session(session, |s| {
+            if *add {
+                s.add_to_playlist(playlist_id, video_id).map(|_| "Added to playlist".to_string())
+            } else {
+                s.remove_from_playlist(playlist_id, video_id).map(|_| "Removed from playlist".to_string())
+            }
+        }),
+        UserAction::NewPlaylist { title, video_id } => with_session(session, |s| {
+            s.create_playlist(title, yt_core::actions::Privacy::Private, &[video_id.as_str()]).map(|_| format!("Created playlist \u{201C}{title}\u{201D}"))
+        }),
         UserAction::Menu(m) => with_session(session, |s| s.run_menu_action(m)).map(|ok| if ok { "Done".to_string() } else { "Not available".to_string() }),
         UserAction::SwitchAccount(id) => {
             return match yt_core::accounts::switch(id) {
@@ -663,7 +694,31 @@ impl Rig<YtHost> for AppRig {
                 self.signin = SignIn::Idle;
                 self.refresh_accounts();
             }
+            YtFx::LoadChannelInfo(id) => {
+                self.spawn(from, "channel", move |s| {
+                    let sub = with_session(s, |s| s.subscribe_info(&id)).ok().flatten().map(|i| i.subscribed);
+                    Work::ChannelInfo(id, sub)
+                });
+            }
+            YtFx::LoadPlaylists(v) => {
+                self.spawn(from, "playlists", move |s| {
+                    let opts = with_session(s, |s| s.playlists_for(&v)).unwrap_or_default();
+                    Work::Playlists(v, opts)
+                });
+            }
             YtFx::Act(action) => {
+                // Optimistic local state, so the UI reflects the action before YouTube's reads catch up.
+                match &action {
+                    UserAction::Subscribe { channel_id, subscribe } => {
+                        self.store.subscribed.insert(channel_id.clone(), *subscribe);
+                    }
+                    UserAction::Playlist { playlist_id, video_id, add } => {
+                        if let Some(o) = self.store.playlist_options.get_mut(video_id).and_then(|l| l.iter_mut().find(|o| &o.playlist_id == playlist_id)) {
+                            o.contains = *add;
+                        }
+                    }
+                    _ => {}
+                }
                 self.spawn(from, "action", move |s| {
                     let (r, changed) = run_action(s, &action);
                     Work::Toast { msg: r, accounts_changed: changed }

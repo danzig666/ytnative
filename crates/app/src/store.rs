@@ -177,6 +177,10 @@ pub struct Comments {
 #[derive(Default)]
 pub struct Store {
     pub accounts: Vec<AccountRow>,
+    /// Subscribe state per channel id (from YouTube, updated optimistically).
+    pub subscribed: HashMap<String, bool>,
+    /// Playlists for the "Save to playlist" picker: video id -> options.
+    pub playlist_options: HashMap<String, Vec<yt_core::actions::PlaylistOption>>,
     /// Videos of the list the current video was opened from (for next/previous), and whether
     /// they are Shorts (Up/Down then switch videos, like YouTube's Shorts player).
     pub queue: Vec<String>,

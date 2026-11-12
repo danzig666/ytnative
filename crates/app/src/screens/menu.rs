@@ -29,6 +29,9 @@ enum Act {
     Comments(String),
     Info,
     Filter(u8),
+    PickPlaylist(String, String),
+    TogglePlaylist(String, String, bool),
+    NewPlaylist(String, String),
     ApplyFilters(String),
     Speed,
     MaxQuality,
@@ -48,6 +51,8 @@ impl LogicalState for State {
 }
 
 pub struct MenuScreen {
+    /// Set on the playlist picker: rows are rebuilt when the playlists arrive.
+    picker_for: Option<String>,
     title: String,
     acts: Vec<(String, Act)>,
     list: VList,
@@ -59,6 +64,7 @@ const SPEEDS: &[f32] = &[0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
 impl MenuScreen {
     fn make(entry: EntryId, title: String, acts: Vec<(String, Act)>) -> Self {
         MenuScreen {
+            picker_for: None,
             state: State(title.clone()),
             title,
             acts,
@@ -83,6 +89,7 @@ impl MenuScreen {
             }
             if let Some(v) = card.video_id() {
                 acts.push(("Save to Watch later".to_string(), Act::User(UserAction::WatchLater(v.to_string()))));
+                acts.push(("Save to playlist\u{2026}".to_string(), Act::PickPlaylist(v.to_string(), card.title.clone())));
             }
             // The card's own YouTube menu (Not interested, Don't recommend channel, Remove from
             // history, ...). Lazy "More" panels and plain navigation entries are left out.
@@ -103,6 +110,20 @@ impl MenuScreen {
         }
         acts.push(("Close".into(), Act::Close));
         Self::make(entry, title, acts)
+    }
+
+    /// "Save to playlist": one row per playlist (ticked when it already holds the video).
+    pub fn playlists(entry: EntryId, video_id: String, title: String, cx: &Cx<'_, YtHost>) -> Self {
+        let mut acts = Vec::new();
+        for o in cx.views.store.playlist_options.get(&video_id).into_iter().flatten() {
+            let mark = if o.contains { "\u{2713}  " } else { "     " };
+            acts.push((format!("{mark}{}", o.title), Act::TogglePlaylist(o.playlist_id.clone(), video_id.clone(), !o.contains)));
+        }
+        acts.push(("+  New private playlist".to_string(), Act::NewPlaylist(title.clone(), video_id.clone())));
+        acts.push(("Close".to_string(), Act::Close));
+        let mut m = Self::make(entry, "Save to playlist".into(), acts);
+        m.picker_for = Some(video_id);
+        m
     }
 
     pub fn filters(entry: EntryId, query: String) -> Self {
@@ -144,6 +165,7 @@ impl MenuScreen {
                 ));
             }
             acts.push(("Save to Watch later".to_string(), Act::User(UserAction::WatchLater(st.video_id.clone()))));
+            acts.push(("Save to playlist\u{2026}".to_string(), Act::PickPlaylist(st.video_id.clone(), st.title.clone())));
             acts.push(("Video info & chapters".to_string(), Act::Info));
             acts.push(("Comments".to_string(), Act::Comments(st.video_id.clone())));
             if !st.channel_id.is_empty() {
@@ -247,6 +269,19 @@ impl MenuScreen {
                 fx.push(Fx::App(YtFx::Act(a.clone())));
                 fx.push(Fx::Nav(NavOp::Pop));
             }
+            Act::PickPlaylist(v, t) => {
+                fx.push(Fx::App(YtFx::LoadPlaylists(v.clone())));
+                fx.push(Fx::Nav(NavOp::Pop));
+                fx.push(Fx::Nav(NavOp::Present(YtArg::PlaylistPicker(v.clone(), t.clone()))));
+            }
+            Act::TogglePlaylist(pl, v, add) => {
+                fx.push(Fx::App(YtFx::Act(UserAction::Playlist { playlist_id: pl.clone(), video_id: v.clone(), add: *add })));
+                fx.push(Fx::Nav(NavOp::Pop));
+            }
+            Act::NewPlaylist(t, v) => {
+                fx.push(Fx::App(YtFx::Act(UserAction::NewPlaylist { title: t.clone(), video_id: v.clone() })));
+                fx.push(Fx::Nav(NavOp::Pop));
+            }
             Act::Info => {
                 fx.push(Fx::Nav(NavOp::Pop));
                 fx.push(Fx::Nav(NavOp::Push(YtArg::Info)));
@@ -289,6 +324,20 @@ impl MenuScreen {
 impl Machine<YtHost> for MenuScreen {
     type Ev = ScreenEvent<YtHost>;
     fn step(&mut self, ev: &Self::Ev, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) -> Handled {
+        if let (Some(v), ScreenEvent::Async(..)) = (&self.picker_for, ev) {
+            let fresh = Self::playlists(self.list.entry, v.clone(), String::new(), cx);
+            // keep the title used for "New playlist"
+            let keep_title = self.acts.iter().find_map(|a| if let Act::NewPlaylist(t, _) = &a.1 { Some(t.clone()) } else { None });
+            self.acts = fresh.acts;
+            if let Some(t) = keep_title {
+                for a in self.acts.iter_mut() {
+                    if let Act::NewPlaylist(tt, _) = &mut a.1 {
+                        *tt = t.clone();
+                    }
+                }
+            }
+            fx.invalidate(plx_machine::present::Provenance::Lifecycle);
+        }
         let n = self.acts.len();
         match ev {
             ScreenEvent::Activate(e) => {
@@ -351,6 +400,11 @@ impl Screen<YtHost> for MenuScreen {
         let cx = f.cx;
         ui::fill(p, PANEL, 0.0, ui::PANEL);
         ui::text(p, &ui::ellipsize(&self.title, 30), PANEL.x + 60.0, 90.0, 36, ui::WHITE, ui::ALIGN_LEFT, true);
+        if let Some(v) = &self.picker_for {
+            if !cx.views.store.playlist_options.contains_key(v) {
+                ui::text(p, "Loading your playlists\u{2026}", PANEL.x + 60.0, 150.0, 24, ui::FAINT, ui::ALIGN_LEFT, false);
+            }
+        }
         let rows: Vec<Row> = self
             .acts
             .iter()
