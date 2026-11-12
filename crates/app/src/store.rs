@@ -168,6 +168,10 @@ pub struct Comments {
 #[derive(Default)]
 pub struct Store {
     pub accounts: Vec<AccountRow>,
+    /// Videos of the list the current video was opened from (for next/previous), and whether
+    /// they are Shorts (Up/Down then switch videos, like YouTube's Shorts player).
+    pub queue: Vec<String>,
+    pub queue_shorts: bool,
     /// Filters of the last search (the filters panel edits these).
     pub search_filters: yt_core::search_filters::Filters,
     pub comments: HashMap<String, Comments>,

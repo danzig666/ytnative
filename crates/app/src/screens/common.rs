@@ -7,6 +7,20 @@ use plx_machine::machine::{Cx, Effects, Fx, NavOp};
 use plx_ui::{Painter, Rect};
 use yt_core::model::{Endpoint, ItemKind};
 
+/// Opens a card that sits in `list`: remembers the list as the play queue first.
+pub fn open_card_in(card: &Card, list: &[Card], fx: &mut Effects<'_, YtHost>) {
+    if card.video_id().is_some() {
+        let shorts = card.item.kind == ItemKind::Short;
+        let q: Vec<String> = list
+            .iter()
+            .filter(|c| !shorts || c.item.kind == ItemKind::Short)
+            .filter_map(|c| c.video_id().map(str::to_string))
+            .collect();
+        fx.push(Fx::App(YtFx::SetQueue(q, shorts)));
+    }
+    open_card(card, fx);
+}
+
 /// What activating a card does: play a video, open a channel / playlist, run a search.
 pub fn open_card(card: &Card, fx: &mut Effects<'_, YtHost>) {
     let arg = match (&card.item.endpoint, card.item.kind) {

@@ -110,6 +110,7 @@ pub enum UserAction {
 
 pub enum YtFx {
     Act(UserAction),
+    SetQueue(Vec<String>, bool),
     EditFilters(Box<dyn FnOnce(&mut yt_core::search_filters::Filters) + Send>),
     LoadComments { video_id: String, continuation: Option<String> },
     Load(FeedKey),
@@ -672,6 +673,10 @@ impl Rig<YtHost> for AppRig {
                 });
             }
             YtFx::Toast(m) => self.store.toast(m, self.now_ms),
+            YtFx::SetQueue(q, shorts) => {
+                self.store.queue = q;
+                self.store.queue_shorts = shorts;
+            }
             YtFx::EditFilters(f) => f(&mut self.store.search_filters),
         }
     }

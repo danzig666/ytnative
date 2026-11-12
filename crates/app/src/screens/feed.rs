@@ -81,7 +81,7 @@ impl Machine<YtHost> for FeedScreen {
         match self.grid.on(ev, cx, &src, fx) {
             Some(CardEvent::Activate(e)) => {
                 if let Some(card) = cx.views.store.card(e) {
-                    common::open_card(card, fx);
+                    common::open_card_in(card, src.cards, fx);
                 }
                 return Handled::Yes;
             }

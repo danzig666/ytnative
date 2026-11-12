@@ -27,6 +27,8 @@ const WCODE_PLAYPAUSE: u32 = 261;
 const WCODE_FF: u32 = 451;
 const WCODE_RW: u32 = 452;
 const WCODE_STOP: [u32; 3] = [120, 260, 413];
+const WCODE_CH_UP: u32 = 300;
+const WCODE_CH_DOWN: u32 = 301;
 
 struct State(String);
 impl LogicalState for State {
@@ -61,6 +63,21 @@ impl PlayerScreen {
         fx.push(Fx::Timer { id: T_HIDE, after_ms: secs * 1000 });
         fx.push(Fx::Timer { id: T_TICK, after_ms: 500 });
         fx.invalidate(plx_machine::present::Provenance::Input);
+    }
+
+    /// Previous / next video of the list this one was opened from.
+    fn step_queue(&mut self, dir: i32, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
+        let q = &cx.views.store.queue;
+        let Some(i) = q.iter().position(|v| *v == self.video_id) else {
+            fx.push(Fx::App(YtFx::Toast("No other videos in this list".into())));
+            return;
+        };
+        let j = i as i32 + dir;
+        if j < 0 || j as usize >= q.len() {
+            fx.push(Fx::App(YtFx::Toast(if dir < 0 { "This is the first video".into() } else { "This is the last video".into() })));
+            return;
+        }
+        fx.push(Fx::Nav(NavOp::Replace(YtArg::Player { video_id: q[j as usize].clone(), playlist: self.playlist.clone() })));
     }
 
     fn seek(&mut self, dir: i64, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
@@ -162,6 +179,18 @@ impl Machine<YtHost> for PlayerScreen {
                     }
                     (Key::Right, _) | (_, WCODE_FF) => {
                         self.seek(1, cx, fx);
+                        Handled::Yes
+                    }
+                    (_, WCODE_CH_UP) => {
+                        self.step_queue(-1, cx, fx);
+                        Handled::Yes
+                    }
+                    (_, WCODE_CH_DOWN) => {
+                        self.step_queue(1, cx, fx);
+                        Handled::Yes
+                    }
+                    (Key::Up, _) | (Key::Down, _) if cx.views.store.queue_shorts => {
+                        self.step_queue(if *key == Key::Up { -1 } else { 1 }, cx, fx);
                         Handled::Yes
                     }
                     (Key::Up, _) | (Key::Down, _) => {
