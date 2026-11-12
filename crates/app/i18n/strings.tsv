@@ -206,3 +206,22 @@ white	fehér	weiß	blanco	blanc	белый
 yellow	sárga	gelb	amarillo	jaune	жёлтый
 cyan	cián	cyan	cian	cyan	голубой
 default	alapértelmezett	Standard	predeterminado	par défaut	по умолчанию
+Red button	Piros gomb	Rote Taste	Botón rojo	Bouton rouge	Красная кнопка
+Green button	Zöld gomb	Grüne Taste	Botón verde	Bouton vert	Зелёная кнопка
+Yellow button	Sárga gomb	Gelbe Taste	Botón amarillo	Bouton jaune	Жёлтая кнопка
+Blue button	Kék gomb	Blaue Taste	Botón azul	Bouton bleu	Синяя кнопка
+none	nincs	keine	ninguno	aucun	нет
+search	keresés	Suche	búsqueda	recherche	поиск
+settings	beállítások	Einstellungen	ajustes	paramètres	настройки
+accounts	fiókok	Konten	cuentas	comptes	аккаунты
+subtitles	feliratok	Untertitel	subtítulos	sous-titres	субтитры
+speed	sebesség	Tempo	velocidad	vitesse	скорость
+off	ki	aus	no	non	выкл
+Subtitles on	Feliratok be	Untertitel an	Subtítulos activados	Sous-titres activés	Субтитры включены
+Subtitles off	Feliratok ki	Untertitel aus	Subtítulos desactivados	Sous-titres désactivés	Субтитры выключены
+DNS over HTTPS (after restart)	DNS HTTPS-en át (újraindítás után)	DNS über HTTPS (nach Neustart)	DNS sobre HTTPS (tras reiniciar)	DNS sur HTTPS (après redémarrage)	DNS через HTTPS (после перезапуска)
+Proxy (proxy_url in settings.json)	Proxy (proxy_url a settings.json-ban)	Proxy (proxy_url in settings.json)	Proxy (proxy_url en settings.json)	Proxy (proxy_url dans settings.json)	Прокси (proxy_url в settings.json)
+Playback engine	Lejátszómotor	Wiedergabe-Engine	Motor de reproducción	Moteur de lecture	Движок воспроизведения
+System player	Rendszer lejátszó	System-Player	Reproductor del sistema	Lecteur système	Системный плеер
+4K / VP9 / AV1 (engine B)	4K / VP9 / AV1 (B motor)	4K / VP9 / AV1 (Engine B)	4K / VP9 / AV1 (motor B)	4K / VP9 / AV1 (moteur B)	4K / VP9 / AV1 (движок B)
+getting a code…	kód lekérése…	Code wird abgerufen…	obteniendo un código…	obtention d'un code…	получение кода…

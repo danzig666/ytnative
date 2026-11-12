@@ -369,7 +369,7 @@ impl Screen<YtHost> for SettingsScreen {
             .iter()
             .map(|it| match it {
                 Item::Page(l, _) => Row::new(*l).value("\u{203A}"),
-                Item::Opt(l, get, _) => Row::new(*l).value(format!("\u{2039}  {}  \u{203A}", get(s))),
+                Item::Opt(l, get, _) => Row::new(*l).value(format!("\u{2039}  {}  \u{203A}", crate::i18n::tr(&get(s)))),
                 Item::Action(l, _) => Row::new(*l),
                 Item::Info(l, get) => Row::new(*l).value(get(cx)),
             })

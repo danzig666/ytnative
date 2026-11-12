@@ -153,7 +153,8 @@ impl Default for Settings {
             hide_mixes: false,
             blocked_channels: Vec::new(),
             pinned: Vec::new(),
-            sections: crate::store::Section::ALL.iter().map(|s| s.key().to_string()).collect(),
+            // Trending is off by default: YouTube retired the page (browse answers HTTP 400).
+            sections: crate::store::Section::ALL.iter().filter(|s| **s != crate::store::Section::Trending).map(|s| s.key().to_string()).collect(),
             boot_section: "home".into(),
             idle_blank_secs: 120,
             time_24h: true,

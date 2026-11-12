@@ -51,6 +51,10 @@ impl StackPage<YtHost> for Rows {
         let (_, r) = f.shelves.get(k)?;
         Some(CardsSrc { cards: &f.cards[r.clone()], more: false })
     }
+    /// Room under every shelf for the caption of the shelf below (plx asserts at least this much).
+    fn shelf_foot(&self, _cx: &Cx<'_, YtHost>, _k: usize) -> f32 {
+        plx_ui::consts::UNDER_LABEL_AIR
+    }
     fn draw_heading(&self, k: usize, f: &mut DrawFrame<'_, '_, YtHost>, r: Rect, _lift: f32) {
         if let Some((title, _)) = f.cx.views.store.feed(&self.key).and_then(|fd| fd.shelves.get(k)) {
             ui::text(f.painter, title, SHELF_STYLE.margin_x, r.y + 8.0, 32, ui::WHITE, ui::ALIGN_LEFT, true);
@@ -374,8 +378,8 @@ impl Screen<YtHost> for BrowseScreen {
                 NavItem::Group(_, t) => Row::new(format!("\u{25A4} {}", ui::ellipsize(t, 16))),
                 NavItem::Settings => Row::new("Settings"),
                 NavItem::Account => Row::new(match (&cx.views.store.account, cx.views.store.signed_in) {
-                    (Some(a), true) => ui::ellipsize(a, 18),
-                    (None, true) => "Account".into(),
+                    (Some(a), true) if !a.trim().is_empty() => ui::ellipsize(a, 18),
+                    (_, true) => "Account".into(),
                     _ => "Sign in".into(),
                 }),
             })
