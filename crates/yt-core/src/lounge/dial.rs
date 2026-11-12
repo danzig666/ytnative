@@ -91,7 +91,7 @@ pub fn start(cfg: DialConfig, on_launch: impl Fn(LaunchRequest) + Send + Sync + 
 
     let ssdp = match cfg.ssdp_port {
         Some(port) => {
-            let sock = UdpSocket::bind(("0.0.0.0", port)).with_context(|| format!("DIAL: bind UDP {port} (SSDP port taken?)"))?;
+            let sock = ssdp_socket(port)?;
             sock.join_multicast_v4(&SSDP_ADDR, &Ipv4Addr::UNSPECIFIED).context("DIAL: join SSDP multicast group")?;
             sock.set_read_timeout(Some(Duration::from_millis(500)))?;
             Some(sock)
@@ -398,4 +398,22 @@ mod tests {
         assert!(request(port, "GET /nope HTTP/1.1\r\n\r\n").starts_with("HTTP/1.1 404"));
         server.stop();
     }
+}
+
+/// The SSDP socket. webOS's own DIAL / UPnP services already listen on 1900 with SO_REUSEADDR, so
+/// we share the port the same way (bound to the multicast group first, like they are, else to any).
+fn ssdp_socket(port: u16) -> Result<UdpSocket> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let mut last = None;
+    for ip in [SSDP_ADDR, Ipv4Addr::UNSPECIFIED] {
+        let s = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+        s.set_reuse_address(true)?;
+        #[cfg(all(unix, not(target_os = "solaris")))]
+        let _ = s.set_reuse_port(true);
+        match s.bind(&SocketAddr::new(IpAddr::V4(ip), port).into()) {
+            Ok(()) => return Ok(s.into()),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(anyhow::anyhow!("DIAL: bind UDP {port}: {}", last.map(|e| e.to_string()).unwrap_or_default()))
 }

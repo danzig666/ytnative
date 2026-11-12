@@ -197,6 +197,7 @@ fn main() {
         let mut rig = AppRig::new();
         let mut d = Dispatcher::<YtHost>::with_transition(Box::new(PageDip::new()));
         d.request(MachineId::Nav, NavOp::Root(YtArg::Browse));
+        let mut links: Vec<String> = Vec::new();
 
         let mut remote = remote::Remote::open();
         {
@@ -341,6 +342,23 @@ fn main() {
                 l.tick(&rig.player_view, now);
             }
 
+            // Deep links: a cold launch's or a relaunch's parameters (`v`, `contentTarget`, a search).
+            // Held until the root (Browse) is mounted, so BACK from a linked video lands on Home.
+            links.extend(plx_platform::tv::launch::take_all());
+            let ready = d.top_screen().is_some();
+            for raw in if ready { std::mem::take(&mut links) } else { Vec::new() } {
+                match deeplink(&raw) {
+                    Some(Link::Video(v)) => {
+                        log(&format!("launch: play {v}"));
+                        d.request(MachineId::Nav, NavOp::Push(YtArg::Player { video_id: v, playlist: None }));
+                    }
+                    Some(Link::Search(q)) => {
+                        log(&format!("launch: search {q}"));
+                        d.request(MachineId::Nav, NavOp::Push(YtArg::Feed(store::FeedKey::Search { query: q, params: None })));
+                    }
+                    None => {}
+                }
+            }
             plx_machine::idle::frame_begin(dt);
             images::THUMBS.deliver();
             let results = rig.drain(now);
@@ -412,5 +430,80 @@ fn color_key(act: &str, rig: &mut AppRig, d: &mut Dispatcher<YtHost>) {
             rig.store.toast = Some((format!("{}x", R[i]), rig.now_ms + 2500));
         }
         _ => {}
+    }
+}
+
+enum Link {
+    Video(String),
+    Search(String),
+}
+
+/// What a launch payload asks for: SAM's `{"parameters":{…}}`, or the parameters themselves, with
+/// `v` / `videoId`, `query`, or a `contentTarget` such as `https://www.youtube.com/tv?v=ID`,
+/// `youtu.be/ID`, `v=ID` or `search_query=…` (what LG's voice search and SmartTube links send).
+fn deeplink(raw: &str) -> Option<Link> {
+    let j: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let p = if j["parameters"].is_object() { &j["parameters"] } else { &j };
+    let valid = |s: &str| s.len() == 11 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    for k in ["v", "videoId"] {
+        if let Some(v) = p[k].as_str().filter(|v| valid(v)) {
+            return Some(Link::Video(v.into()));
+        }
+    }
+    if let Some(q) = p["query"].as_str().filter(|q| !q.trim().is_empty()) {
+        return Some(Link::Search(q.trim().into()));
+    }
+    let target = p["contentTarget"].as_str()?;
+    let decode = |s: &str| {
+        let s = s.replace('+', " ");
+        let b = s.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'%' && i + 2 < b.len() {
+                if let Ok(x) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                    out.push(x);
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push(b[i]);
+            i += 1;
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    };
+    let query = target.split(['?', '#']).skip(1).flat_map(|q| q.split('&'));
+    let mut pairs: Vec<(&str, &str)> = query.filter_map(|kv| kv.split_once('=')).collect();
+    if !target.contains('?') {
+        pairs.extend(target.split('&').filter_map(|kv| kv.split_once('=')));
+    }
+    if let Some((_, v)) = pairs.iter().find(|(k, v)| *k == "v" && valid(v)) {
+        return Some(Link::Video((*v).into()));
+    }
+    if let Some((_, q)) = pairs.iter().find(|(k, _)| *k == "search_query" || *k == "q") {
+        return Some(Link::Search(decode(q)));
+    }
+    if let Some(id) = target.split("youtu.be/").nth(1).map(|r| &r[..r.find(['?', '&', '/']).unwrap_or(r.len())]).filter(|v| valid(v)) {
+        return Some(Link::Video(id.into()));
+    }
+    None
+}
+
+#[cfg(test)]
+mod deeplink_tests {
+    use super::*;
+
+    #[test]
+    fn links() {
+        let v = |raw: &str| match deeplink(raw) {
+            Some(Link::Video(v)) => v,
+            _ => String::new(),
+        };
+        assert_eq!(v(r#"{"parameters":{"v":"aqz-KE-bpKQ"}}"#), "aqz-KE-bpKQ");
+        assert_eq!(v(r#"{"contentTarget":"https://www.youtube.com/tv?v=aqz-KE-bpKQ&t=3"}"#), "aqz-KE-bpKQ");
+        assert_eq!(v(r#"{"contentTarget":"v=aqz-KE-bpKQ"}"#), "aqz-KE-bpKQ");
+        assert_eq!(v(r#"{"contentTarget":"https://youtu.be/aqz-KE-bpKQ?t=1"}"#), "aqz-KE-bpKQ");
+        assert!(matches!(deeplink(r#"{"contentTarget":"search_query=big+buck%20bunny"}"#), Some(Link::Search(q)) if q == "big buck bunny"));
+        assert!(deeplink(r#"{"parameters":{}}"#).is_none());
     }
 }

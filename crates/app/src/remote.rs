@@ -13,6 +13,9 @@ pub struct Remote {
     fd: i32,
     _writer: i32,
     buf: String,
+    /// Tokens not yet pressed: one per gap, like a person (an OK needs time to commit).
+    queue: std::collections::VecDeque<String>,
+    next_ms: u32,
 }
 
 impl Remote {
@@ -31,7 +34,7 @@ impl Remote {
             }
             // Hold a writer ourselves so the FIFO never reports EOF between external writes.
             let writer = libc::open(p.as_ptr(), libc::O_WRONLY | libc::O_NONBLOCK);
-            Some(Remote { fd, _writer: writer, buf: String::new() })
+            Some(Remote { fd, _writer: writer, buf: String::new(), queue: Default::default(), next_ms: 0 })
         }
     }
 
@@ -46,11 +49,18 @@ impl Remote {
             self.buf.push_str(&String::from_utf8_lossy(&chunk[..n as usize]));
         }
         let mut out = Vec::new();
-        let complete = match self.buf.rfind(|c: char| c.is_whitespace()) {
-            Some(i) => self.buf.drain(..=i).collect::<String>(),
-            None => return out,
-        };
-        for tok in complete.split_whitespace() {
+        if let Some(i) = self.buf.rfind(|c: char| c.is_whitespace()) {
+            let complete: String = self.buf.drain(..=i).collect();
+            self.queue.extend(complete.split_whitespace().map(String::from));
+        }
+        while now.ms >= self.next_ms {
+            let Some(tok) = self.queue.pop_front() else { break };
+            if let Some(ms) = tok.strip_prefix("wait:").and_then(|m| m.parse::<u32>().ok()) {
+                self.next_ms = now.ms + ms;
+                continue;
+            }
+            self.next_ms = now.ms + if tok == "ok" || tok == "enter" { 400 } else { 120 };
+            let tok = tok.as_str();
             const ARROW: u32 = 1 << 30;
             let (sym, wcode) = match tok {
                 "up" => (82 | ARROW, 0),
