@@ -97,6 +97,8 @@ impl Player {
 
     pub fn tick(&mut self) {}
 
+    pub fn set_video_rect(&mut self, _r: Option<[i32; 4]>) {}
+
     pub fn set_zoom(&mut self, zoom: crate::player::Zoom) {
         self.status.lock().unwrap().zoom = zoom;
     }

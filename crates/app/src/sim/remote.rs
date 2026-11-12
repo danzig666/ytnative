@@ -24,6 +24,7 @@ const OK_SETTLE_MS: u32 = 400;
 enum Step {
     Key(u32, u32),
     Move(f32, f32),
+    Wheel(f32),
     Click(f32, f32),
     ReleasePointer,
     Release(u32, u32),
@@ -71,6 +72,7 @@ fn parse(tok: &str) -> Option<Step> {
         "back" => Step::Key(0, 482),
         "exit" => Step::Exit,
         t if t.starts_with("wait:") => Step::Wait(t[5..].parse().ok()?),
+        t if t.starts_with("wheel:") => Step::Wheel(t[6..].parse().ok()?),
         t if t.starts_with("move:") || t.starts_with("click:") => {
             let (kind, rest) = t.split_once(':')?;
             let (x, y) = rest.split_once(',')?;
@@ -178,6 +180,11 @@ impl Remote {
                     out.push(crate::input::key_input(sym, wcode, 0, now));
                     // OK commits a beat after its release; a key arriving sooner cancels it.
                     self.not_before = now.ms + if sym == 13 { OK_SETTLE_MS } else { KEY_GAP_MS / 2 };
+                    break;
+                }
+                Step::Wheel(dy) => {
+                    out.push(crate::input::wheel_event(dy, now));
+                    self.not_before = now.ms + KEY_GAP_MS;
                     break;
                 }
                 Step::Move(x, y) => {

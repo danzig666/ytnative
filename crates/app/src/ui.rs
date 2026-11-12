@@ -370,7 +370,7 @@ impl VList {
             _ => 0,
         }
     }
-    fn row_rect(&self, i: usize, top: usize) -> Rect {
+    pub fn row_rect(&self, i: usize, top: usize) -> Rect {
         Rect::new(self.rect.x, self.rect.y + (i as f32 - top as f32) * self.row_h, self.rect.w, self.row_h - 6.0)
     }
     pub fn spec(&self, len: usize) -> GroupSpec {
@@ -388,6 +388,12 @@ impl VList {
     pub fn place(&self, e: u32, len: usize, focus: Option<usize>) -> Option<Placed> {
         let i = self.index(e, len)?;
         let r = self.row_rect(i, self.top_for(focus, len));
+        Some(Placed { rect: r, rest_rect: r, clip: self.rect, index: Some(i as u32) })
+    }
+    /// [`place`](Self::place) with the list scrolled to `top` (a list scrolled by the wheel).
+    pub fn place_top(&self, e: u32, len: usize, top: usize) -> Option<Placed> {
+        let i = self.index(e, len)?;
+        let r = self.row_rect(i, top);
         Some(Placed { rect: r, rest_rect: r, clip: self.rect, index: Some(i as u32) })
     }
     pub fn neighbour(&self, key: FocusKey<u32>, dir: Dir, len: usize) -> Step<u32> {

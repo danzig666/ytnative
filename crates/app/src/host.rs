@@ -161,6 +161,8 @@ pub enum YtFx {
     SetSpeed(f32),
     SetAudioTrack(String),
     SetZoom(crate::player::Zoom),
+    /// Shrink the video into `[x, y, w, h]` (comments beside it), or `None` for full screen.
+    VideoRect(Option<[i32; 4]>),
     /// Minutes until playback pauses (0 = off).
     SleepTimer(u32),
     Suggest(String),
@@ -848,6 +850,7 @@ impl Rig<YtHost> for AppRig {
                 }
             }
             YtFx::SetZoom(z) => self.player.set_zoom(z),
+            YtFx::VideoRect(r) => self.player.set_video_rect(r),
             YtFx::SleepTimer(min) => {
                 self.sleep_at = (min > 0).then(|| self.now_ms + min * 60_000);
                 self.store.sleep_minutes = min;

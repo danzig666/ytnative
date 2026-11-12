@@ -275,6 +275,19 @@ impl Player {
         self.seek_by(to_ms as i64 - pos);
     }
 
+    /// Places the video into `r` = `[x, y, w, h]` on the 1920x1080 screen (`None`: full screen).
+    /// Same call and source rectangle as the full-screen placement at start, only the destination
+    /// changes (both engines render into this window).
+    pub fn set_video_rect(&mut self, r: Option<[i32; 4]>) {
+        let Some(win) = &self.window else { return };
+        let Some(set) = sdl_sym::<SetFn>("SDL_webOSSetExportedWindow") else { return };
+        let [x, y, w, h] = r.unwrap_or([0, 0, 1920, 1080]);
+        let mut src = SdlRect { x: 0, y: 0, w: 1920, h: 1080 };
+        let mut dst = SdlRect { x, y, w, h };
+        let ok = unsafe { set(win.as_ptr(), &mut src, &mut dst) };
+        crate::log(&format!("player: video rect {x},{y} {w}x{h} -> {ok}"));
+    }
+
     /// Picture fit: re-places the exported window with a cropped source rectangle.
     pub fn set_zoom(&mut self, zoom: Zoom) {
         let (w, h) = {
