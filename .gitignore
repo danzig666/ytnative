@@ -26,3 +26,6 @@ mp4url.txt
 
 # personal API responses used to develop parsers (never commit)
 /fixtures/private
+
+# local Claude Code settings
+/.claude/

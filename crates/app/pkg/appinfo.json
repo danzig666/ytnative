@@ -9,5 +9,6 @@
   "largeIcon": "largeIcon.png",
   "transparent": true,
   "nativeLifeCycleInterfaceVersion": 2,
-  "requiredMemory": 200
+  "requiredMemory": 200,
+  "iconColor": "#07060F"
 }
