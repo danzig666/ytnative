@@ -207,6 +207,7 @@ fn main() {
         d.request(MachineId::Nav, NavOp::Root(YtArg::Browse));
         let mut links: Vec<String> = Vec::new();
         let (mut mouse_down, mut last_wheel) = (false, 0u32);
+        let mut input_echo = 0u8;
 
         let mut remote = remote::Remote::open();
         {
@@ -324,6 +325,9 @@ fn main() {
 
             if !inputs.is_empty() {
                 last_input = now;
+                if std::env::var_os("YTNATIVE_FRAME_DEBUG").is_some() {
+                    log(&format!("framedbg input x{} at {now}", inputs.len()));
+                }
                 if blanked {
                     blanked = false;
                     inputs.clear(); // the waking key does nothing else
@@ -415,11 +419,19 @@ fn main() {
                     }
                 }
             }
+            // Any input may have moved focus; list screens (settings, menus) don't animate, so
+            // nothing else would ask for a present until the next unrelated wake.
+            let had_input = !inputs.is_empty();
+            if had_input {
+                input_echo = 3;
+            } else if input_echo > 0 {
+                input_echo -= 1;
+            }
             let r = d.frame_with(&mut rig, tick, inputs, results, &mut NoTap, false);
             d.prune(&r.unmounted);
             plx_ui::tex::note_queued(&mut d.budget);
 
-            let present = foreground && !blanked && (r.presented || plx_machine::idle::should_present(now) || plx_ui::tex::has_pending());
+            let present = foreground && !blanked && (r.presented || had_input || input_echo > 0 || plx_machine::idle::should_present(now) || plx_ui::tex::has_pending());
             // Simulator: a requested screenshot forces a full draw of the current state.
             #[cfg(windows)]
             let present = present || remote.as_ref().is_some_and(|r| r.shot_pending());
@@ -451,7 +463,7 @@ fn main() {
                     r.take_shots(dw, dh);
                 }
                 if std::env::var_os("YTNATIVE_FRAME_DEBUG").is_some() {
-                    log(&format!("framedbg draw {} us", draw_t0.elapsed().as_micros()));
+                    log(&format!("framedbg draw {} us at {}", draw_t0.elapsed().as_micros(), now));
                 }
                 sdl::SDL_GL_SwapWindow(win);
                 plx_gfx::gfx::blur_frame_end();
