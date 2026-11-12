@@ -7,7 +7,7 @@
 //! 4. Logs pipeline events, exits on BACK/ESC, timeout or end of stream, and always unloads.
 //!
 //! Usage: tvplay <url | @file-with-url-on-line-N[:N]> [seconds]
-//! Writes everything it does to /tmp/ytnative/tvplay.log (an app launched by the TV has no stdout).
+//! Writes everything it does to /tmp/ytnative/ytnative.log (an app launched by the TV has no stdout).
 
 mod ls2;
 
@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-const LOG: &str = "/tmp/ytnative/tvplay.log";
+const LOG: &str = "/tmp/ytnative/ytnative.log";
 
 static LOGF: Mutex<Option<std::fs::File>> = Mutex::new(None);
 
@@ -168,7 +168,7 @@ fn main() {
         None => ("@/tmp/ytnative/last_streams.txt:3".to_string(), 60),
     };
     let url = resolve_url(&url_arg);
-    let app_id = std::env::var("APPID").unwrap_or_else(|_| "com.ytnative.poc".into());
+    let app_id = std::env::var("APPID").unwrap_or_else(|_| "io.github.danzig666.ytnative".into());
     log!("=== tvplay start: appId={app_id} secs={secs} url={}...", &url[..url.len().min(90)]);
     if url.is_empty() {
         log!("no URL");

@@ -1,20 +1,17 @@
-mod auth;
-mod bootstrap;
-mod innertube;
-mod mpd;
+use yt_core::{auth, bootstrap, innertube, mpd};
 
 use anyhow::{bail, Context, Result};
 use innertube::{Api, Client};
 use serde_json::{json, Value};
 
 const USAGE: &str = "\
-ytnative-poc - YouTube stream extraction proof of concept
+ytcli - YouTube stream extraction proof of concept
 
 USAGE:
-  ytnative-poc login               Sign in with a TV code (youtube.com/activate)
-  ytnative-poc whoami              Show the signed-in account
-  ytnative-poc subs                List the latest videos from your subscriptions
-  ytnative-poc streams <id|url>    Resolve + verify 1080p video/audio URLs and the HLS manifest
+  ytcli login               Sign in with a TV code (youtube.com/activate)
+  ytcli whoami              Show the signed-in account
+  ytcli subs                List the latest videos from your subscriptions
+  ytcli streams <id|url>    Resolve + verify 1080p video/audio URLs and the HLS manifest
         [--sample <secs>]          ...and mux the first <secs> seconds into sample.mp4 (needs ffmpeg)
         [--tv]                     ...also report what the signed-in TV client returns
 ";
@@ -71,7 +68,7 @@ fn video_id(s: &str) -> Result<String> {
 }
 
 fn token(api: &Api) -> Result<auth::Token> {
-    auth::load(api.http)?.context("not signed in - run `ytnative-poc login` first")
+    auth::load(api.http)?.context("not signed in - run `ytcli login` first")
 }
 
 fn whoami(api: &Api) -> Result<()> {

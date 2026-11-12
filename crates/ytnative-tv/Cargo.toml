@@ -1,0 +1,13 @@
+[package]
+name = "ytnative-tv"
+description = "The webOS app (currently the step-2 playback prototype)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ytnative"
+path = "src/main.rs"
+
+[dependencies]
+libc.workspace = true

@@ -1,0 +1,9 @@
+# TV target: LG webOS userland is 32-bit ARM, soft-float ABI (/lib/ld-linux.so.3).
+# Same codegen flags as plx-native: VFP instructions with the softfp calling convention, no NEON
+# (keeps one binary loadable on every webOS 4+ SoC), frame pointers for on-device crash traces.
+[target.armv7-unknown-linux-gnueabi]
+linker = "tools/zig-cc-armv7.cmd"
+rustflags = ["-C", "target-cpu=cortex-a9", "-C", "target-feature=-neon,-soft-float", "-C", "force-frame-pointers=yes"]
+
+[alias]
+xtask = "run -q -p xtask --"

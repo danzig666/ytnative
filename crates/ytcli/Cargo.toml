@@ -1,0 +1,13 @@
+[package]
+name = "ytcli"
+description = "PC command line for yt-core (sign-in, browse, stream resolution, MPD output)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+yt-core = { path = "../yt-core" }
+anyhow.workspace = true
+regex.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
