@@ -15,6 +15,32 @@ crates, **ytnative is GPL-3.0**, and the source must be published next to every 
 
 ---
 
+## Status (2026-11-12, end of day): code complete for phases 0–6, awaiting TV validation
+
+Everything below was implemented today. It builds for the TV and passes the symbol check against
+the C3's libraries. The engine has 72 unit tests plus live tests against YouTube; the app's
+screens are **not yet run on the TV** (the TV is off-limits until the user watches).
+
+| Phase | State |
+|---|---|
+| 0 Foundations | ✅ workspace, `cargo xtask` (build/ipk/install/deploy/run/key/shot/logs/symcheck), own IPK writer, plx UI core vendored, app shell on the C3, OLED idle blank |
+| 1 Engine core | ✅ feeds + paging, search + suggestions + filters, watch info, chapters, captions (manual/auto, translate), storyboards, comments, client ring (VISIONOS → ANDROID_VR → IOS), live resolution |
+| 2 MVP UI | ✅ sidebar sections (TV guide topics), grids with infinite scroll, channel/playlist/results pages, search keyboard, sign-in with code + QR, player (engine A, DASH 720–1080p) |
+| 3 Player depth | ✅ HUD, seek + storyboard preview, chapters, captions, SponsorBlock (per-category skip/notify/ask + markers), dislikes, speed, autoplay/repeat/queue, Shorts up/down, comments, like/subscribe/Watch later, card menus (Not interested, Remove from history…), DeArrow |
+| 4 Engine B / 4K / live / SABR | 🟡 SABR client works on the PC (VISIONOS, H.264/VP9/Opus); live via filtered HLS (needs TV check); Feed engine (Starfish, VP9/AV1/4K) in progress |
+| 5 Settings & accounts | ✅ all settings pages, multi-account (switch/add/remove), content filters, blocked channels, sidebar customisation, watch-history pings, resume |
+| 6 Remote | ✅ Link with TV code (Lounge): pairing code, casts, play/pause/seek/stop, D-pad; DIAL server written (untested on webOS) |
+| 7 Hardening | ⏳ Windows simulator in progress; TV validation pass; JS/PO-token fallbacks not needed yet |
+
+**Known gaps:** translated captions get HTTP 429 from YouTube (likely needs a PO token); the
+signed-in TV client's SABR needs a PO token (we use the anonymous clients for media instead);
+playlist create/delete only work through the embedded TV client.
+
+**TV validation checklist (when the user is watching):** sign-in screen + QR; sidebar sections
+load; search keyboard + filters; player HUD, seek preview, captions, SponsorBlock skip; like /
+subscribe / Watch later; comments; settings persist; Lounge pairing from a phone; live stream via
+HLS; Feed engine 4K VP9/AV1; idle blank still works.
+
 ## 1. What we start from
 
 | Area | State today |
