@@ -185,6 +185,7 @@ fn items(page: SettingsPage) -> Vec<Item> {
                 Opt("Blank screen when idle (OLED)", |s| format!("{} min", s.idle_blank_secs / 60), |s, d| {
                     s.idle_blank_secs = cycle(&[60, 120, 300, 600], s.idle_blank_secs, d)
                 }),
+                Opt("Screen size", |s| format!("{}%", s.ui_scale), |s, d| s.ui_scale = cycle(&[100u8, 97, 95, 92, 90], s.ui_scale, d)),
                 Opt("Card size", |s| match s.card_columns { 3 => "large".into(), 5 => "small".into(), _ => "medium".into() }, |s, d| {
                     s.card_columns = cycle(&[3u8, 4, 5], s.card_columns, d)
                 }),

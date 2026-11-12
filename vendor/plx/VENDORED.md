@@ -37,3 +37,5 @@ The ytnative simulator (`cargo xtask sim`, `crates/app/src/sim/`) builds these c
 - `ui/src/rec.rs`: `bounded_read` skips `custom_flags` on Windows; `PATH_MAX` written as its Linux
   value 4096; Windows `file_identity` (len + mtime instead of dev/ino), `DirSink::create` (no mode)
   and `private_new_file` (no mode/flags).
+
+- `base/src/surface.rs`: `set_ui_scale` (ytnative's Screen size / overscan setting) multiplies the fitted scale before the viewport is derived.

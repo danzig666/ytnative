@@ -135,9 +135,22 @@ fn viewport_is((dw, dh): (i32, i32), vp: (i32, i32, i32, i32)) -> bool {
 }
 
 /// Derive [`scale`] and [`viewport`] from the drawable. Called by [`probe`], and by the tests.
+/// ytnative local change: the user's "Screen size" (overscan) factor, 0.8..=1.0, applied on top of
+/// the fit, so the whole UI (and the pointer mapping, which reads the same scale and viewport)
+/// shrinks around the screen centre.
+static UI_SCALE_BITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
+
+/// Sets the UI scale factor (clamped to 0.8..=1.0) and recomputes the viewport.
+pub fn set_ui_scale(k: f32) {
+    let k = k.clamp(0.8, 1.0);
+    if f32::from_bits(UI_SCALE_BITS.swap(k.to_bits(), Ordering::Relaxed)) != k {
+        recompute();
+    }
+}
+
 fn recompute() {
     let (dw, dh) = drawable();
-    let s = (dw as f32 / LOGICAL_W).min(dh as f32 / LOGICAL_H);
+    let s = (dw as f32 / LOGICAL_W).min(dh as f32 / LOGICAL_H) * f32::from_bits(UI_SCALE_BITS.load(Ordering::Relaxed));
     let (w, h) = (
         (LOGICAL_W * s).round() as i32,
         (LOGICAL_H * s).round() as i32,
