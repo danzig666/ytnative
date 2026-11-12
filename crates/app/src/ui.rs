@@ -109,6 +109,30 @@ pub fn draw_focused_caption(p: Painter, m: &dyn plx_machine::machine::Measure, _
     }
 }
 
+type CaptionLines = (String, Option<String>, String);
+
+/// [`wrap2`] of the title and the fitted detail line, cached by (title, detail, width).
+fn caption_lines(m: &dyn plx_machine::machine::Measure, title: &str, detail: &str, w: f32) -> CaptionLines {
+    thread_local! {
+        static CACHE: std::cell::RefCell<std::collections::HashMap<(String, String, u32), CaptionLines>> = Default::default();
+    }
+    let key = (title.to_string(), detail.to_string(), w.round() as u32);
+    if let Some(v) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
+        return v;
+    }
+    let (l1, l2) = wrap2(m, title, w, 24);
+    let d = if detail.is_empty() { String::new() } else { m.fit_line(detail, w, 20, false).to_string_lossy().into_owned() };
+    let v = (l1, l2, d);
+    CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() > 4000 {
+            c.clear();
+        }
+        c.insert(key, v.clone());
+    });
+    v
+}
+
 /// `s` split into at most two lines of `w` px (word wrap; the second line ellipsised).
 fn wrap2(m: &dyn plx_machine::machine::Measure, s: &str, w: f32, size: i32) -> (String, Option<String>) {
     let width = |t: &str| CString::new(t).map_or(0.0, |c| m.width(&c, size, false));
@@ -229,15 +253,16 @@ impl CardSource<YtHost> for CardsSrc<'_> {
             }
             let y = r.y + r.h + 12.0;
             let ink = if tile.focused { WHITE } else { [1.0, 1.0, 1.0, 0.86] };
-            let (l1, l2) = wrap2(m, &c.title, r.w, 24);
+            // Wrapping measures a title word by word; done once per (card, width), not per frame
+            // (the page is drawn several times a frame, and a scroll draws every frame).
+            let (l1, l2, d) = caption_lines(m, &c.title, &c.detail, r.w);
             text(p, &l1, r.x, y, 24, ink, ALIGN_LEFT, tile.focused);
             let mut dy = 31.0;
-            if let Some(l2) = l2 {
-                text(p, &l2, r.x, y + dy, 24, ink, ALIGN_LEFT, tile.focused);
+            if let Some(l2) = &l2 {
+                text(p, l2, r.x, y + dy, 24, ink, ALIGN_LEFT, tile.focused);
                 dy += 31.0;
             }
-            if !c.detail.is_empty() {
-                let d = m.fit_line(&c.detail, r.w, 20, false).to_string_lossy().into_owned();
+            if !d.is_empty() {
                 text(p, &d, r.x, y + dy + 2.0, 20, DIM, ALIGN_LEFT, false);
             }
         }

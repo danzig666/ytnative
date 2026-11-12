@@ -424,6 +424,7 @@ fn main() {
             #[cfg(windows)]
             let present = present || remote.as_ref().is_some_and(|r| r.shot_pending());
             if present {
+                let draw_t0 = Instant::now();
                 plx_gfx::text::begin_frame();
                 let (x, y, w, h) = plx_base::surface::viewport();
                 sdl::glViewport(x, y, w, h);
@@ -448,6 +449,9 @@ fn main() {
                     let (mut dw, mut dh) = (0, 0);
                     sdl::SDL_GL_GetDrawableSize(win, &mut dw, &mut dh);
                     r.take_shots(dw, dh);
+                }
+                if std::env::var_os("YTNATIVE_FRAME_DEBUG").is_some() {
+                    log(&format!("framedbg draw {} us", draw_t0.elapsed().as_micros()));
                 }
                 sdl::SDL_GL_SwapWindow(win);
                 plx_gfx::gfx::blur_frame_end();
