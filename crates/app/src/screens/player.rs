@@ -455,10 +455,13 @@ impl Screen<YtHost> for PlayerScreen {
             if let Some(v) = &w.short_view_count_text {
                 byline.push_str(&format!("  \u{2022}  {v}"));
             }
+            if let Some(d) = w.published_text.as_deref().filter(|d| !d.is_empty()) {
+                byline.push_str(&format!("  \u{2022}  {d}"));
+            }
         }
         match (&ex.votes, ex.watch.as_ref().and_then(|w| w.like_count_text.clone())) {
-            (Some(v), _) => byline.push_str(&format!("  \u{2022}  Likes {}  Dislikes {}", short_num(v.likes), short_num(v.dislikes))),
-            (None, Some(l)) => byline.push_str(&format!("  \u{2022}  Likes {l}")),
+            (Some(v), _) => byline.push_str(&format!("  \u{2022}  \u{1F44D} {}   \u{1F44E} {}", short_num(v.likes), short_num(v.dislikes))),
+            (None, Some(l)) => byline.push_str(&format!("  \u{2022}  \u{1F44D} {l}")),
             _ => {}
         }
         ui::text(p, &byline, 96.0, 842.0, 30, ui::DIM, ui::ALIGN_LEFT, false);
