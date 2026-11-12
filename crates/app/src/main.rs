@@ -12,6 +12,8 @@ mod input;
 mod i18n;
 #[cfg(not(windows))]
 mod relaunch;
+#[cfg(not(windows))]
+mod voice;
 mod lounge;
 // The Windows desktop simulator swaps the TV-only modules (LS2 bus, Wayland surface, FIFO remote)
 // for stand-ins under `sim/`; see `sim/mod.rs`.
@@ -155,6 +157,8 @@ fn main() {
         }
         #[cfg(not(windows))]
         relaunch::install();
+        #[cfg(not(windows))]
+        voice::start();
         #[cfg(windows)]
         let win = sim_window();
         #[cfg(not(windows))]

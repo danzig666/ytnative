@@ -169,7 +169,7 @@ impl Player {
 
     fn bus(&mut self) -> Option<&'static Luna> {
         if self.luna.is_none() {
-            match Luna::connect(plx_base::paths::app_id()) {
+            match Luna::shared(plx_base::paths::app_id()) {
                 Ok(l) => self.luna = Some(l),
                 Err(e) => crate::log(&format!("player: LS2 unavailable: {e}")),
             }

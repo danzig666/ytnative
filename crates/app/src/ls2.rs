@@ -78,6 +78,17 @@ unsafe extern "C" fn on_reply(_sh: *mut c_void, msg: *mut c_void, ctx: *mut c_vo
 static mut LUNA_PTR: usize = 0;
 
 impl Luna {
+    /// The process's one bus connection, made on first use (the player and voice share it).
+    pub fn shared(app_id: &str) -> Result<&'static Luna, String> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LOCK.lock().unwrap();
+        let p = unsafe { LUNA_PTR };
+        if p != 0 {
+            return Ok(unsafe { &*(p as *const Luna) });
+        }
+        Self::connect(app_id)
+    }
+
     /// Registers on the bus. Tries the bare app id first, then "<appId>-<pid>" (SDL may already
     /// hold the bare name for the app's lifecycle registration).
     pub fn connect(app_id: &str) -> Result<&'static Luna, String> {

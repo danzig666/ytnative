@@ -39,8 +39,18 @@ tests against YouTube.
 - Notifications: the TV client gets HTTP 400. Trending: YouTube retired the page (off by default).
 - Age-restricted and made-for-kids videos don't play anonymously.
 - Google Drive backup needs the user's own Google Cloud OAuth client (USB/app-storage backup works).
-- UI scale, card styles, context-menu ordering, voice search, live DVR seek: not started.
+- Voice search: `voice.rs` registers with `voiceconductor` for `SearchContent`, but the bus refuses
+  our `com.webos.media.client.*` name ("Not permitted"); only the app-id name, which LG's SDL holds,
+  has the public group. Needs SDL's `HELPER_HLunaServiceCall` (libhelpers `HContext` layout unknown).
+  Launch links with `{"query": …}` do open a search.
+- UI scale: not done (screens are laid out in fixed 1920x1080 coordinates). Card size (3/4/5 per row)
+  and card-menu order / hiding are done.
 - Engine B needs `libplayerAPIs.so.1` at launch (present on every known webOS release).
+
+**Tested on the C3 (2026-11-12):** Home shelves, sidebar OK, search keyboard + suggestions, engine A
+1080p60, engine B 4K60 VP9/AV1 + Opus (seek, pause, stop, second session), live via engine B (live edge,
+DVR seek), captions, SponsorBlock auto-skip, comments, player menu, TV code, settings persist, colour
+buttons, cold and warm launch links.
 
 **Backlog:**
 - Phone casting: DIAL now starts on the C3 (shares UDP 1900 with webOS, HTTP on :8090 answers),
