@@ -46,6 +46,7 @@ enum Act {
     SubColor,
     SubStyle,
     SubFont,
+    SubBold,
     RepeatMode,
     Close,
 }
@@ -236,6 +237,7 @@ impl MenuScreen {
             ("Subtitle colour".to_string(), Act::SubColor),
             ("Subtitle style".to_string(), Act::SubStyle),
             ("Subtitle font".to_string(), Act::SubFont),
+            ("Bold subtitles".to_string(), Act::SubBold),
             ("When the video ends".to_string(), Act::RepeatMode),
             ("Close".to_string(), Act::Close),
         ]);
@@ -283,6 +285,7 @@ impl MenuScreen {
             Act::Subtitles => format!("{}  \u{203A}", if s.subtitles { "On" } else { "Off" }),
             Act::SubSize => format!("{}  \u{203A}", s.subtitle_size),
             Act::SubColor => format!("{}  \u{203A}", crate::i18n::tr(&s.subtitle_color)),
+            Act::SubBold => format!("{}  \u{203A}", crate::i18n::tr(if s.subtitle_bold { "On" } else { "Off" })),
             Act::SubFont => format!("{}  \u{203A}", crate::i18n::tr(&s.subtitle_font)),
             Act::SubStyle => format!("{}  \u{203A}", crate::i18n::tr(&s.subtitle_style)),
             Act::RepeatMode => format!(
@@ -426,6 +429,7 @@ impl MenuScreen {
                 let i = SUB_COLORS.iter().position(|v| *v == s.subtitle_color).unwrap_or(0) as i32;
                 s.subtitle_color = SUB_COLORS[(i + dir).rem_euclid(SUB_COLORS.len() as i32) as usize].into();
             })))),
+            Act::SubBold => fx.push(Fx::App(YtFx::EditSettings(Box::new(|s| s.subtitle_bold = !s.subtitle_bold)))),
             Act::SubFont => fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| {
                 let i = SUB_FONTS.iter().position(|v| *v == s.subtitle_font).unwrap_or(0) as i32;
                 s.subtitle_font = SUB_FONTS[(i + dir).rem_euclid(SUB_FONTS.len() as i32) as usize].into();
@@ -498,6 +502,15 @@ impl MenuScreen {
 impl Machine<YtHost> for MenuScreen {
     type Ev = ScreenEvent<YtHost>;
     fn step(&mut self, ev: &Self::Ev, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) -> Handled {
+        match ev {
+            ScreenEvent::Mount => {
+                ui::MENUS_OPEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            ScreenEvent::Unmount => {
+                ui::MENUS_OPEN.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            _ => {}
+        }
         if let Some(a) = super::common::press_commit_as_activate(ev, cx, |_| true) {
             return self.step(&a, cx, fx);
         }

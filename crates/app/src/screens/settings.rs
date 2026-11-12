@@ -148,6 +148,7 @@ fn items(page: SettingsPage) -> Vec<Item> {
                 let i = F.iter().position(|x| *x == s.subtitle_font).unwrap_or(0) as i32;
                 s.subtitle_font = F[((i + d).rem_euclid(F.len() as i32)) as usize].into();
             }),
+            Opt("Bold", |s| on_off(s.subtitle_bold), |s, _| s.subtitle_bold = !s.subtitle_bold),
             Opt("Style", |s| s.subtitle_style.clone(), |s, d| {
                 const T: &[&str] = &["outline", "shadow", "box"];
                 let i = T.iter().position(|x| *x == s.subtitle_style).unwrap_or(0) as i32;

@@ -375,7 +375,7 @@ static FONTS_B: [AtomicPtr<TtfFont>; FONT_SLOTS] =
 
 /// ytnative local change: extra faces (subtitle fonts), chosen by `bold >> 4` (1..=EXTRA_FACES);
 /// the low bit stays "bold". Every cache keys on the whole `bold` int, so faces never mix.
-pub const EXTRA_FACES: usize = 4;
+pub const EXTRA_FACES: usize = 8;
 static FONTS_X: [[AtomicPtr<TtfFont>; FONT_SLOTS]; EXTRA_FACES] =
     [const { [const { AtomicPtr::new(std::ptr::null_mut()) }; FONT_SLOTS] }; EXTRA_FACES];
 
@@ -385,7 +385,11 @@ fn extra_face_file(n: usize) -> &'static str {
         1 => "subfont-sans.ttf",
         2 => "subfont-serif.ttf",
         3 => "subfont-mono.ttf",
-        _ => "subfont-roboto.ttf",
+        4 => "subfont-roboto.ttf",
+        5 => "subfont-sans-regular.ttf",
+        6 => "subfont-serif-regular.ttf",
+        7 => "subfont-mono-regular.ttf",
+        _ => "subfont-roboto-regular.ttf",
     }
 }
 static mut TEXT_OK: c_int = 0;

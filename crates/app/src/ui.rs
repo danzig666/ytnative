@@ -226,7 +226,17 @@ pub static PAGE_SCROLLS: std::sync::atomic::AtomicBool = std::sync::atomic::Atom
 
 /// How a wheel notch / a pointer resting on the top or bottom edge reaches `screen`: as a page
 /// scroll (`Wheel`), or as Up/Down focus moves (lists, grids).
+/// Option menus open (over the player or a page): the wheel / pointer edges step their rows.
+pub static MENUS_OPEN: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+pub fn menu_open() -> bool {
+    MENUS_OPEN.load(std::sync::atomic::Ordering::Relaxed) > 0
+}
+
 pub fn wheel_scrolls_page(screen: Option<&str>) -> bool {
+    if menu_open() {
+        return false;
+    }
     match screen {
         Some("player") | Some("comments") => true,
         Some("browse") => PAGE_SCROLLS.load(std::sync::atomic::Ordering::Relaxed),
@@ -256,10 +266,10 @@ pub fn text(p: Painter, s: &str, x: f32, y: f32, size: i32, col: [f32; 4], align
 }
 
 /// Truncates to roughly `max` characters with an ellipsis (cheap, measure-free).
-/// [`text`] in an extra face (1..=4, the subtitle fonts), bold weight.
+/// [`text`] in an extra face (1..=8, the subtitle fonts: 1-4 bold, 5-8 regular).
 pub fn text_face(p: Painter, s: &str, x: f32, y: f32, size: i32, col: [f32; 4], align: i32, face: i32) -> f32 {
     let Ok(c) = CString::new(s.replace('\0', "")) else { return 0.0 };
-    p.text(c.as_ptr(), x, y, size, col, align, 1 | (face.clamp(0, 4) << 4))
+    p.text(c.as_ptr(), x, y, size, col, align, (face.clamp(0, 8) << 4) | (face <= 4) as i32)
 }
 
 pub fn ellipsize(s: &str, max: usize) -> String {

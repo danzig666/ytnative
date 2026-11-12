@@ -119,6 +119,8 @@ pub struct BrowseScreen {
     nav_open: std::cell::Cell<bool>,
     /// A focus move the screen asks for (taken by the next `reconcile`).
     focus_req: std::cell::Cell<Option<u32>>,
+    /// The sidebar row focus was last on.
+    nav_last: std::cell::Cell<u32>,
     /// Section the sidebar focus rests on, switched to when `T_SWITCH` fires.
     pending: Option<Section>,
     state: State,
@@ -160,6 +162,7 @@ impl BrowseScreen {
             nav_ms: 0,
             nav_open: std::cell::Cell::new(false),
             focus_req: std::cell::Cell::new(None),
+            nav_last: std::cell::Cell::new(NAV_BASE),
             state: State(section.key().into()),
         }
     }
@@ -227,8 +230,14 @@ impl Machine<YtHost> for BrowseScreen {
             return self.step(&a, cx, fx);
         }
         let items = nav_items(cx);
-        if let ScreenEvent::FocusMoved { to, .. } = ev {
-            if to.elem < NAV_BASE {
+        if let ScreenEvent::FocusMoved { to, by, .. } = ev {
+            if to.elem >= NAV_BASE {
+                self.nav_last.set(to.elem);
+            } else if self.nav_open.get() && *by == plx_machine::machine::By::Pointer {
+                // Hovering a card behind the open sidebar: keep the sidebar and its selection.
+                self.focus_req.set(Some(self.nav_last.get()));
+                return Handled::Yes;
+            } else {
                 self.nav_open.set(false);
             }
         }
@@ -383,6 +392,7 @@ impl Focusable<YtHost> for BrowseScreen {
         // search for Up/Down from a shelf over the shelf above or below.
         let mut nav = self.nav.spec(nav_items(cx).len());
         nav.reachable = plx_ui::screen::AxisMask::HORIZONTAL;
+        nav.edge = [plx_ui::screen::EdgeRule::Stop; 4];
         out.push(nav);
         if self.rows_mode(cx) {
             self.stack.view(&self.rows).groups(cx, out);
@@ -401,6 +411,11 @@ impl Focusable<YtHost> for BrowseScreen {
     }
     fn neighbour(&self, key: FocusKey<u32>, dir: Dir, cx: &Cx<'_, YtHost>) -> Step<u32> {
         let items = nav_items(cx);
+        // While the sidebar is open, a move starts from its row even if the pointer just touched a
+        // card behind it (the correction lands a frame later).
+        if self.nav_open.get() && key.elem < NAV_BASE {
+            return self.neighbour(FocusKey { entry: self.entry, elem: self.nav_last.get() }, dir, cx);
+        }
         if self.rows_mode(cx) && key.elem < NAV_BASE {
             return match self.stack.view(&self.rows).neighbour(key, dir, cx) {
                 Step::Edge if dir == Dir::Left => {
@@ -493,7 +508,8 @@ impl Screen<YtHost> for BrowseScreen {
         // Content
         let feed = cx.views.store.feed(&self.key());
         let src = self.src(cx);
-        ui::PAGE_SCROLLS.store(self.rows_mode(cx), std::sync::atomic::Ordering::Relaxed);
+        let on_nav = cx.focus.current.is_some_and(|k| k.entry == self.entry && k.elem >= NAV_BASE);
+        ui::PAGE_SCROLLS.store(self.rows_mode(cx) && !(self.nav_open.get() && on_nav), std::sync::atomic::Ordering::Relaxed);
         if self.rows_mode(cx) {
             let mut view = self.stack.view(&self.rows);
             ui::reset_focused_caption();

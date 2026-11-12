@@ -419,7 +419,9 @@ impl Screen<YtHost> for PlayerScreen {
                 let lift = if self.hud { 330.0 } else { 0.0 };
                 let s = &cx.views.store.settings;
                 SUB_STYLE.with(|c| c.set(match s.subtitle_style.as_str() { "shadow" => 1, "box" => 2, _ => 0 }));
-                SUB_FACE.with(|c| c.set(match s.subtitle_font.as_str() { "sans" => 1, "serif" => 2, "mono" => 3, "roboto" => 4, _ => 0 }));
+                let face = match s.subtitle_font.as_str() { "sans" => 1, "serif" => 2, "mono" => 3, "roboto" => 4, _ => 0 };
+                // Bold faces are 1..4, regular ones 5..8; -1 is the app font's regular weight.
+                SUB_FACE.with(|c| c.set(match (face, s.subtitle_bold) { (0, true) => 0, (0, false) => -1, (f, true) => f, (f, false) => f + 4 }));
                 let ink = match s.subtitle_color.as_str() {
                     "light gray" => [0.85, 0.85, 0.85, 1.0],
                     "gray" => [0.70, 0.70, 0.70, 1.0],
@@ -699,6 +701,9 @@ fn cap_text(p: plx_ui::Painter, s: &str, x: f32, y: f32, size: i32, ink: [f32; 4
     match SUB_FACE.with(|c| c.get()) {
         0 => {
             ui::text(p, s, x, y, size, ink, ui::ALIGN_CENTER, true);
+        }
+        -1 => {
+            ui::text(p, s, x, y, size, ink, ui::ALIGN_CENTER, false);
         }
         face => {
             ui::text_face(p, s, x, y, size, ink, ui::ALIGN_CENTER, face);
