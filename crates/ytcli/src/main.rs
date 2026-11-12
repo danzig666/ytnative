@@ -46,6 +46,18 @@ fn run() -> Result<()> {
             whoami(&api)
         }
         Some("whoami") => whoami(&api),
+        // raw <endpoint> <json-body> <out-file> [anon]: dump a TV-client InnerTube response.
+        Some("raw") => {
+            let endpoint = args.get(1).context("endpoint")?;
+            let body: Value = serde_json::from_str(args.get(2).context("json body")?)?;
+            let out = args.get(3).context("output file")?;
+            let anon = args.get(4).is_some_and(|a| a == "anon");
+            let bearer = if anon { None } else { Some(token(&api)?.access_token) };
+            let r = api.call(Client::Tv, endpoint, body, bearer.as_deref())?;
+            std::fs::write(out, serde_json::to_string_pretty(&r)?)?;
+            println!("{endpoint} -> {out} ({} KiB)", std::fs::metadata(out)?.len() / 1024);
+            Ok(())
+        }
         Some("subs") => subs(&api),
         Some("streams") => {
             let id = video_id(args.get(1).context("missing video id")?)?;

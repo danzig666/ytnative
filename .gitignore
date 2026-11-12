@@ -23,3 +23,6 @@ mp4url.txt
 
 # TV libraries pulled by `cargo xtask pull-sysroot` (LG binaries, not redistributable)
 /sysroot
+
+# personal API responses used to develop parsers (never commit)
+/fixtures/private
