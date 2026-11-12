@@ -32,7 +32,7 @@ pub enum Action {
 
 impl Lounge {
     pub fn start(device_name: &str, dial: bool) -> anyhow::Result<Lounge> {
-        let http = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(90)).build()?;
+        let http = yt_core::net::builder().timeout(std::time::Duration::from_secs(90)).build()?;
         let screen = LoungeScreen::new(http, device_name)?;
         let (cmd_tx, commands) = channel();
         let (events, ev_rx) = channel();

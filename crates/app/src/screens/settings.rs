@@ -26,6 +26,12 @@ enum Item {
     Info(&'static str, fn(&Cx<'_, YtHost>) -> String),
 }
 
+fn cycle_key(k: &mut String, d: i32) {
+    const A: &[&str] = &["none", "search", "settings", "accounts", "subtitles", "speed"];
+    let i = A.iter().position(|x| *x == k).unwrap_or(0) as i32;
+    *k = A[((i + d).rem_euclid(A.len() as i32)) as usize].into();
+}
+
 fn on_off(b: bool) -> String {
     if b { "On".into() } else { "Off".into() }
 }
@@ -196,6 +202,19 @@ fn items(page: SettingsPage) -> Vec<Item> {
         }
         SettingsPage::Remote => vec![
             Opt("Link with TV code", |s| on_off(s.lounge_enabled), |s, _| s.lounge_enabled = !s.lounge_enabled),
+            Opt("Red button", |s| s.color_keys[0].clone(), |s, d| cycle_key(&mut s.color_keys[0], d)),
+            Opt("Green button", |s| s.color_keys[1].clone(), |s, d| cycle_key(&mut s.color_keys[1], d)),
+            Opt("Yellow button", |s| s.color_keys[2].clone(), |s, d| cycle_key(&mut s.color_keys[2], d)),
+            Opt("Blue button", |s| s.color_keys[3].clone(), |s, d| cycle_key(&mut s.color_keys[3], d)),
+            Opt("DNS over HTTPS (after restart)", |s| s.doh.clone(), |s, d| {
+                const D: &[&str] = &["off", "cloudflare", "google", "quad9"];
+                let i = D.iter().position(|x| *x == s.doh).unwrap_or(0) as i32;
+                s.doh = D[((i + d).rem_euclid(D.len() as i32)) as usize].into();
+            }),
+            Info("Proxy (proxy_url in settings.json)", |cx| {
+                let p = &cx.views.store.settings.proxy_url;
+                if p.is_empty() { "none".into() } else { p.clone() }
+            }),
             Opt("Show in the phone's cast menu (DIAL)", |s| on_off(s.dial_enabled), |s, _| s.dial_enabled = !s.dial_enabled),
             Info("TV code", |cx| match &cx.views.store.lounge_code {
                 Some(c) => c.clone(),

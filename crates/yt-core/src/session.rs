@@ -31,7 +31,7 @@ pub mod feeds {
 
 impl Session {
     pub fn new() -> Result<Session> {
-        let http = reqwest::blocking::Client::builder().gzip(true).timeout(std::time::Duration::from_secs(30)).build()?;
+        let http = crate::net::builder().timeout(std::time::Duration::from_secs(30)).build()?;
         let cfg = bootstrap::fetch(&http)?;
         let acct = crate::accounts::resolve(&http, None)?;
         let page_id = acct.as_ref().and_then(|a| a.page_id.clone());

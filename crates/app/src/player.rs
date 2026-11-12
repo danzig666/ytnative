@@ -307,7 +307,7 @@ fn run(
     // Live: the HLS master reduced to H.264 renditions (DASH-from-formats only works for VOD).
     // Needs TV validation: LG's hlsdemux2 stalled on YouTube's VOD TS playlists in early tests.
     let path = if resolved.is_live || resolved.adaptive.iter().all(|f| f["initRange"].is_null()) {
-        let http = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(15)).build()?;
+        let http = yt_core::net::builder().timeout(std::time::Duration::from_secs(15)).build()?;
         let master = resolved.hls_master(&http, prefs.max_height)?;
         let path = "/tmp/ytnative/live.m3u8";
         std::fs::write(path, master)?;
@@ -414,7 +414,7 @@ static EXT: std::sync::OnceLock<yt_core::ext::Ext> = std::sync::OnceLock::new();
 
 pub fn ext() -> &'static yt_core::ext::Ext {
     EXT.get_or_init(|| {
-        let http = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(10)).build().unwrap_or_default();
+        let http = yt_core::net::builder().timeout(std::time::Duration::from_secs(10)).build().unwrap_or_default();
         yt_core::ext::Ext::new(http)
     })
 }

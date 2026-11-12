@@ -92,6 +92,13 @@ pub struct Settings {
     pub content_country: String,
     // Remote
     pub lounge_enabled: bool,
+    /// Actions of the red, green, yellow and blue remote buttons ("none", "search", "settings",
+    /// "accounts", "subtitles", "speed").
+    pub color_keys: [String; 4],
+    /// Proxy for app traffic (http://, socks5://, socks5h://); empty = direct. Applies on restart.
+    pub proxy_url: String,
+    /// DNS-over-HTTPS: "off", "cloudflare", "google", "quad9". Applies on restart.
+    pub doh: String,
     /// Answer DIAL discovery so the TV is in the phone's cast menu.
     pub dial_enabled: bool,
     pub device_name: String,
@@ -152,6 +159,9 @@ impl Default for Settings {
             ui_language: "system".into(),
             content_country: "".into(),
             lounge_enabled: true,
+            color_keys: ["none".into(), "subtitles".into(), "speed".into(), "search".into()],
+            proxy_url: String::new(),
+            doh: "off".into(),
             dial_enabled: true,
             device_name: "ytnative".into(),
             child_mode: false,

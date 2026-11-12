@@ -58,7 +58,7 @@ impl Thumbs {
     }
 
     fn work(&'static self) {
-        let http = match reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(20)).build() {
+        let http = match yt_core::net::builder().timeout(std::time::Duration::from_secs(20)).build() {
             Ok(c) => c,
             Err(_) => return,
         };

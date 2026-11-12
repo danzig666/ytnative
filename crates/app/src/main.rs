@@ -117,6 +117,12 @@ fn main() {
         d.request(MachineId::Nav, NavOp::Root(YtArg::Browse));
 
         let mut remote = remote::Remote::open();
+        {
+            let s = &rig.store.settings;
+            if let Err(e) = yt_core::net::configure(yt_core::net::NetConfig { proxy: s.proxy_url.clone(), doh: s.doh.clone() }) {
+                log(&format!("net: bad proxy/DoH setting ignored: {e:#}"));
+            }
+        }
         let mut lounge = if rig.store.settings.lounge_enabled {
             match lounge::Lounge::start(&rig.store.settings.device_name, rig.store.settings.dial_enabled) {
                 Ok(l) => Some(l),
@@ -150,6 +156,15 @@ fn main() {
                         let (state, wcode, sym) = input::decode_key(&ev);
                         if wcode == 505 {
                             running = false; // EXIT key
+                        }
+                        if (403..=406).contains(&wcode) {
+                            let act = rig.store.settings.color_keys[(wcode - 403) as usize].clone();
+                            if act != "none" {
+                                if state & 0xff != 0 && state & 0x100 == 0 {
+                                    color_key(&act, &mut rig, &mut d);
+                                }
+                                continue;
+                            }
                         }
                         inputs.push(input::key_input(sym, wcode, state, tick));
                     }
@@ -279,5 +294,28 @@ fn main() {
         }
         log("ytnative: exit");
         sdl::SDL_Quit();
+    }
+}
+
+/// A remapped colour button (settings → Remote control).
+fn color_key(act: &str, rig: &mut AppRig, d: &mut Dispatcher<YtHost>) {
+    match act {
+        "search" => d.request(MachineId::Nav, NavOp::Push(YtArg::Search)),
+        "settings" => d.request(MachineId::Nav, NavOp::Push(YtArg::Settings(host::SettingsPage::Root))),
+        "accounts" => d.request(MachineId::Nav, NavOp::Push(YtArg::Accounts)),
+        "subtitles" => {
+            rig.store.settings.subtitles = !rig.store.settings.subtitles;
+            rig.store.settings.save();
+            let msg = if rig.store.settings.subtitles { "Subtitles on" } else { "Subtitles off" };
+            rig.store.toast = Some((msg.into(), rig.now_ms + 2500));
+        }
+        "speed" => {
+            const R: [f32; 7] = [0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 0.5];
+            let cur = rig.player_view.rate;
+            let i = R.iter().position(|r| (r - cur).abs() < 0.01).map_or(1, |i| (i + 1) % R.len());
+            rig.player.set_rate(R[i]);
+            rig.store.toast = Some((format!("{}x", R[i]), rig.now_ms + 2500));
+        }
+        _ => {}
     }
 }

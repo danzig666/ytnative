@@ -314,7 +314,7 @@ impl AppRig {
         rig.refresh_groups();
         // Fetch the client profiles (remote override, cached) off the main thread.
         let _ = plx_base::task::spawn("clients", || {
-            let http = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(8)).build().unwrap_or_default();
+            let http = yt_core::net::builder().timeout(std::time::Duration::from_secs(8)).build().unwrap_or_default();
             let (p, src) = yt_core::clients::load(&http);
             yt_core::clients::set_active(p, src);
         });

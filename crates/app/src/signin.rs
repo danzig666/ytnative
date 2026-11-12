@@ -8,7 +8,7 @@ use std::time::Duration;
 use yt_core::auth::{self, Poll};
 
 pub fn run(cancel: &AtomicBool, post: &dyn Fn(SignIn)) -> anyhow::Result<()> {
-    let http = reqwest::blocking::Client::builder().timeout(Duration::from_secs(20)).build()?;
+    let http = yt_core::net::builder().timeout(Duration::from_secs(20)).build()?;
     let cfg = yt_core::bootstrap::fetch(&http)?;
     let code = auth::start_device_login(&http, &cfg)?;
     post(SignIn::Code { user_code: code.user_code.clone(), url: code.verification_url.clone() });

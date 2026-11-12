@@ -16,6 +16,7 @@ pub mod lounge;
 pub mod memory;
 pub mod model;
 pub mod mpd;
+pub mod net;
 pub mod parse;
 pub mod paths;
 pub mod sabr;
