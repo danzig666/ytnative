@@ -61,6 +61,7 @@ impl LogicalState for State {
 pub struct SearchScreen {
     entry: EntryId,
     query: String,
+    recent: Vec<String>,
     sug: VList,
     state: State,
 }
@@ -70,6 +71,7 @@ impl SearchScreen {
         SearchScreen {
             entry,
             query: String::new(),
+            recent: yt_core::search_history::SearchHistory::load().list().iter().take(10).cloned().collect(),
             sug: VList { entry, group: G_SUG, base: SUG_BASE, rect: Rect::new(1000.0, 300.0, 820.0, 700.0), row_h: 70.0, text_size: 30 },
             state: State(String::new()),
         }
@@ -80,15 +82,17 @@ impl SearchScreen {
     fn kkey(&self, i: usize) -> FocusKey<u32> {
         FocusKey { entry: self.entry, elem: KEY_BASE + i as u32 }
     }
-    fn suggestions<'a>(&self, cx: &Cx<'a, YtHost>) -> &'a [String] {
+    /// Recent searches while nothing is typed, live suggestions after.
+    fn suggestions<'a>(&'a self, cx: &'a Cx<'_, YtHost>) -> &'a [String] {
         if self.query.is_empty() {
-            &[]
+            &self.recent
         } else {
             &cx.views.store.suggestions
         }
     }
     fn search(&self, q: &str, fx: &mut Effects<'_, YtHost>) {
         if !q.trim().is_empty() {
+            let _ = yt_core::search_history::record(q.trim());
             fx.push(Fx::Nav(NavOp::Push(YtArg::Feed(FeedKey::Search { query: q.trim().to_string(), params: None }))));
         }
     }
@@ -250,6 +254,9 @@ impl Screen<YtHost> for SearchScreen {
             self.sug.draw(p, &rows, self.sug.focused(cx, sugs.len()));
         } else {
             ui::text(p, "Suggestions appear here as you type.", 1000.0, 310.0, 28, ui::FAINT, ui::ALIGN_LEFT, false);
+        }
+        if self.query.is_empty() && !self.recent.is_empty() {
+            ui::text(p, "Recent searches", 1000.0, 250.0, 26, ui::FAINT, ui::ALIGN_LEFT, false);
         }
     }
     fn render(&self) -> RenderStrategy {

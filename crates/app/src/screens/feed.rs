@@ -63,6 +63,7 @@ impl FeedScreen {
             FeedKey::Browse { .. } => "Channel".into(),
             FeedKey::Section(s) => s.title().into(),
             FeedKey::Related(_) => "Up next".into(),
+            FeedKey::Group(id) => cx.views.store.groups.iter().find(|g| &g.0 == id).map(|g| g.1.clone()).unwrap_or_else(|| "Group".into()),
         }
     }
 }

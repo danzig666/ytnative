@@ -106,6 +106,8 @@ pub enum FeedKey {
     Search { query: String, params: Option<String> },
     /// Suggestions / up-next for a video.
     Related(String),
+    /// A local channel group (RSS-fed): group id.
+    Group(String),
 }
 
 impl FeedKey {
@@ -177,6 +179,8 @@ pub struct Comments {
 #[derive(Default)]
 pub struct Store {
     pub accounts: Vec<AccountRow>,
+    /// Local channel groups: (id, title).
+    pub groups: Vec<(String, String)>,
     /// Subscribe state per channel id (from YouTube, updated optimistically).
     pub subscribed: HashMap<String, bool>,
     /// Sleep timer length chosen (0 = off), for the menu.

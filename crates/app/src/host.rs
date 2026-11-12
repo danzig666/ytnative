@@ -127,6 +127,14 @@ pub enum UserAction {
     /// Add (true) or remove a video from a playlist.
     Playlist { playlist_id: String, video_id: String, add: bool },
     NewPlaylist { title: String, video_id: String },
+    /// Add a channel to a local group (None = a new group named after the channel).
+    AddToGroup { group_id: Option<String>, channel_id: String, title: String, icon: Option<String> },
+    RemoveGroup(String),
+    /// Import channel groups from NewPipe / Grayjay / PocketTube files on USB storage.
+    ImportGroups,
+    Backup,
+    Restore,
+    ClearSearchHistory,
     /// One of a card's own YouTube menu items (Not interested, Remove from history, ...).
     Menu(yt_core::actions::MenuAction),
     SwitchAccount(String),
@@ -300,7 +308,20 @@ impl AppRig {
             sleep_at: None,
         };
         rig.refresh_accounts();
+        rig.refresh_groups();
+        // Fetch the client profiles (remote override, cached) off the main thread.
+        let _ = plx_base::task::spawn("clients", || {
+            let http = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(8)).build().unwrap_or_default();
+            let (p, src) = yt_core::clients::load(&http);
+            yt_core::clients::set_active(p, src);
+        });
         rig
+    }
+
+    /// Re-reads the local channel groups (one small JSON file).
+    pub fn refresh_groups(&mut self) {
+        let st = yt_core::channel_groups::Store::load();
+        self.store.groups = st.groups.iter().map(|g| (g.id.clone(), g.title.clone())).collect();
     }
 
     /// Re-reads the account list (cheap: one small JSON file).
@@ -379,6 +400,7 @@ impl AppRig {
                 }
                 Work::Toast { msg, accounts_changed } => {
                     self.store.toast(msg, now_ms);
+                    self.refresh_groups();
                     if accounts_changed {
                         self.store.feeds.clear();
                         *self.session.lock().unwrap() = None;
@@ -580,6 +602,63 @@ fn run_action(session: &Mutex<Option<yt_core::session::Session>>, a: &UserAction
             s.create_playlist(title, yt_core::actions::Privacy::Private, &[video_id.as_str()]).map(|_| format!("Created playlist \u{201C}{title}\u{201D}"))
         }),
         UserAction::Menu(m) => with_session(session, |s| s.run_menu_action(m)).map(|ok| if ok { "Done".to_string() } else { "Not available".to_string() }),
+        UserAction::AddToGroup { group_id, channel_id, title, icon } => (|| {
+            use yt_core::channel_groups::{ChannelRef, Store};
+            let mut st = Store::load();
+            let gid = match group_id {
+                Some(g) => g.clone(),
+                None => st.create(title),
+            };
+            let mut c = ChannelRef::new(channel_id.clone());
+            c.title = Some(title.clone()).filter(|t| !t.is_empty()).map(Into::into).unwrap_or_default();
+            c.icon = icon.clone();
+            st.add_channel(&gid, c);
+            st.save()?;
+            Ok::<_, anyhow::Error>("Added to group".to_string())
+        })(),
+        UserAction::RemoveGroup(id) => (|| {
+            let mut st = yt_core::channel_groups::Store::load();
+            st.remove(id);
+            st.save()?;
+            Ok::<_, anyhow::Error>("Group removed".to_string())
+        })(),
+        UserAction::ImportGroups => (|| {
+            let mut st = yt_core::channel_groups::Store::load();
+            let (mut groups, mut chans, mut files) = (0, 0, 0);
+            for dir in yt_core::backup::usb_dirs() {
+                for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                    let p = e.path();
+                    if p.extension().is_some_and(|x| x == "json" || x == "txt") {
+                        if let Ok((_, gs)) = yt_core::channel_groups::import_file(&p) {
+                            let (g, c) = st.merge(gs);
+                            groups += g;
+                            chans += c;
+                            files += 1;
+                        }
+                    }
+                }
+            }
+            st.save()?;
+            Ok::<_, anyhow::Error>(if files == 0 {
+                "No NewPipe / Grayjay / PocketTube export found on USB".to_string()
+            } else {
+                format!("Imported {groups} groups, {chans} channels")
+            })
+        })(),
+        UserAction::Backup => (|| {
+            let dir = yt_core::backup::usb_dirs().into_iter().next().unwrap_or_else(|| yt_core::paths::data_file("backups"));
+            std::fs::create_dir_all(&dir)?;
+            let path = yt_core::backup::auto_backup(&dir, 5, Default::default())?;
+            Ok::<_, anyhow::Error>(format!("Backed up to {}", path.display()))
+        })(),
+        UserAction::Restore => (|| {
+            let mut dirs = yt_core::backup::usb_dirs();
+            dirs.push(yt_core::paths::data_file("backups"));
+            let latest = dirs.iter().flat_map(|d| yt_core::backup::list_backups(d)).next().ok_or_else(|| anyhow::anyhow!("no backup found"))?;
+            let r = yt_core::backup::restore_from(&latest.path, Default::default())?;
+            Ok::<_, anyhow::Error>(format!("Restored {} files from {} (restart the app)", r.restored.len(), latest.name))
+        })(),
+        UserAction::ClearSearchHistory => yt_core::search_history::clear().map(|_| "Search history cleared".to_string()),
         UserAction::SwitchAccount(id) => {
             return match yt_core::accounts::switch(id) {
                 Ok(()) => ("Switched account".into(), true),
@@ -621,6 +700,11 @@ fn load_page(session: &Mutex<Option<yt_core::session::Session>>, key: &FeedKey, 
         (None, FeedKey::Browse { id, params }) => s.browse(id, params.as_deref()),
         (None, FeedKey::Search { query, params }) => s.search(query, params.as_deref()),
         (None, FeedKey::Related(_)) => Ok(Default::default()),
+        (None, FeedKey::Group(id)) => {
+            let store = yt_core::channel_groups::Store::load();
+            let g = store.get(id).ok_or_else(|| anyhow::anyhow!("this group no longer exists"))?;
+            yt_core::channel_groups::group_feed(&s.http, g, yt_core::channel_groups::FeedCache::global())
+        }
     });
     match r {
         Ok(page) => Work::Page { key: key.clone(), page, append: continuation.is_some(), failed: None },
@@ -687,10 +771,25 @@ impl Rig<YtHost> for AppRig {
                     .take()
                     .filter(|(v, _)| *v == video_id)
                     .map(|(_, ms)| ms)
-                    .or_else(|| if s.resume_playback { self.store.resume_point(&video_id) } else { None });
+                    .or_else(|| if s.resume_playback { self.store.resume_point(&video_id) } else { None })
+                    .or_else(|| {
+                        if s.resume_playback {
+                            yt_core::memory::PlayerMemory::load().position(&video_id).map(|secs| secs * 1000)
+                        } else {
+                            None
+                        }
+                    });
                 self.player.start(video_id, self.session.clone(), prefs, extras, start);
             }
-            YtFx::Stop => self.player.stop(),
+            YtFx::Stop => {
+                let v = &self.player_view;
+                if !v.video_id.is_empty() && v.duration_ms > 0 {
+                    let mut m = yt_core::memory::PlayerMemory::load();
+                    m.set_position(&v.video_id, v.position_ms / 1000, v.duration_ms / 1000);
+                    let _ = m.save();
+                }
+                self.player.stop();
+            }
             YtFx::TogglePause => self.player.toggle_pause(),
             YtFx::OkInPlayer => {
                 if !self.take_sb_offer() {

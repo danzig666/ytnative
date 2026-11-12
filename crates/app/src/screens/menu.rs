@@ -25,6 +25,7 @@ enum Act {
     OpenPlaylist(String),
     BlockChannel(String),
     Pin(String, String, Option<String>),
+    AddToGroup(Option<String>, String, String, Option<String>),
     Unpin(String),
     SearchFor(String),
     User(UserAction),
@@ -90,6 +91,12 @@ impl MenuScreen {
                     acts.push(("Open channel".into(), Act::OpenChannel(browse_id.clone())));
                 } else {
                     acts.push(("Open".into(), Act::OpenPlaylist(browse_id.clone())));
+                }
+                if browse_id.starts_with("UC") {
+                    for (gid, gt) in &cx.views.store.groups {
+                        acts.push((format!("Add to group \u{201C}{gt}\u{201D}"), Act::AddToGroup(Some(gid.clone()), browse_id.clone(), card.title.clone(), card.item.thumbnail.clone())));
+                    }
+                    acts.push(("Add to a new group".into(), Act::AddToGroup(None, browse_id.clone(), card.title.clone(), card.item.thumbnail.clone())));
                 }
                 if cx.views.store.settings.pinned.iter().any(|p| &p.1 == browse_id) {
                     acts.push(("Unpin from sidebar".into(), Act::Unpin(browse_id.clone())));
@@ -262,6 +269,10 @@ impl MenuScreen {
             Act::SearchFor(q) => {
                 fx.push(Fx::Nav(NavOp::Pop));
                 fx.push(Fx::Nav(NavOp::Push(YtArg::Feed(FeedKey::Search { query: q.clone(), params: None }))));
+            }
+            Act::AddToGroup(g, ch, t, icon) => {
+                fx.push(Fx::App(YtFx::Act(UserAction::AddToGroup { group_id: g.clone(), channel_id: ch.clone(), title: t.clone(), icon: icon.clone() })));
+                fx.push(Fx::Nav(NavOp::Pop));
             }
             Act::Pin(t, id, p) => {
                 let (t, id, p) = (t.clone(), id.clone(), p.clone());

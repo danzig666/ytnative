@@ -63,6 +63,8 @@ enum NavItem {
     Section(Section),
     /// A pinned channel or playlist: (title, browse id, params).
     Pinned(String, String, Option<String>),
+    /// A local channel group: (id, title).
+    Group(String, String),
     Search,
     Settings,
     Account,
@@ -95,6 +97,7 @@ fn nav_items(cx: &Cx<'_, YtHost>) -> Vec<NavItem> {
         v.push(NavItem::Section(Section::Home));
     }
     v.extend(s.pinned.iter().map(|(t, id, p)| NavItem::Pinned(t.clone(), id.clone(), p.clone())));
+    v.extend(cx.views.store.groups.iter().map(|(id, t)| NavItem::Group(id.clone(), t.clone())));
     if !s.child_mode {
         v.insert(0, NavItem::Search);
     }
@@ -149,6 +152,7 @@ impl BrowseScreen {
                 fx.push(Fx::App(YtFx::Load(self.key())));
             }
             NavItem::Search => fx.push(Fx::Nav(NavOp::Push(YtArg::Search))),
+            NavItem::Group(id, _) => fx.push(Fx::Nav(NavOp::Push(YtArg::Feed(FeedKey::Group(id.clone()))))),
             NavItem::Pinned(_, id, params) => fx.push(Fx::Nav(NavOp::Push(YtArg::Feed(FeedKey::Browse { id: id.clone(), params: params.clone() })))),
             NavItem::Settings => {
                 let locked = !cx.views.store.settings.settings_pin.is_empty();
@@ -364,6 +368,7 @@ impl Screen<YtHost> for BrowseScreen {
                 NavItem::Section(s) => Row::new(s.title()).active(*s == self.section),
                 NavItem::Search => Row::new("\u{1F50D}  Search"),
                 NavItem::Pinned(t, ..) => Row::new(format!("\u{2605} {}", ui::ellipsize(t, 16))),
+                NavItem::Group(_, t) => Row::new(format!("\u{25A4} {}", ui::ellipsize(t, 16))),
                 NavItem::Settings => Row::new("Settings"),
                 NavItem::Account => Row::new(match (&cx.views.store.account, cx.views.store.signed_in) {
                     (Some(a), true) => ui::ellipsize(a, 18),

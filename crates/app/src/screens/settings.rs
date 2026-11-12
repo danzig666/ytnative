@@ -133,7 +133,9 @@ fn items(page: SettingsPage) -> Vec<Item> {
             Opt("Hide watched videos", |s| on_off(s.hide_watched), |s, _| s.hide_watched = !s.hide_watched),
             Opt("Hide upcoming streams", |s| on_off(s.hide_upcoming), |s, _| s.hide_upcoming = !s.hide_upcoming),
             Opt("Hide mixes", |s| on_off(s.hide_mixes), |s, _| s.hide_mixes = !s.hide_mixes),
-            Opt("Blocked channels", |s| s.blocked_channels.len().to_string(), |s, _| s.blocked_channels.clear()),
+            Opt("Blocked channels (OK clears)", |s| s.blocked_channels.len().to_string(), |s, _| s.blocked_channels.clear()),
+            Action("Clear search history", |fx| fx.push(Fx::App(YtFx::Act(crate::host::UserAction::ClearSearchHistory)))),
+            Action("Import channel groups from USB", |fx| fx.push(Fx::App(YtFx::Act(crate::host::UserAction::ImportGroups)))),
             Opt("Child mode (no search, no comments)", |s| on_off(s.child_mode), |s, _| s.child_mode = !s.child_mode),
             Action("Set settings PIN", |fx| fx.push(Fx::Nav(NavOp::Push(YtArg::Pin(crate::host::PinPurpose::Set))))),
             Opt("Settings PIN", |s| (if s.settings_pin.is_empty() { "Off" } else { "On" }).into(), |s, _| s.settings_pin.clear()),
@@ -202,6 +204,8 @@ fn items(page: SettingsPage) -> Vec<Item> {
                 fx.push(Fx::App(YtFx::SignOut));
                 fx.push(Fx::App(YtFx::Toast("Signed out".into())));
             }),
+            Action("Back up settings (USB or app storage)", |fx| fx.push(Fx::App(YtFx::Act(crate::host::UserAction::Backup)))),
+            Action("Restore latest backup", |fx| fx.push(Fx::App(YtFx::Act(crate::host::UserAction::Restore)))),
             Info("Version", |_| env!("CARGO_PKG_VERSION").into()),
             Info("Source", |_| "github.com/danzig666/ytnative".into()),
         ],
