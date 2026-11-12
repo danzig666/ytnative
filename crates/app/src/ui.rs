@@ -43,6 +43,46 @@ pub fn set_card_cols(n: u8) {
     CARD_COLS.store(n.clamp(3, 5), std::sync::atomic::Ordering::Relaxed);
 }
 
+// Off until the first frame applies the setting (which also sets the row room).
+static TITLES_UNDER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Room every row keeps under its cards for the title (two lines) and the channel line.
+const UNDER_EXTRA: f32 = 84.0;
+
+/// SmartTube-style titles under every thumbnail (on) or plx's caption under the focused card only.
+pub fn titles_under() -> bool {
+    TITLES_UNDER.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_titles_under(on: bool) {
+    TITLES_UNDER.store(on, std::sync::atomic::Ordering::Relaxed);
+    plx_ui::card_row::set_label_band_extra(if on { UNDER_EXTRA } else { 0.0 });
+}
+
+/// `s` split into at most two lines of `w` px (word wrap; the second line ellipsised).
+fn wrap2(m: &dyn plx_machine::machine::Measure, s: &str, w: f32, size: i32) -> (String, Option<String>) {
+    let width = |t: &str| CString::new(t).map_or(0.0, |c| m.width(&c, size, false));
+    if width(s) <= w {
+        return (s.to_string(), None);
+    }
+    let mut first = String::new();
+    let mut rest = s;
+    for (i, word) in s.split_inclusive(' ').enumerate() {
+        let trial = format!("{first}{word}");
+        if i > 0 && width(trial.trim_end()) > w {
+            break;
+        }
+        first = trial;
+        rest = &s[first.len()..];
+    }
+    if first.is_empty() || rest.is_empty() {
+        // One long word: hard-cut it.
+        let cut: String = m.fit_line(s, w, size, false).to_string_lossy().into_owned();
+        return (cut, None);
+    }
+    let second = m.fit_line(rest.trim_start(), w, size, false).to_string_lossy().into_owned();
+    (first.trim_end().to_string(), Some(second))
+}
+
 /// A 16:9 card style that fits `cols` cards (with `gap`) into `width`.
 pub fn card_style(cols: usize, width: f32, gap: f32) -> plx_ui::card_row::RowStyle {
     let w = ((width - (cols as f32 - 1.0) * gap) / cols as f32).floor();
@@ -114,6 +154,10 @@ impl CardSource<YtHost> for CardsSrc<'_> {
         Art::Thumb { sid: 0, key: &self.cards[i].thumb, res: (480, 270) }
     }
     fn label(&self, i: usize) -> TileLabel {
+        if titles_under() {
+            // Every card carries its own caption (`overlay`); plx's focused block would repeat it.
+            return TileLabel::from_lines([None, None]);
+        }
         TileLabel::from_lines([Some(self.cards[i].title.clone()), Some(self.cards[i].detail.clone())])
     }
     fn progress(&self, i: usize) -> Option<f32> {
@@ -122,7 +166,24 @@ impl CardSource<YtHost> for CardsSrc<'_> {
     fn more(&self) -> bool {
         self.more
     }
-    fn overlay(&self, p: Painter, i: usize, tile: &plx_ui::cards::Tile, _m: &dyn plx_machine::machine::Measure) {
+    fn overlay(&self, p: Painter, i: usize, tile: &plx_ui::cards::Tile, m: &dyn plx_machine::machine::Measure) {
+        if titles_under() {
+            // Title (two lines) and channel / views / age under every thumbnail, as SmartTube does.
+            let (r, c) = (tile.rect, &self.cards[i]);
+            let y = r.y + r.h + 12.0;
+            let ink = if tile.focused { WHITE } else { [1.0, 1.0, 1.0, 0.86] };
+            let (l1, l2) = wrap2(m, &c.title, r.w, 24);
+            text(p, &l1, r.x, y, 24, ink, ALIGN_LEFT, tile.focused);
+            let mut dy = 31.0;
+            if let Some(l2) = l2 {
+                text(p, &l2, r.x, y + dy, 24, ink, ALIGN_LEFT, tile.focused);
+                dy += 31.0;
+            }
+            if !c.detail.is_empty() {
+                let d = m.fit_line(&c.detail, r.w, 20, false).to_string_lossy().into_owned();
+                text(p, &d, r.x, y + dy + 2.0, 20, DIM, ALIGN_LEFT, false);
+            }
+        }
         // Duration / LIVE badge in the bottom-right corner of the thumbnail.
         if let Some(b) = &self.cards[i].item.badge {
             let r = tile.rect;

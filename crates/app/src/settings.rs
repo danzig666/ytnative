@@ -92,6 +92,8 @@ pub struct Settings {
     pub content_country: String,
     // Remote
     pub lounge_enabled: bool,
+    /// Title and channel under every thumbnail (SmartTube style).
+    pub titles_under: bool,
     /// Screen size in percent (90..=100): shrinks the UI for TVs that overscan.
     pub ui_scale: u8,
     /// Card menu: item kinds in display order (see `screens::menu::CARD_ITEMS`) and the hidden ones.
@@ -169,6 +171,7 @@ impl Default for Settings {
             ui_language: "system".into(),
             content_country: "".into(),
             lounge_enabled: true,
+            titles_under: true,
             ui_scale: 100,
             card_menu: crate::screens::menu::CARD_ITEMS.iter().map(|(k, _)| k.to_string()).collect(),
             card_menu_hidden: Vec::new(),

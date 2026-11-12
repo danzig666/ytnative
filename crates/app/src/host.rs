@@ -363,6 +363,9 @@ impl AppRig {
         self.now_ms = now_ms;
         crate::ui::set_accent(&self.store.settings.accent);
         crate::ui::set_card_cols(self.store.settings.card_columns);
+        if crate::ui::titles_under() != self.store.settings.titles_under {
+            crate::ui::set_titles_under(self.store.settings.titles_under);
+        }
         plx_base::surface::set_ui_scale(self.store.settings.ui_scale.clamp(80, 100) as f32 / 100.0);
         if self.store.settings.ui_language != self.applied_language {
             self.applied_language = self.store.settings.ui_language.clone();

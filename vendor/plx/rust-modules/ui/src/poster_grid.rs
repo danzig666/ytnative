@@ -427,7 +427,7 @@ impl Geom {
     /// A COLLAPSED row's pitch.
     pub fn pitch(&self) -> f32 {
         self.h + if self.value_line { card_row::SORT_VALUE_ROW_GAP }
-            else { LABEL_BAND_COLLAPSED + UNDER_LABEL_AIR }
+            else { card_row::label_band_collapsed() + UNDER_LABEL_AIR }
     }
 
     /// How far under a card's unscaled bottom the focused row's caption reaches for a band of
@@ -449,7 +449,7 @@ pub fn growth_before(row: usize, bands: &[GridBand]) -> f32 {
 /// one-line band, 72 px per two-line one, nothing when the policy shows nothing.
 pub fn growth_before_for(band_h: f32, row: usize, bands: &[GridBand]) -> f32 {
     bands.iter().filter(|band| band.row < row)
-        .map(|band| card_row::under_band_for(band_h, band.expansion) - LABEL_BAND_COLLAPSED).sum()
+        .map(|band| card_row::under_band_for(band_h, band.expansion) - card_row::label_band_collapsed()).sum()
 }
 
 /// Row `row`'s top in document space (before scroll), with every open band above it counted.

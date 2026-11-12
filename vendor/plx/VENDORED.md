@@ -39,3 +39,4 @@ The ytnative simulator (`cargo xtask sim`, `crates/app/src/sim/`) builds these c
   and `private_new_file` (no mode/flags).
 
 - `base/src/surface.rs`: `set_ui_scale` (ytnative's Screen size / overscan setting) multiplies the fitted scale before the viewport is derived.
+- `ui/src/card_row.rs`, `ui/src/poster_grid.rs`: `set_label_band_extra` adds room under every row (titles under every thumbnail); the collapsed band is read through `label_band_collapsed()`.

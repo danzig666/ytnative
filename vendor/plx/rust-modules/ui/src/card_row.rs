@@ -1623,23 +1623,41 @@ pub const LEGACY_BAND_H: f32 = UNDER_LABEL_H + crate::consts::UNDER_LABEL_AIR;
 /// design system's `space::LG` (40 px).
 const COLLAPSED_GAP: f32 = LABEL_BAND_COLLAPSED + crate::consts::UNDER_LABEL_AIR;
 
+/// ytnative local change: extra room every row keeps under its cards (focused or not), for an
+/// application that draws a caption under EVERY card (titles under thumbnails). 0 = plx's design.
+static LABEL_BAND_EXTRA_BITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Sets the extra room under every row (px, 0..=200).
+pub fn set_label_band_extra(px: f32) {
+    LABEL_BAND_EXTRA_BITS.store(px.clamp(0.0, 200.0).to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The room a collapsed row keeps under its cards: [`LABEL_BAND_COLLAPSED`] plus the extra.
+pub fn label_band_collapsed() -> f32 {
+    LABEL_BAND_COLLAPSED + f32::from_bits(LABEL_BAND_EXTRA_BITS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+fn collapsed_gap() -> f32 {
+    label_band_collapsed() + crate::consts::UNDER_LABEL_AIR
+}
+
 /// How far a focused row's band opens past the collapsed one for a band of `band_h`: what the row
 /// below is carried down by ([`BAND_OPEN`] for the legacy band, 40 / 72 / 0 px for the Under
 /// posters setting's 80 / 112 / 0).
 pub fn band_open_for(band_h: f32) -> f32 {
-    under_band_for(band_h, 1.0) - LABEL_BAND_COLLAPSED
+    under_band_for(band_h, 1.0) - label_band_collapsed()
 }
 
 /// The gap a FOCUSED row opens to for a band of `band_h` ([`crate::caption_policy::band_h`]): the
 /// band itself, never less than the collapsed gap, so a policy showing nothing opens nothing.
 pub fn open_gap(band_h: f32) -> f32 {
-    band_h.max(COLLAPSED_GAP)
+    band_h.max(collapsed_gap())
 }
 
 /// [`under_band`] for a band of `band_h`: the label band at expansion `e` (0 collapsed → 1 open).
 /// Only the focused row opens it; non-focused rows stay [`COLLAPSED_GAP`] apart.
 pub fn under_band_for(band_h: f32, e: f32) -> f32 {
-    LABEL_BAND_COLLAPSED + (open_gap(band_h) - COLLAPSED_GAP) * e.clamp(0.0, 1.0)
+    label_band_collapsed() + (open_gap(band_h) - collapsed_gap()) * e.clamp(0.0, 1.0)
 }
 
 /// How far past the moment the room holds a line's box the line takes to come in fully, in px of
@@ -1716,7 +1734,7 @@ pub fn settled_top_for(r: usize, focus: Option<usize>, pitch_fixed: f32, band_op
 /// open band (`band_open`) carries every shelf below it down. This is the one rule: the uniform
 /// [`settled_top_for`] is this with one pitch for every row.
 pub fn settled_top_by(r: usize, focus: Option<usize>, band_open: f32, pitch_fixed: impl Fn(usize) -> f32) -> f32 {
-    let above: f32 = (0..r).map(|i| pitch_fixed(i) + LABEL_BAND_COLLAPSED).sum();
+    let above: f32 = (0..r).map(|i| pitch_fixed(i) + label_band_collapsed()).sum();
     above + if focus.is_some_and(|f| f < r) { band_open } else { 0.0 }
 }
 

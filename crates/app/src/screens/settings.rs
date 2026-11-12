@@ -186,6 +186,7 @@ fn items(page: SettingsPage) -> Vec<Item> {
                     s.idle_blank_secs = cycle(&[60, 120, 300, 600], s.idle_blank_secs, d)
                 }),
                 Opt("Screen size", |s| format!("{}%", s.ui_scale), |s, d| s.ui_scale = cycle(&[100u8, 97, 95, 92, 90], s.ui_scale, d)),
+                Opt("Titles under thumbnails", |s| on_off(s.titles_under), |s, _| s.titles_under = !s.titles_under),
                 Opt("Card size", |s| match s.card_columns { 3 => "large".into(), 5 => "small".into(), _ => "medium".into() }, |s, d| {
                     s.card_columns = cycle(&[3u8, 4, 5], s.card_columns, d)
                 }),
