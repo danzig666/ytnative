@@ -10,7 +10,7 @@ mod screens;
 mod sdl;
 mod wl;
 
-use host::{AppRig, Card, YtArg, YtHost};
+use host::{AppRig, YtArg, YtHost};
 use plx_machine::machine::{MachineId, NavOp, Tick};
 use plx_ui::containers::transition::PageDip;
 use plx_ui::dispatch::{Dispatcher, NoTap};
@@ -23,20 +23,22 @@ pub fn now_us() -> u64 {
     START.get_or_init(Instant::now).elapsed().as_micros() as u64
 }
 
-fn log(s: &str) {
-    plx_base::eventlog::log(s);
-    eprintln!("{s}");
+/// Persistent, writable, survives reinstall in the Developer Mode jail (plx-native's finding);
+/// falls back to the app's tmp dir.
+fn data_dir() -> std::path::PathBuf {
+    let id = plx_base::paths::app_id();
+    for d in [format!("/media/developer/{id}-data"), format!("/media/internal/.{id}"), "/tmp/ytnative/data".to_string()] {
+        let p = std::path::PathBuf::from(&d);
+        if std::fs::create_dir_all(&p).is_ok() && std::fs::write(p.join(".probe"), b"ok").is_ok() {
+            return p;
+        }
+    }
+    std::path::PathBuf::from("/tmp")
 }
 
-fn demo_cards() -> Vec<Card> {
-    (1..=24)
-        .map(|i| Card {
-            elem: i,
-            title: format!("Video {i}"),
-            detail: "Channel name \u{2022} 1.2M views".into(),
-            thumb: String::new(),
-        })
-        .collect()
+pub fn log(s: &str) {
+    plx_base::eventlog::log(s);
+    eprintln!("{s}");
 }
 
 fn main() {
@@ -48,6 +50,7 @@ fn main() {
     if let Some(arg) = std::env::args().nth(1) {
         plx_platform::tv::launch::offer(&arg);
     }
+    yt_core::paths::set_data_dir(data_dir());
     log("ytnative: boot");
 
     unsafe {
@@ -97,7 +100,7 @@ fn main() {
         plx_platform::i18n::initialize(plx_platform::i18n::Preference::System, false);
         log("ytnative: graphics ready");
 
-        let mut rig = AppRig::new(demo_cards());
+        let mut rig = AppRig::new();
         let mut d = Dispatcher::<YtHost>::with_transition(Box::new(PageDip::new()));
         d.request(MachineId::Nav, NavOp::Root(YtArg::Home));
 
@@ -148,7 +151,7 @@ fn main() {
             }
 
             plx_machine::idle::frame_begin(dt);
-            let results = std::mem::take(&mut *rig.inbox.lock().unwrap());
+            let results = rig.drain();
             let r = d.frame_with(&mut rig, tick, inputs, results, &mut NoTap, false);
             d.prune(&r.unmounted);
             plx_ui::tex::note_queued(&mut d.budget);

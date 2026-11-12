@@ -1,6 +1,6 @@
 //! Home: a grid of video cards (landscape thumbnails), D-pad focus, OK opens, BACK goes back.
 
-use crate::host::{Card, YtArg, YtHost};
+use crate::host::{Card, Feed, YtArg, YtFx, YtHost, YtMsg};
 use plx_machine::machine::{Canon, Cx, Effects, EntryId, FocusKey, Fx, GroupId, Handled, LogicalState, Machine, NavOp, ScreenEvent};
 use plx_ui::card_row::{RowStyle, TileLabel};
 use plx_ui::cards::{CardEvent, CardSource, Grid, GridSpec};
@@ -63,6 +63,13 @@ impl HomeScreen {
 impl Machine<YtHost> for HomeScreen {
     type Ev = ScreenEvent<YtHost>;
     fn step(&mut self, ev: &Self::Ev, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) -> Handled {
+        match ev {
+            ScreenEvent::Mount if self.state.0 == 0 => fx.push(Fx::App(YtFx::Load(Feed::Home))),
+            ScreenEvent::Async(_, YtMsg::Loaded(_)) | ScreenEvent::Async(_, YtMsg::Failed(..)) => {
+                fx.invalidate(plx_machine::present::Provenance::Lifecycle);
+            }
+            _ => {}
+        }
         let src = Src(cx.views.home);
         if let Some(CardEvent::Activate(e)) = self.grid.on(ev, cx, &src, fx) {
             fx.push(Fx::Nav(NavOp::Push(YtArg::Video(e))));

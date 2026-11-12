@@ -16,6 +16,8 @@ plx_machine = { path = "../../vendor/plx/rust-modules/machine" }
 plx_gfx = { path = "../../vendor/plx/rust-modules/gfx" }
 plx_platform = { path = "../../vendor/plx/rust-modules/platform" }
 plx_ui = { path = "../../vendor/plx/rust-modules/ui" }
+yt-core = { path = "../yt-core" }
+anyhow.workspace = true
 
 [build-dependencies]
 cc = "1"

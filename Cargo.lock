@@ -2045,6 +2045,7 @@ dependencies = [
 name = "ytnative-app"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "cc",
  "libc",
  "plx_base",
@@ -2052,6 +2053,7 @@ dependencies = [
  "plx_machine",
  "plx_platform",
  "plx_ui",
+ "yt-core",
 ]
 
 [[package]]

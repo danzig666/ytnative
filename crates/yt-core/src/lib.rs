@@ -5,5 +5,6 @@ pub mod innertube;
 pub mod model;
 pub mod mpd;
 pub mod parse;
+pub mod paths;
 pub mod session;
 pub mod streams;

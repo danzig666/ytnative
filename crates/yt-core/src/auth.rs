@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const TOKEN_FILE: &str = "token.json";
+fn token_file() -> std::path::PathBuf {
+    crate::paths::data_file("token.json")
+}
 const SCOPE: &str = "http://gdata.youtube.com https://www.googleapis.com/auth/youtube-paid-content";
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -78,13 +80,13 @@ pub fn device_login(http: &reqwest::blocking::Client, cfg: &TvConfig) -> Result<
 }
 
 pub fn save(t: &Token) -> Result<()> {
-    std::fs::write(TOKEN_FILE, serde_json::to_string_pretty(t)?)?;
+    std::fs::write(token_file(), serde_json::to_string_pretty(t)?)?;
     Ok(())
 }
 
 /// Loads the stored token, refreshing it if it expires within a minute.
 pub fn load(http: &reqwest::blocking::Client) -> Result<Option<Token>> {
-    let Ok(raw) = std::fs::read_to_string(TOKEN_FILE) else { return Ok(None) };
+    let Ok(raw) = std::fs::read_to_string(token_file()) else { return Ok(None) };
     let mut t: Token = serde_json::from_str(&raw)?;
     if t.expires_at > now() + 60 {
         return Ok(Some(t));
