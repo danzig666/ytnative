@@ -149,6 +149,12 @@ fn items(page: SettingsPage) -> Vec<Item> {
                 Opt("Blank screen when idle (OLED)", |s| format!("{} min", s.idle_blank_secs / 60), |s, d| {
                     s.idle_blank_secs = cycle(&[60, 120, 300, 600], s.idle_blank_secs, d)
                 }),
+                Opt("Interface language", |s| s.ui_language.clone(), |s, d| {
+                    let mut l = vec!["system", "en"];
+                    l.extend(crate::i18n::languages());
+                    let i = l.iter().position(|x| *x == s.ui_language).unwrap_or(0) as i32;
+                    s.ui_language = l[((i + d).rem_euclid(l.len() as i32)) as usize].into();
+                }),
                 Opt("24-hour clock", |s| on_off(s.time_24h), |s, _| s.time_24h = !s.time_24h),
             Opt("Accent colour", |s| s.accent.clone(), |s, d| {
                 const C: &[&str] = &["red", "blue", "green", "purple", "orange"];

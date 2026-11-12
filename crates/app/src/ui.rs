@@ -48,6 +48,7 @@ pub const SCRIM: [f32; 4] = [0.0, 0.0, 0.0, 0.62];
 
 /// Draws `s` with its top-left (or anchor edge per `align`) at x,y. Returns the text width.
 pub fn text(p: Painter, s: &str, x: f32, y: f32, size: i32, col: [f32; 4], align: i32, bold: bool) -> f32 {
+    let s = crate::i18n::tr(s);
     let Ok(c) = CString::new(s.replace('\0', "")) else { return 0.0 };
     p.text(c.as_ptr(), x, y, size, col, align, bold as i32)
 }

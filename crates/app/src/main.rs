@@ -6,6 +6,7 @@
 mod host;
 mod images;
 mod input;
+mod i18n;
 mod lounge;
 mod ls2;
 mod player;

@@ -261,6 +261,8 @@ enum Work {
 }
 
 pub struct AppRig {
+    /// `ui_language` the translations were last switched to.
+    applied_language: String,
     mounter: Mount,
     pub store: Store,
     pub player_view: PlayerView,
@@ -289,6 +291,7 @@ impl AppRig {
     pub fn new() -> Self {
         let store = Store::new(Settings::load());
         let mut rig = AppRig {
+            applied_language: String::new(),
             mounter: Mount,
             store,
             player_view: PlayerView::default(),
@@ -359,6 +362,10 @@ impl AppRig {
     pub fn drain(&mut self, now_ms: u32) -> Vec<(Addr, YtMsg)> {
         self.now_ms = now_ms;
         crate::ui::set_accent(&self.store.settings.accent);
+        if self.store.settings.ui_language != self.applied_language {
+            self.applied_language = self.store.settings.ui_language.clone();
+            crate::i18n::set_language(&self.applied_language, plx_platform::i18n::current().format_locale());
+        }
         self.player_view = self.player.status.lock().unwrap().clone();
         if let Some((_, until)) = &self.store.toast {
             if now_ms > *until {
