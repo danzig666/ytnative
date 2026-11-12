@@ -71,33 +71,23 @@ pub fn reset_focused_caption() {
     FOCUSED_CAPTION.with(|f| *f.borrow_mut() = None);
 }
 
-/// The selected card's caption, drawn after every card so it lies over the neighbours: the whole
-/// title on one line in a box up to ~2.2 cards wide (centred on the card, kept on screen and right
-/// of `min_x`), scrolling in a loop when even that is too narrow, and the detail line under it.
-pub fn draw_focused_caption(p: Painter, m: &dyn plx_machine::machine::Measure, min_x: f32) {
+/// The selected card's caption, drawn after every card: the title on ONE line in the card's own
+/// width, gliding in a loop when it does not fit (hold, glide to the end, hold, start over), and
+/// the detail line under it. No box and nothing over the neighbours.
+pub fn draw_focused_caption(p: Painter, m: &dyn plx_machine::machine::Measure, _min_x: f32) {
     let Some((r, title, detail)) = FOCUSED_CAPTION.with(|f| f.borrow_mut().take()) else { return };
     if !titles_under() {
         return;
     }
-    const SIZE: i32 = 26;
-    const PAD: f32 = 14.0;
-    let width = |t: &str| CString::new(t).map_or(0.0, |c| m.width(&c, SIZE, true));
-    let tw = width(&title);
-    let max_inner = (r.w * 2.2).min(1880.0 - min_x) - 2.0 * PAD;
-    let inner_w = tw.max(r.w - 2.0 * PAD).min(max_inner);
-    let bw = inner_w + 2.0 * PAD;
-    let bx = (r.x + r.w / 2.0 - bw / 2.0).clamp(min_x, (1900.0 - bw).max(min_x));
-    let by = r.y + r.h + 6.0;
-    let bh = 94.0;
-    fill(p, Rect::new(bx, by, bw, bh), 12.0, [0.10, 0.10, 0.12, 0.97]);
-    let (ix, iy) = (bx + PAD, by + 10.0);
-    if tw <= inner_w + 0.5 {
+    const SIZE: i32 = 24;
+    let tw = CString::new(title.as_str()).map_or(0.0, |c| m.width(&c, SIZE, true));
+    let (ix, iy, w) = (r.x, r.y + r.h + 12.0, r.w);
+    if tw <= w + 0.5 {
         text(p, &title, ix, iy, SIZE, WHITE, ALIGN_LEFT, true);
     } else {
-        // Marquee: hold, glide to the end, hold, start over.
         const HOLD: f32 = 1.5;
         const SPEED: f32 = 70.0;
-        let dist = tw - inner_w + 24.0;
+        let dist = tw - w + 24.0;
         let t = MARQUEE.with(|mq| {
             let mut mq = mq.borrow_mut();
             if mq.0 != title || mq.1.is_none() {
@@ -106,17 +96,16 @@ pub fn draw_focused_caption(p: Painter, m: &dyn plx_machine::machine::Measure, m
             mq.1.unwrap().elapsed().as_secs_f32()
         });
         let cycle = 2.0 * HOLD + dist / SPEED;
-        let ph = t % cycle;
-        let off = ((ph - HOLD) * SPEED).clamp(0.0, dist);
+        let off = ((t % cycle - HOLD) * SPEED).clamp(0.0, dist);
         {
-            let _scope = plx_ui::screen::ClipScope::open_in(p, Rect::new(ix, iy - 4.0, inner_w, 44.0));
+            let _scope = plx_ui::screen::ClipScope::open_in(p, Rect::new(ix, iy - 4.0, w, 40.0));
             text(p, &title, ix - off, iy, SIZE, WHITE, ALIGN_LEFT, true);
         }
         plx_machine::idle::note_motion();
     }
     if !detail.is_empty() {
-        let d = m.fit_line(&detail, inner_w, 22, false).to_string_lossy().into_owned();
-        text(p, &d, ix, iy + 40.0, 22, DIM, ALIGN_LEFT, false);
+        let d = m.fit_line(&detail, w, 20, false).to_string_lossy().into_owned();
+        text(p, &d, ix, iy + 33.0, 20, DIM, ALIGN_LEFT, false);
     }
 }
 
