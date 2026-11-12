@@ -98,6 +98,8 @@ pub struct Settings {
     pub content_country: String,
     // Remote
     pub lounge_enabled: bool,
+    /// True black background (OLED).
+    pub black_background: bool,
     /// Title and channel under every thumbnail (SmartTube style).
     pub titles_under: bool,
     /// Screen size in percent (90..=100): shrinks the UI for TVs that overscan.
@@ -180,6 +182,7 @@ impl Default for Settings {
             ui_language: "system".into(),
             content_country: "".into(),
             lounge_enabled: true,
+            black_background: false,
             titles_under: true,
             ui_scale: 100,
             card_menu: crate::screens::menu::CARD_ITEMS.iter().map(|(k, _)| k.to_string()).collect(),

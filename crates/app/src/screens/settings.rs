@@ -59,6 +59,23 @@ fn card_item_edit(s: &mut Settings, key: &str, d: i32) {
     }
 }
 
+/// A language code as its own name ("hu" -> "Magyar").
+fn language_name(code: &str) -> String {
+    match code {
+        "system" => crate::i18n::tr("system").to_string(),
+        "en" => "English".into(),
+        "hu" => "Magyar".into(),
+        "de" => "Deutsch".into(),
+        "es" => "Español".into(),
+        "fr" => "Français".into(),
+        "ru" => "Русский".into(),
+        "it" => "Italiano".into(),
+        "pl" => "Polski".into(),
+        "pt" => "Português".into(),
+        other => other.to_string(),
+    }
+}
+
 fn on_off(b: bool) -> String {
     if b { "On".into() } else { "Off".into() }
 }
@@ -192,15 +209,13 @@ fn items(page: SettingsPage) -> Vec<Item> {
                     let cur = Section::from_key(&s.boot_section).unwrap_or(Section::Home);
                     s.boot_section = cycle(Section::ALL, cur, d).key().into();
                 }),
-                Opt("Blank screen when idle (OLED)", |s| format!("{} min", s.idle_blank_secs / 60), |s, d| {
-                    s.idle_blank_secs = cycle(&[60, 120, 300, 600], s.idle_blank_secs, d)
-                }),
+                Opt("Black background (OLED)", |s| on_off(s.black_background), |s, _| s.black_background = !s.black_background),
                 Opt("Screen size", |s| format!("{}%", s.ui_scale), |s, d| s.ui_scale = cycle(&[100u8, 97, 95, 92, 90], s.ui_scale, d)),
                 Opt("Titles under thumbnails", |s| on_off(s.titles_under), |s, _| s.titles_under = !s.titles_under),
                 Opt("Card size", |s| match s.card_columns { 3 => "large".into(), 5 => "small".into(), _ => "medium".into() }, |s, d| {
                     s.card_columns = cycle(&[3u8, 4, 5], s.card_columns, d)
                 }),
-                Opt("Interface language", |s| s.ui_language.clone(), |s, d| {
+                Opt("Interface language", |s| language_name(&s.ui_language), |s, d| {
                     let mut l = vec!["system", "en"];
                     l.extend(crate::i18n::languages());
                     let i = l.iter().position(|x| *x == s.ui_language).unwrap_or(0) as i32;

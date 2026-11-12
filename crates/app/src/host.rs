@@ -377,6 +377,7 @@ impl AppRig {
         self.now_ms = now_ms;
         crate::ui::set_accent(&self.store.settings.accent);
         crate::ui::set_card_cols(self.store.settings.card_columns);
+        crate::ui::set_black_background(self.store.settings.black_background);
         if crate::ui::titles_under() != self.store.settings.titles_under {
             crate::ui::set_titles_under(self.store.settings.titles_under);
         }

@@ -30,6 +30,9 @@ const G_NAV: GroupId = GroupId(1);
 const G_GRID: GroupId = GroupId(2);
 const NAV_BASE: u32 = 0x4000_0000;
 const T_SWITCH: plx_machine::machine::TimerId = plx_machine::machine::TimerId(31);
+const T_BACK: plx_machine::machine::TimerId = plx_machine::machine::TimerId(32);
+/// Two BACK presses this close together on the sidebar exit the app.
+const BACK_TWICE_MS: u32 = 700;
 /// Shelf rows (Home, topics): 16:9 cards starting right of the sidebar.
 const SHELF_STYLE: RowStyle = RowStyle { w: 336.0, h: 189.0, gap: 40.0, margin_x: LEFT, ..RowStyle::HOME };
 /// Shelf styles for 3, 4 and 5 cards per row (sections hold a `&'static` style).
@@ -121,6 +124,8 @@ pub struct BrowseScreen {
     focus_req: std::cell::Cell<Option<u32>>,
     /// The sidebar row focus was last on.
     nav_last: std::cell::Cell<u32>,
+    /// The card focus was last on (where a closed sidebar returns it).
+    content_last: std::cell::Cell<u32>,
     /// Section the sidebar focus rests on, switched to when `T_SWITCH` fires.
     pending: Option<Section>,
     state: State,
@@ -163,6 +168,7 @@ impl BrowseScreen {
             nav_open: std::cell::Cell::new(false),
             focus_req: std::cell::Cell::new(None),
             nav_last: std::cell::Cell::new(NAV_BASE),
+            content_last: std::cell::Cell::new(0),
             state: State(section.key().into()),
         }
     }
@@ -233,6 +239,10 @@ impl Machine<YtHost> for BrowseScreen {
         if let ScreenEvent::FocusMoved { to, by, .. } = ev {
             if to.elem >= NAV_BASE {
                 self.nav_last.set(to.elem);
+            } else if !self.nav_open.get() {
+                self.content_last.set(to.elem);
+            }
+            if to.elem >= NAV_BASE {
             } else if self.nav_open.get() && *by == plx_machine::machine::By::Pointer {
                 // Hovering a card behind the open sidebar: keep the sidebar and its selection.
                 self.focus_req.set(Some(self.nav_last.get()));
@@ -250,12 +260,14 @@ impl Machine<YtHost> for BrowseScreen {
                 // BACK twice on the sidebar leaves the app; once only warns.
                 if *edge == plx_machine::machine::Edge::Down {
                     let now = cx.views.now_ms;
-                    if self.back_at != 0 && now.wrapping_sub(self.back_at) < 2500 {
+                    if self.back_at != 0 && now.wrapping_sub(self.back_at) < BACK_TWICE_MS {
                         self.exit_armed = true;
                         return Handled::No;
                     }
+                    // A single BACK closes the sidebar once the double-press window has passed.
                     self.back_at = now;
-                    fx.push(Fx::App(YtFx::Toast("Press BACK again to exit".into())));
+                    fx.push(Fx::CancelTimer(T_BACK));
+                    fx.push(Fx::Timer { id: T_BACK, after_ms: BACK_TWICE_MS });
                     return Handled::Yes;
                 }
                 return if self.exit_armed { Handled::No } else { Handled::Yes };
@@ -313,6 +325,16 @@ impl Machine<YtHost> for BrowseScreen {
                     }
                 }
                 fx.invalidate(plx_machine::present::Provenance::Input);
+            }
+            ScreenEvent::Timer(T_BACK) => {
+                let on_nav = cx.focus.current.is_some_and(|k| k.entry == self.entry && k.elem >= NAV_BASE);
+                if on_nav && self.nav_open.get() {
+                    self.nav_open.set(false);
+                    self.focus_req.set(Some(self.content_last.get()));
+                    fx.invalidate(plx_machine::present::Provenance::Input);
+                }
+                self.back_at = 0;
+                return Handled::Yes;
             }
             ScreenEvent::Timer(T_SWITCH) => {
                 // Only if focus is still on that sidebar row.
@@ -551,7 +573,8 @@ impl Screen<YtHost> for BrowseScreen {
             ui::fill(p, Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, [0.0, 0.0, 0.0, 0.45 * t]);
         }
         let p = p.translate(-NAV_W * (1.0 - t), 0.0);
-        let bg = plx_ui::theme::CLEAR_RGB;
+        let bg = ui::bg_rgb();
+        let bg = if bg == (0.0, 0.0, 0.0) { (0.07, 0.07, 0.08) } else { bg };
         ui::fill(p, Rect::new(0.0, 0.0, NAV_W, 1080.0), 0.0, [bg.0 * 0.65, bg.1 * 0.65, bg.2 * 0.65, 1.0]);
         common::logo(p, 48.0, 52.0);
         let items = nav_items(cx);

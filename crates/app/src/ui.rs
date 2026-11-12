@@ -244,6 +244,21 @@ pub fn wheel_scrolls_page(screen: Option<&str>) -> bool {
     }
 }
 
+static BLACK_BG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_black_background(on: bool) {
+    BLACK_BG.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The page background: plx's ground, or true black (OLED setting).
+pub fn bg_rgb() -> (f32, f32, f32) {
+    if BLACK_BG.load(std::sync::atomic::Ordering::Relaxed) {
+        (0.0, 0.0, 0.0)
+    } else {
+        plx_ui::theme::CLEAR_RGB
+    }
+}
+
 pub fn set_accent(name: &str) {
     let i = match name {
         "blue" => 1,
@@ -383,7 +398,7 @@ pub fn stop(f: &mut plx_ui::screen::DrawFrame<'_, '_, YtHost>, key: FocusKey<u32
 /// A page header's ground: the page background over `r`, fading out over its last 28 px, so
 /// content scrolled up under the title is hidden instead of drawn over it.
 pub fn header_band(p: Painter, r: Rect) {
-    let c = plx_ui::theme::CLEAR_RGB;
+    let c = bg_rgb();
     let bg = [c.0, c.1, c.2, 1.0];
     let fade = 28.0;
     p.rect(Rect::new(r.x, r.y, r.w, r.h - fade), 0.0, bg, bg, 0.0);

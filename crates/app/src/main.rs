@@ -359,13 +359,6 @@ fn main() {
             if playing {
                 last_input = now;
             }
-            // No OLED to protect in the simulator, and a blank frame would spoil screenshots.
-            if !cfg!(windows) && !blanked && now.wrapping_sub(last_input) > rig.idle_blank_ms() {
-                blanked = true;
-                log("idle: blank screen (no input, nothing playing)");
-                plx_gfx::gfx::frame_clear(0.0, 0.0, 0.0);
-                sdl::SDL_GL_SwapWindow(win);
-            }
 
             if let Some(l) = lounge.as_mut() {
                 rig.store.lounge_code = l.code.lock().unwrap().clone();
@@ -513,7 +506,7 @@ fn main() {
                     // Alpha 0: the compositor shows the hardware video plane through the UI plane.
                     plx_gfx::gfx::frame_clear_through();
                 } else {
-                    let c = plx_ui::theme::CLEAR_RGB;
+                    let c = ui::bg_rgb();
                     plx_gfx::gfx::frame_clear(c.0, c.1, c.2);
                 }
                 plx_ui::guard(|| {
