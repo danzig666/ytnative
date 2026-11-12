@@ -48,6 +48,17 @@ fn run() -> Result<()> {
         Some("whoami") => whoami(&api),
         // page <home|subs|history|library|search:<q>|browse:<id>> [pages]: parsed page summary.
         Some("page") => page_cmd(args.get(1).map(String::as_str).unwrap_or("home"), args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1)),
+        Some("resolve") => {
+            let mut s = yt_core::session::Session::new()?;
+            let id = video_id(args.get(1).context("video id")?)?;
+            let r = s.resolve(&id)?;
+            println!("{} - {} ({}s) via {:?} live={} formats={} hls={} sabr={} expires={}h",
+                r.title, r.author, r.length_secs, r.client, r.is_live, r.adaptive.len(), r.hls.is_some(), r.sabr.is_some(), r.expires_secs / 3600);
+            println!("captions: {}", r.captions.iter().map(|c| format!("{}{}", c.language, if c.auto { "(auto)" } else { "" })).collect::<Vec<_>>().join(", "));
+            println!("translations: {} languages; storyboard: {}", r.translations.len(), r.storyboard_spec.as_deref().map(|s| &s[..s.len().min(60)]).unwrap_or("none"));
+            if let Some(m) = r.mpd(Default::default()) { std::fs::write("last.mpd", m)?; println!("wrote last.mpd"); }
+            Ok(())
+        }
         Some("suggest") => {
             let s = yt_core::session::Session::new()?;
             println!("{:?}", s.suggestions(args.get(1).map(String::as_str).unwrap_or("bl"))?);

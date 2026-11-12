@@ -6,3 +6,4 @@ pub mod model;
 pub mod mpd;
 pub mod parse;
 pub mod session;
+pub mod streams;

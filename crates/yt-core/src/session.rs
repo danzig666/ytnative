@@ -96,6 +96,12 @@ impl Session {
         })
     }
 
+    /// Resolves playable streams (client ring) for a video.
+    pub fn resolve(&mut self, video_id: &str) -> Result<crate::streams::Resolved> {
+        let bearer = self.bearer()?;
+        crate::streams::resolve(&self.api(), video_id, bearer.as_deref())
+    }
+
     /// Search suggestions (the same endpoint SmartTube uses for the TV keyboard).
     pub fn suggestions(&self, prefix: &str) -> Result<Vec<String>> {
         let url = "https://suggestqueries-clients6.youtube.com/complete/search";
