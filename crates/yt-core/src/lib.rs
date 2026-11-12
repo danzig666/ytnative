@@ -1,4 +1,6 @@
 //! yt-core: the YouTube engine shared by the PC CLI and the TV app.
+pub mod accounts;
+pub mod actions;
 pub mod auth;
 pub mod bootstrap;
 pub mod innertube;
@@ -8,3 +10,4 @@ pub mod parse;
 pub mod paths;
 pub mod session;
 pub mod streams;
+pub mod tracking;

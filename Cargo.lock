@@ -2025,6 +2025,7 @@ dependencies = [
  "anyhow",
  "regex",
  "reqwest",
+ "ring",
  "serde",
  "serde_json",
  "uuid",
