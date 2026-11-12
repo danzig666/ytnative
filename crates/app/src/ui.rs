@@ -164,6 +164,20 @@ pub fn card_style(cols: usize, width: f32, gap: f32) -> plx_ui::card_row::RowSty
     plx_ui::card_row::RowStyle { w, h: (w * 9.0 / 16.0).floor(), gap, ..plx_ui::card_row::RowStyle::HOME }
 }
 
+/// Set by the browse screen while it shows shelf rows: its page scrolls on `InputKind::Wheel`
+/// (plx's Stack) instead of by focus.
+pub static PAGE_SCROLLS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// How a wheel notch / a pointer resting on the top or bottom edge reaches `screen`: as a page
+/// scroll (`Wheel`), or as Up/Down focus moves (lists, grids).
+pub fn wheel_scrolls_page(screen: Option<&str>) -> bool {
+    match screen {
+        Some("player") | Some("comments") => true,
+        Some("browse") => PAGE_SCROLLS.load(std::sync::atomic::Ordering::Relaxed),
+        _ => false,
+    }
+}
+
 pub fn set_accent(name: &str) {
     let i = match name {
         "blue" => 1,
@@ -421,5 +435,54 @@ impl VList {
         if top + vis < rows.len() {
             text(p, "\u{25BC}", self.rect.x + self.rect.w / 2.0, self.rect.y + self.rect.h, 22, FAINT, ALIGN_CENTER, false);
         }
+    }
+}
+
+/// A drop-down list of an option's values (a combo box): opens beside the option's row, the
+/// current value ticked; OK picks one, BACK closes. The screen routes focus to it while open.
+pub struct ChoiceBox {
+    /// The option row it belongs to.
+    pub row: usize,
+    /// Values as the option reports them (translated when drawn).
+    pub options: Vec<String>,
+    pub current: usize,
+    pub list: VList,
+}
+
+pub const CHOICE_BASE: u32 = 0x7f00_0000;
+pub const CHOICE_GROUP: GroupId = GroupId(77);
+
+impl ChoiceBox {
+    /// `anchor`: the option row's rect; the box opens to its right edge, below it when there is
+    /// room, else above.
+    pub fn new(entry: EntryId, row: usize, options: Vec<String>, current: usize, anchor: Rect) -> ChoiceBox {
+        const ROW_H: f32 = 52.0;
+        let n = options.len().min(12);
+        let h = n as f32 * ROW_H + 16.0;
+        let w = 440.0;
+        let x = (anchor.x + anchor.w - w).clamp(20.0, 1900.0 - w);
+        let y = if anchor.y + anchor.h + h <= 1060.0 { anchor.y + anchor.h } else { (anchor.y - h).max(20.0) };
+        ChoiceBox {
+            row,
+            options,
+            current,
+            list: VList { entry, group: CHOICE_GROUP, base: CHOICE_BASE, rect: Rect::new(x + 8.0, y + 8.0, w - 16.0, h - 16.0), row_h: ROW_H, text_size: 26 },
+        }
+    }
+    pub fn owns(&self, e: u32) -> bool {
+        self.list.index(e, self.options.len()).is_some()
+    }
+    pub fn draw(&self, f: &mut plx_ui::screen::DrawFrame<'_, '_, YtHost>) {
+        let p = f.painter;
+        let r = self.list.rect;
+        fill(p, Rect::new(r.x - 8.0, r.y - 8.0, r.w + 16.0, r.h + 16.0), 14.0, [0.13, 0.13, 0.16, 1.0]);
+        let rows: Vec<Row> = self
+            .options
+            .iter()
+            .enumerate()
+            .map(|(i, o)| Row::new(crate::i18n::tr(o).to_string()).value(if i == self.current { "\u{2713}" } else { "" }).active(i == self.current))
+            .collect();
+        self.list.draw(p, &rows, self.list.focused(f.cx, rows.len()));
+        self.list.stops(f, rows.len());
     }
 }

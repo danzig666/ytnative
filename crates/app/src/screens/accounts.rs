@@ -51,7 +51,7 @@ pub struct AccountsScreen {
 impl AccountsScreen {
     pub fn new(entry: EntryId) -> Self {
         AccountsScreen {
-            list: VList { entry, group: G, base: BASE, rect: Rect::new(360.0, 200.0, 1200.0, 800.0), row_h: 80.0, text_size: 32 },
+            list: VList { entry, group: G, base: BASE, rect: Rect::new(360.0, 200.0, 1200.0, 800.0), row_h: 60.0, text_size: 28 },
             confirm_remove: None,
         }
     }

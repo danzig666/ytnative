@@ -143,7 +143,6 @@ fn items(page: SettingsPage) -> Vec<Item> {
                 let i = C.iter().position(|c| *c == s.subtitle_color).unwrap_or(0) as i32;
                 s.subtitle_color = C[((i + d).rem_euclid(3)) as usize].into();
             }),
-            Opt("Background", |s| format!("{}%", s.subtitle_background), |s, d| s.subtitle_background = cycle(&[0, 40, 72, 100], s.subtitle_background, d)),
             Opt("Position from bottom", |s| format!("{} px", s.subtitle_bottom_offset), |s, d| s.subtitle_bottom_offset = cycle(&[40, 90, 140, 200], s.subtitle_bottom_offset, d)),
         ],
         SettingsPage::SponsorBlock => vec![
@@ -307,6 +306,10 @@ impl LogicalState for State {
 pub struct SettingsScreen {
     page: SettingsPage,
     list: VList,
+    /// An option's drop-down list, while open.
+    choice: Option<ui::ChoiceBox>,
+    /// The row a closed drop-down belonged to (focus returns there).
+    closed_row: std::cell::Cell<usize>,
     state: State,
 }
 
@@ -314,9 +317,35 @@ impl SettingsScreen {
     pub fn new(entry: EntryId, page: SettingsPage) -> Self {
         SettingsScreen {
             page,
-            list: VList { entry, group: G, base: BASE, rect: Rect::new(360.0, 170.0, 1200.0, 840.0), row_h: 76.0, text_size: 32 },
+            choice: None,
+            closed_row: std::cell::Cell::new(0),
+            list: VList { entry, group: G, base: BASE, rect: Rect::new(360.0, 150.0, 1200.0, 880.0), row_h: 58.0, text_size: 28 },
             state: State(format!("{page:?}")),
         }
+    }
+
+    /// The values option `i` can take, from its own `change` (applied to a copy until it comes
+    /// back round), and the current one's index.
+    fn values(&self, i: usize, cx: &Cx<'_, YtHost>) -> Option<(Vec<String>, usize)> {
+        let Some(Item::Opt(_, get, change)) = items(self.page).into_iter().nth(i) else { return None };
+        let mut s = cx.views.store.settings.clone();
+        let first = get(&s);
+        let mut v = vec![first.clone()];
+        for _ in 0..40 {
+            change(&mut s, 1);
+            let x = get(&s);
+            if x == first || v.contains(&x) {
+                break;
+            }
+            v.push(x);
+        }
+        // Numbers (qualities, speeds, sizes, minutes) in ascending order; others in cycle order.
+        let num = |x: &str| x.chars().filter(|c| c.is_ascii_digit() || *c == '.').collect::<String>().parse::<f64>().ok();
+        if v.len() > 2 && v.iter().all(|x| num(x).is_some()) {
+            v.sort_by(|a, b| num(a).partial_cmp(&num(b)).unwrap_or(std::cmp::Ordering::Equal));
+        }
+        let cur = v.iter().position(|x| *x == first).unwrap_or(0);
+        Some((v, cur))
     }
 
     fn change(&self, i: usize, dir: i32, fx: &mut Effects<'_, YtHost>) {
@@ -342,12 +371,47 @@ impl Machine<YtHost> for SettingsScreen {
         }
         let n = items(self.page).len();
         match ev {
+            ScreenEvent::Activate(e) if self.choice.as_ref().is_some_and(|c| c.owns(*e)) => {
+                let c = self.choice.take().unwrap();
+                self.closed_row.set(c.row);
+                let k = c.list.index(*e, c.options.len()).unwrap_or(0);
+                if let Some(Item::Opt(_, get, change)) = items(self.page).into_iter().nth(c.row) {
+                    let target = c.options[k].clone();
+                    fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| {
+                        for _ in 0..40 {
+                            if get(s) == target {
+                                break;
+                            }
+                            change(s, 1);
+                        }
+                    }))));
+                }
+                fx.invalidate(plx_machine::present::Provenance::Input);
+                Handled::Yes
+            }
             ScreenEvent::Activate(e) => {
                 if let Some(i) = self.list.index(*e, n) {
-                    self.change(i, 1, fx);
+                    // More than two values: a drop-down list; two (on/off): flip.
+                    match self.values(i, cx) {
+                        Some((v, cur)) if v.len() > 2 => {
+                            let anchor = self.list.place(*e, n, Some(i)).map(|p| p.rect).unwrap_or(self.list.rect);
+                            self.choice = Some(ui::ChoiceBox::new(self.list.entry, i, v, cur, anchor));
+                            fx.invalidate(plx_machine::present::Provenance::Input);
+                        }
+                        _ => self.change(i, 1, fx),
+                    }
                 }
                 Handled::Yes
             }
+            ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: Key::Back, edge: Edge::Down, .. }, .. }) if self.choice.is_some() => {
+                if let Some(c) = self.choice.take() {
+                    self.closed_row.set(c.row);
+                }
+                fx.invalidate(plx_machine::present::Provenance::Input);
+                Handled::Yes
+            }
+            ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: Key::Back, .. }, .. }) if self.choice.is_some() => Handled::Yes,
+            ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: Key::Left | Key::Right, .. }, .. }) if self.choice.is_some() => Handled::Yes,
             ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: key @ (Key::Left | Key::Right), edge: Edge::Down | Edge::Repeat, .. }, .. }) => {
                 if let Some(i) = self.list.focused(cx, n) {
                     if matches!(items(self.page).get(i), Some(Item::Opt(..))) {
@@ -369,22 +433,42 @@ impl Machine<YtHost> for SettingsScreen {
 
 impl Focusable<YtHost> for SettingsScreen {
     fn groups(&self, _cx: &Cx<'_, YtHost>, out: &mut Vec<GroupSpec>) {
+        if let Some(c) = &self.choice {
+            out.push(c.list.spec(c.options.len()));
+            return;
+        }
         out.push(self.list.spec(items(self.page).len()));
     }
-    fn group_of(&self, _key: &u32, _cx: &Cx<'_, YtHost>) -> Option<GroupId> {
-        Some(G)
+    fn group_of(&self, key: &u32, _cx: &Cx<'_, YtHost>) -> Option<GroupId> {
+        Some(if self.choice.as_ref().is_some_and(|c| c.owns(*key)) { ui::CHOICE_GROUP } else { G })
     }
     fn neighbour(&self, key: FocusKey<u32>, dir: Dir, _cx: &Cx<'_, YtHost>) -> Step<u32> {
+        if let Some(c) = &self.choice {
+            return c.list.neighbour(key, dir, c.options.len());
+        }
         self.list.neighbour(key, dir, items(self.page).len())
     }
     fn place(&self, key: &u32, cx: &Cx<'_, YtHost>, _at: At) -> Option<Placed> {
+        if let Some(c) = self.choice.as_ref().filter(|c| c.owns(*key)) {
+            let n = c.options.len();
+            return c.list.place(*key, n, c.list.focused(cx, n));
+        }
         let n = items(self.page).len();
         self.list.place(*key, n, self.list.focused(cx, n))
     }
     fn reconcile(&self, want: FocusKey<u32>, _cx: &Cx<'_, YtHost>) -> FocusKey<u32> {
+        if let Some(c) = &self.choice {
+            return if c.owns(want.elem) { want } else { c.list.key(c.current) };
+        }
+        if want.elem >= ui::CHOICE_BASE {
+            return self.list.key(self.closed_row.get());
+        }
         if self.list.index(want.elem, items(self.page).len()).is_some() { want } else { self.list.key(0) }
     }
-    fn seat(&self, _g: GroupId, _from: Placed, _cx: &Cx<'_, YtHost>) -> FocusKey<u32> {
+    fn seat(&self, g: GroupId, _from: Placed, _cx: &Cx<'_, YtHost>) -> FocusKey<u32> {
+        if let (Some(c), true) = (&self.choice, g == ui::CHOICE_GROUP) {
+            return c.list.key(c.current);
+        }
         self.list.key(0)
     }
 }
@@ -409,13 +493,17 @@ impl Screen<YtHost> for SettingsScreen {
             .iter()
             .map(|it| match it {
                 Item::Page(l, _) => Row::new(*l).value("\u{203A}"),
-                Item::Opt(l, get, _) => Row::new(*l).value(format!("\u{2039}  {}  \u{203A}", crate::i18n::tr(&get(s)))),
+                Item::Opt(l, get, _) => Row::new(*l).value(format!("{}  \u{203A}", crate::i18n::tr(&get(s)))),
                 Item::Action(l, _) => Row::new(*l),
                 Item::Info(l, get) => Row::new(*l).value(get(cx)),
             })
             .collect();
         self.list.draw(p, &rows, self.list.focused(cx, rows.len()));
-        self.list.stops(f, rows.len());
+        if let Some(c) = &self.choice {
+            c.draw(f);
+        } else {
+            self.list.stops(f, rows.len());
+        }
         super::common::toast(p, cx);
     }
     fn render(&self) -> RenderStrategy {

@@ -64,6 +64,11 @@ pub fn release(now: Tick) -> InputEvent<u32> {
     ev(InputKind::Key { key: Key::Ok, sym: 0, wcode: 0, edge: Edge::Up, at_edge: false }, now)
 }
 
+/// A wheel notch as the dispatcher's wheel (`dy` > 0 scrolls up, as plx's Stack expects).
+pub fn wheel_event(dy: f32, now: Tick) -> InputEvent<u32> {
+    ev(InputKind::Wheel { dy }, now)
+}
+
 /// A wheel notch (the Magic Remote's scroll wheel) as Up / Down, both edges.
 pub fn wheel(dy: i32, now: Tick) -> Vec<InputEvent<u32>> {
     let key = if dy < 0 { Key::Down } else { Key::Up };

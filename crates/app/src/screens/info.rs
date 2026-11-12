@@ -46,7 +46,7 @@ pub struct InfoScreen {
 
 impl InfoScreen {
     pub fn new(entry: EntryId) -> Self {
-        InfoScreen { list: VList { entry, group: G, base: BASE, rect: Rect::new(1180.0, 180.0, 680.0, 860.0), row_h: 70.0, text_size: 26 } }
+        InfoScreen { list: VList { entry, group: G, base: BASE, rect: Rect::new(1180.0, 180.0, 680.0, 860.0), row_h: 56.0, text_size: 24 } }
     }
     fn chapters<'a>(&self, cx: &Cx<'a, YtHost>) -> Vec<(String, u64)> {
         cx.views.player.extras.watch.as_ref().map(|w| w.chapters.iter().map(|c| (c.title.clone(), c.start_ms)).collect()).unwrap_or_default()

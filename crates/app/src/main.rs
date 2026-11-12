@@ -209,6 +209,7 @@ fn main() {
         let (mut mouse_down, mut last_wheel) = (false, 0u32);
         let mut input_echo = 0u8;
         let mut pointer_at: Option<(f32, f32)> = None;
+        let mut edge_step_at = 0u32;
 
         let mut remote = remote::Remote::open();
         {
@@ -268,7 +269,11 @@ fn main() {
                         let dy = input::rd_i32(&ev, 20);
                         if dy != 0 && now.wrapping_sub(last_wheel) > 150 {
                             last_wheel = now;
-                            inputs.extend(input::wheel(dy, tick));
+                            if ui::wheel_scrolls_page(d.top_screen().map(|s| s.name())) {
+                                inputs.push(input::wheel_event(dy.signum() as f32, tick));
+                            } else {
+                                inputs.extend(input::wheel(dy, tick));
+                            }
                         }
                     }
                     sdl::SDL_KEYDOWN | sdl::SDL_KEYUP => {
@@ -438,7 +443,18 @@ fn main() {
                 }
             }
             if let Some((x, y)) = pointer_at {
-                if !mouse_down && d.top_screen().map(|s| s.name()) == Some("browse") && y > 120.0 {
+                // Top / bottom edge: scroll the page (or step a list) while the pointer rests there.
+                let top = d.top_screen().map(|s| s.name());
+                let vdir = if y <= 24.0 { 1.0 } else if y >= 1056.0 { -1.0 } else { 0.0 };
+                if vdir != 0.0 && !mouse_down && top != Some("player") {
+                    if ui::wheel_scrolls_page(top) {
+                        inputs.push(input::wheel_event(vdir * 2.5 * dt, tick));
+                    } else if now.wrapping_sub(edge_step_at) > 220 {
+                        edge_step_at = now;
+                        inputs.extend(input::wheel(vdir as i32, tick));
+                    }
+                }
+                if !mouse_down && top == Some("browse") && (120.0..1056.0).contains(&y) {
                     let speed = 900.0 * dt;
                     let dx = if x >= 1860.0 { speed } else if (390.0..450.0).contains(&x) { -speed } else { 0.0 };
                     if dx != 0.0 {

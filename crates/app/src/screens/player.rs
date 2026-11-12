@@ -163,6 +163,11 @@ impl Machine<YtHost> for PlayerScreen {
                 self.show_hud(cx, fx); // up, and kept up while the pointer moves
                 Handled::Yes
             }
+            // The Magic Remote's wheel: just bring up the controls (never the options menu).
+            ScreenEvent::Input(InputEvent { kind: InputKind::Wheel { .. }, .. }) => {
+                self.show_hud(cx, fx);
+                Handled::Yes
+            }
             ScreenEvent::Input(InputEvent { kind: InputKind::Click { x, y, .. }, .. }) => {
                 let st = cx.views.player;
                 let (x, y) = (*x, *y);
@@ -518,9 +523,13 @@ fn draw_caption(p: plx_ui::Painter, text: &str, size: i32, bottom: f32, ink: [f3
     for (i, line) in lines.iter().enumerate() {
         let w = line.chars().count() as f32 * size as f32 * 0.52 + 32.0;
         let y = top + i as f32 * lh;
-        if bg > 0.0 {
-            ui::fill(p, Rect::new(960.0 - w / 2.0, y - 4.0, w, lh), 6.0, [0.0, 0.0, 0.0, bg]);
+        let _ = (w, bg);
+        // A dark outline around the glyphs (no box): the text drawn offset in black all around.
+        let o = (size as f32 / 16.0).max(2.0);
+        let outline = [0.0, 0.0, 0.0, 0.92];
+        for (dx, dy) in [(-o, 0.0), (o, 0.0), (0.0, -o), (0.0, o), (-o, -o), (o, -o), (-o, o), (o, o)] {
+            ui::text(p, line, 960.0 + dx, y + dy, size, outline, ui::ALIGN_CENTER, true);
         }
-        ui::text(p, line, 960.0, y, size, ink, ui::ALIGN_CENTER, bg < 0.3);
+        ui::text(p, line, 960.0, y, size, ink, ui::ALIGN_CENTER, true);
     }
 }

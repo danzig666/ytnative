@@ -417,6 +417,7 @@ impl Screen<YtHost> for BrowseScreen {
         // Content
         let feed = cx.views.store.feed(&self.key());
         let src = self.src(cx);
+        ui::PAGE_SCROLLS.store(self.rows_mode(cx), std::sync::atomic::Ordering::Relaxed);
         if self.rows_mode(cx) {
             let mut view = self.stack.view(&self.rows);
             ui::reset_focused_caption();

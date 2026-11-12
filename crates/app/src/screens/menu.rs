@@ -16,7 +16,7 @@ use yt_core::model::Endpoint;
 
 const G: GroupId = GroupId(1);
 const BASE: u32 = 0x5000_0000;
-const PANEL: Rect = Rect::new(1220.0, 0.0, 700.0, 1080.0);
+const PANEL: Rect = Rect::new(1300.0, 0.0, 620.0, 1080.0);
 
 #[derive(Clone, Debug)]
 enum Act {
@@ -62,6 +62,9 @@ pub struct MenuScreen {
     title: String,
     acts: Vec<(String, Act)>,
     list: VList,
+    /// An option's drop-down list, while open.
+    choice: Option<ui::ChoiceBox>,
+    closed_row: std::cell::Cell<usize>,
     state: State,
 }
 
@@ -84,10 +87,12 @@ impl MenuScreen {
     fn make(entry: EntryId, title: String, acts: Vec<(String, Act)>) -> Self {
         MenuScreen {
             picker_for: None,
+            choice: None,
+            closed_row: std::cell::Cell::new(0),
             state: State(title.clone()),
             title,
             acts,
-            list: VList { entry, group: G, base: BASE, rect: Rect::new(PANEL.x + 40.0, 200.0, PANEL.w - 80.0, 820.0), row_h: 74.0, text_size: 30 },
+            list: VList { entry, group: G, base: BASE, rect: Rect::new(PANEL.x + 24.0, 130.0, PANEL.w - 48.0, 920.0), row_h: 54.0, text_size: 26 },
         }
     }
 
@@ -242,13 +247,13 @@ impl MenuScreen {
                     _ => return None,
                 };
                 let _ = (UploadDate::Any, Kind::Any);
-                format!("\u{2039}  {v}  \u{203A}")
+                format!("{v}  \u{203A}")
             }
             Act::Speed => {
                 let r = if cx.views.player.rate > 0.0 { cx.views.player.rate } else { 1.0 };
-                format!("\u{2039}  {r}x  \u{203A}")
+                format!("{r}x  \u{203A}")
             }
-            Act::MaxQuality => format!("\u{2039}  {}p  \u{203A}", s.max_height),
+            Act::MaxQuality => format!("{}p  \u{203A}", s.max_height),
             Act::AudioTrack => {
                 let st = cx.views.player;
                 if st.audio_tracks.len() < 2 {
@@ -256,16 +261,16 @@ impl MenuScreen {
                 }
                 let cur = st.audio_track.clone().or_else(|| st.audio_tracks.iter().find(|t| t.2).map(|t| t.0.clone()));
                 let name = st.audio_tracks.iter().find(|t| Some(&t.0) == cur.as_ref()).map(|t| t.1.clone()).unwrap_or_else(|| "default".into());
-                format!("\u{2039}  {}  \u{203A}", ui::ellipsize(&name, 18))
+                format!("{}  \u{203A}", ui::ellipsize(&name, 18))
             }
             Act::ZoomMode => format!("\u{2039}  {:?}  \u{203A}", cx.views.player.zoom),
             Act::Sleep => match cx.views.store.sleep_minutes {
-                0 => "\u{2039}  Off  \u{203A}".to_string(),
-                m => format!("\u{2039}  {m} min  \u{203A}"),
+                0 => "Off  \u{203A}".to_string(),
+                m => format!("{m} min  \u{203A}"),
             },
-            Act::Subtitles => format!("\u{2039}  {}  \u{203A}", if s.subtitles { "On" } else { "Off" }),
+            Act::Subtitles => format!("{}  \u{203A}", if s.subtitles { "On" } else { "Off" }),
             Act::RepeatMode => format!(
-                "\u{2039}  {}  \u{203A}",
+                "{}  \u{203A}",
                 match s.repeat {
                     Repeat::Autoplay => "Play next",
                     Repeat::Off => "Stop",
@@ -273,6 +278,45 @@ impl MenuScreen {
                     Repeat::List => "Repeat list",
                 }
             ),
+            _ => return None,
+        })
+    }
+
+    /// The values a valued row can take (drop-down list) and the current one; picking value `k`
+    /// is `run(act, k - current)`, every valued row stepping by `dir`.
+    fn choices(&self, act: &Act, cx: &Cx<'_, YtHost>) -> Option<(Vec<String>, usize)> {
+        let s = &cx.views.store.settings;
+        Some(match act {
+            Act::Speed => {
+                let r = if cx.views.player.rate > 0.0 { cx.views.player.rate } else { 1.0 };
+                (SPEEDS.iter().map(|v| format!("{v}x")).collect(), SPEEDS.iter().position(|v| (v - r).abs() < 0.01).unwrap_or(3))
+            }
+            Act::MaxQuality => {
+                const Q: &[u32] = &[480, 720, 1080, 1440, 2160];
+                (Q.iter().map(|q| format!("{q}p")).collect(), Q.iter().position(|q| *q == s.max_height).unwrap_or(2))
+            }
+            Act::AudioTrack => {
+                let st = cx.views.player;
+                if st.audio_tracks.len() < 2 {
+                    return None;
+                }
+                let cur = st.audio_track.clone().or_else(|| st.audio_tracks.iter().find(|t| t.2).map(|t| t.0.clone()));
+                (st.audio_tracks.iter().map(|t| t.1.clone()).collect(), st.audio_tracks.iter().position(|t| Some(&t.0) == cur.as_ref()).unwrap_or(0))
+            }
+            Act::Sleep => {
+                const T: &[u32] = &[0, 15, 30, 60, 90];
+                (
+                    T.iter().map(|m| if *m == 0 { "Off".to_string() } else { format!("{m} min") }).collect(),
+                    T.iter().position(|m| *m == cx.views.store.sleep_minutes).unwrap_or(0),
+                )
+            }
+            Act::RepeatMode => {
+                const R: &[Repeat] = &[Repeat::Autoplay, Repeat::Off, Repeat::One, Repeat::List];
+                (
+                    vec!["Play next".into(), "Stop".into(), "Repeat".into(), "Repeat list".into()],
+                    R.iter().position(|x| *x == s.repeat).unwrap_or(0),
+                )
+            }
             _ => return None,
         })
     }
@@ -437,13 +481,41 @@ impl Machine<YtHost> for MenuScreen {
         }
         let n = self.acts.len();
         match ev {
+            ScreenEvent::Activate(e) if self.choice.as_ref().is_some_and(|c| c.owns(*e)) => {
+                let c = self.choice.take().unwrap();
+                self.closed_row.set(c.row);
+                let k = c.list.index(*e, c.options.len()).unwrap_or(c.current) as i32;
+                let act = self.acts[c.row].1.clone();
+                if k != c.current as i32 {
+                    self.run(&act, k - c.current as i32, cx, fx);
+                }
+                fx.invalidate(plx_machine::present::Provenance::Input);
+                Handled::Yes
+            }
             ScreenEvent::Activate(e) => {
                 if let Some(i) = self.list.index(*e, n) {
                     let act = self.acts[i].1.clone();
-                    self.run(&act, 1, cx, fx);
+                    match self.choices(&act, cx) {
+                        Some((v, cur)) => {
+                            let anchor = self.list.place(*e, n, Some(i)).map(|p| p.rect).unwrap_or(self.list.rect);
+                            self.choice = Some(ui::ChoiceBox::new(self.list.entry, i, v, cur, anchor));
+                            fx.invalidate(plx_machine::present::Provenance::Input);
+                        }
+                        None => self.run(&act, 1, cx, fx),
+                    }
                 }
                 Handled::Yes
             }
+            ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: Key::Back, edge, .. }, .. }) if self.choice.is_some() => {
+                if *edge == Edge::Down {
+                    if let Some(c) = self.choice.take() {
+                        self.closed_row.set(c.row);
+                    }
+                    fx.invalidate(plx_machine::present::Provenance::Input);
+                }
+                Handled::Yes
+            }
+            ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: Key::Left | Key::Right, .. }, .. }) if self.choice.is_some() => Handled::Yes,
             ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: key @ (Key::Left | Key::Right), edge: Edge::Down | Edge::Repeat, .. }, .. }) => {
                 if let Some(i) = self.list.focused(cx, n) {
                     let act = self.acts[i].1.clone();
@@ -461,22 +533,42 @@ impl Machine<YtHost> for MenuScreen {
 
 impl Focusable<YtHost> for MenuScreen {
     fn groups(&self, _cx: &Cx<'_, YtHost>, out: &mut Vec<GroupSpec>) {
+        if let Some(c) = &self.choice {
+            out.push(c.list.spec(c.options.len()));
+            return;
+        }
         out.push(self.list.spec(self.acts.len()));
     }
-    fn group_of(&self, _key: &u32, _cx: &Cx<'_, YtHost>) -> Option<GroupId> {
-        Some(G)
+    fn group_of(&self, key: &u32, _cx: &Cx<'_, YtHost>) -> Option<GroupId> {
+        Some(if self.choice.as_ref().is_some_and(|c| c.owns(*key)) { ui::CHOICE_GROUP } else { G })
     }
     fn neighbour(&self, key: FocusKey<u32>, dir: Dir, _cx: &Cx<'_, YtHost>) -> Step<u32> {
+        if let Some(c) = &self.choice {
+            return c.list.neighbour(key, dir, c.options.len());
+        }
         self.list.neighbour(key, dir, self.acts.len())
     }
     fn place(&self, key: &u32, cx: &Cx<'_, YtHost>, _at: At) -> Option<Placed> {
+        if let Some(c) = self.choice.as_ref().filter(|c| c.owns(*key)) {
+            let n = c.options.len();
+            return c.list.place(*key, n, c.list.focused(cx, n));
+        }
         let n = self.acts.len();
         self.list.place(*key, n, self.list.focused(cx, n))
     }
     fn reconcile(&self, want: FocusKey<u32>, _cx: &Cx<'_, YtHost>) -> FocusKey<u32> {
+        if let Some(c) = &self.choice {
+            return if c.owns(want.elem) { want } else { c.list.key(c.current) };
+        }
+        if want.elem >= ui::CHOICE_BASE {
+            return self.list.key(self.closed_row.get());
+        }
         if self.list.index(want.elem, self.acts.len()).is_some() { want } else { self.list.key(0) }
     }
-    fn seat(&self, _g: GroupId, _from: Placed, _cx: &Cx<'_, YtHost>) -> FocusKey<u32> {
+    fn seat(&self, g: GroupId, _from: Placed, _cx: &Cx<'_, YtHost>) -> FocusKey<u32> {
+        if let (Some(c), true) = (&self.choice, g == ui::CHOICE_GROUP) {
+            return c.list.key(c.current);
+        }
         self.list.key(0)
     }
 }
@@ -496,7 +588,7 @@ impl Screen<YtHost> for MenuScreen {
         let p = f.painter;
         let cx = f.cx;
         ui::fill(p, PANEL, 0.0, ui::PANEL);
-        ui::text(p, &ui::ellipsize(&self.title, 30), PANEL.x + 60.0, 90.0, 36, ui::WHITE, ui::ALIGN_LEFT, true);
+        ui::text(p, &ui::ellipsize(&self.title, 30), PANEL.x + 52.0, 62.0, 30, ui::WHITE, ui::ALIGN_LEFT, true);
         if let Some(v) = &self.picker_for {
             if !cx.views.store.playlist_options.contains_key(v) {
                 ui::text(p, "Loading your playlists\u{2026}", PANEL.x + 60.0, 150.0, 24, ui::FAINT, ui::ALIGN_LEFT, false);
@@ -514,7 +606,11 @@ impl Screen<YtHost> for MenuScreen {
             })
             .collect();
         self.list.draw(p, &rows, self.list.focused(cx, rows.len()));
-        self.list.stops(f, rows.len());
+        if let Some(c) = &self.choice {
+            c.draw(f);
+        } else {
+            self.list.stops(f, rows.len());
+        }
         super::common::toast(p, cx);
     }
     fn render(&self) -> RenderStrategy {
