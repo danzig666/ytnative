@@ -446,9 +446,9 @@ fn main() {
                 // Top / bottom edge: scroll the page (or step a list) while the pointer rests there.
                 let top = d.top_screen().map(|s| s.name());
                 let vdir = if y <= 24.0 { 1.0 } else if y >= 1056.0 { -1.0 } else { 0.0 };
-                if vdir != 0.0 && !mouse_down && top != Some("player") {
+                if vdir != 0.0 && !mouse_down && (top != Some("player") || ui::comments_open()) {
                     if ui::wheel_scrolls_page(top) {
-                        inputs.push(input::wheel_event(vdir * 2.5 * dt, tick));
+                        inputs.push(input::wheel_event(vdir * if ui::comments_open() { 4.0 } else { 2.5 } * dt, tick));
                     } else if now.wrapping_sub(edge_step_at) > 220 {
                         edge_step_at = now;
                         inputs.extend(input::wheel(vdir as i32, tick));

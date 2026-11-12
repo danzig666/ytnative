@@ -111,11 +111,11 @@ pub struct BrowseScreen {
     section: Section,
     /// Sidebar slide position (0 hidden, 1 shown) and the clock it was last stepped at.
     nav_t: f32,
-    /// The user went to the sidebar (keys or pointer), as opposed to focus waiting there.
-    user_nav: std::cell::Cell<bool>,
     nav_ms: u32,
-    /// The pointer rests on the screen's left edge: show the sidebar.
-    pointer_open: bool,
+    /// The sidebar was asked for (Left from the leftmost tile, or BACK): focus may stay there.
+    nav_open: std::cell::Cell<bool>,
+    /// A focus move the screen asks for (taken by the next `reconcile`).
+    focus_req: std::cell::Cell<Option<u32>>,
     /// Section the sidebar focus rests on, switched to when `T_SWITCH` fires.
     pending: Option<Section>,
     state: State,
@@ -152,9 +152,9 @@ impl BrowseScreen {
             section,
             pending: None,
             nav_t: 0.0,
-            user_nav: std::cell::Cell::new(false),
             nav_ms: 0,
-            pointer_open: false,
+            nav_open: std::cell::Cell::new(false),
+            focus_req: std::cell::Cell::new(None),
             state: State(section.key().into()),
         }
     }
@@ -222,21 +222,23 @@ impl Machine<YtHost> for BrowseScreen {
             return self.step(&a, cx, fx);
         }
         let items = nav_items(cx);
-        // The pointer at the left edge brings the sidebar; leaving it to the right sends it away.
-        if let ScreenEvent::Input(plx_machine::machine::InputEvent { kind: plx_machine::machine::InputKind::Pointer { x, .. }, .. }) = ev {
-            let was = self.pointer_open;
-            if *x < 24.0 {
-                self.pointer_open = true;
-            } else if *x > NAV_W + 30.0 {
-                self.pointer_open = false;
-            }
-            if was != self.pointer_open {
-                fx.invalidate(plx_machine::present::Provenance::Input);
-            }
-        }
         if let ScreenEvent::FocusMoved { to, .. } = ev {
             if to.elem < NAV_BASE {
-                self.user_nav.set(false);
+                self.nav_open.set(false);
+            }
+        }
+        // BACK on the content brings the sidebar; BACK on the sidebar leaves the app.
+        if let ScreenEvent::Input(plx_machine::machine::InputEvent {
+            kind: plx_machine::machine::InputKind::Key { key: plx_machine::machine::Key::Back, edge, .. }, ..
+        }) = ev {
+            let on_nav = cx.focus.current.is_some_and(|k| k.entry == self.entry && k.elem >= NAV_BASE);
+            if !on_nav {
+                if *edge == plx_machine::machine::Edge::Down {
+                    self.nav_open.set(true);
+                    self.focus_req.set(Some(self.nav.elem(self.nav_index_of_section(&items))));
+                    fx.invalidate(plx_machine::present::Provenance::Input);
+                }
+                return Handled::Yes;
             }
         }
         match ev {
@@ -268,9 +270,6 @@ impl Machine<YtHost> for BrowseScreen {
             // the page and start a load for every section passed). Pointer hover: never; a click
             // switches (`Activate`).
             ScreenEvent::FocusMoved { to, by, .. } if to.elem >= NAV_BASE => {
-                if matches!(by, plx_machine::machine::By::Dir | plx_machine::machine::By::Pointer) {
-                    self.user_nav.set(true);
-                }
                 if *by != plx_machine::machine::By::Pointer {
                     if let Some(NavItem::Section(s)) = self.nav.index(to.elem, items.len()).map(|i| items[i].clone()) {
                         self.pending = Some(s);
@@ -378,7 +377,10 @@ impl Focusable<YtHost> for BrowseScreen {
         let items = nav_items(cx);
         if self.rows_mode(cx) && key.elem < NAV_BASE {
             return match self.stack.view(&self.rows).neighbour(key, dir, cx) {
-                Step::Edge if dir == Dir::Left => Step::Move(self.nav.key(self.nav_index_of_section(&items))),
+                Step::Edge if dir == Dir::Left => {
+                    self.nav_open.set(true);
+                    Step::Move(self.nav.key(self.nav_index_of_section(&items)))
+                }
                 s => s,
             };
         }
@@ -389,7 +391,10 @@ impl Focusable<YtHost> for BrowseScreen {
             return self.nav.neighbour(key, dir, items.len());
         }
         match self.grid.neighbour(&self.src(cx), key, dir) {
-            Step::Edge if dir == Dir::Left => Step::Move(self.nav.key(self.nav_index_of_section(&items))),
+            Step::Edge if dir == Dir::Left => {
+                self.nav_open.set(true);
+                Step::Move(self.nav.key(self.nav_index_of_section(&items)))
+            }
             s => s,
         }
     }
@@ -405,9 +410,12 @@ impl Focusable<YtHost> for BrowseScreen {
     }
     fn reconcile(&self, want: FocusKey<u32>, cx: &Cx<'_, YtHost>) -> FocusKey<u32> {
         let items = nav_items(cx);
-        // Focus parked on the sidebar only because nothing had loaded yet: move to the content
-        // once it is there (the sidebar opens only when the user goes to it).
-        if want.elem >= NAV_BASE && !self.user_nav.get() {
+        if let Some(e) = self.focus_req.take() {
+            return FocusKey { entry: self.entry, elem: e };
+        }
+        // Focus on the sidebar without it being asked for (start-up, before the content loaded):
+        // move to the content once it is there. The sidebar opens only on request.
+        if want.elem >= NAV_BASE && !self.nav_open.get() {
             if let Some(c) = self.src(cx).cards.first() {
                 return FocusKey { entry: self.entry, elem: c.elem };
             }
@@ -481,7 +489,7 @@ impl Screen<YtHost> for BrowseScreen {
         ui::text(p, self.section.title(), LEFT, 30.0, 44, ui::WHITE, ui::ALIGN_LEFT, true);
         // The sidebar: hidden; slides in over the content while it has focus (Left from the first
         // tile) or the pointer rests on the screen's left edge, and out again after.
-        let open = cx.focus.current.is_some_and(|k| k.entry == self.entry && k.elem >= NAV_BASE) || self.pointer_open;
+        let open = self.nav_open.get() && cx.focus.current.is_some_and(|k| k.entry == self.entry && k.elem >= NAV_BASE);
         let now = cx.views.now_ms;
         let dt = now.wrapping_sub(self.nav_ms).min(100) as f32;
         self.nav_ms = now;

@@ -64,6 +64,9 @@ pub struct CommentsScreen {
     /// First visible comment while the wheel has scrolled the list (focus stays where it was);
     /// `None`: the list follows the focus.
     scroll: Option<usize>,
+    /// Smooth scroll position in rows: where the list is drawn (`scroll_at`) and is going.
+    scroll_at: std::cell::Cell<f32>,
+    scroll_to: f32,
     /// When the panel opened (it slides in from the right).
     opened_ms: u32,
     /// Wheel travel not yet turned into whole rows (the pointer's edge scroll is fractional).
@@ -79,6 +82,8 @@ impl CommentsScreen {
             video_id,
             list: VList { entry, group: G, base: BASE, rect: Rect::new(PANEL.x + 20.0, 100.0, PANEL.w - 40.0, 970.0), row_h: 192.0, text_size: TEXT },
             scroll: None,
+            scroll_at: std::cell::Cell::new(0.0),
+            scroll_to: 0.0,
             opened_ms: 0,
             wheel: 0.0,
         }
@@ -133,21 +138,15 @@ impl Machine<YtHost> for CommentsScreen {
             }
             // The wheel scrolls the list; focus stays on its comment.
             ScreenEvent::Input(InputEvent { kind: InputKind::Wheel { dy }, .. }) => {
-                self.wheel -= *dy;
-                let mut top = self.top(cx) as i64;
-                while self.wheel >= 1.0 {
-                    self.wheel -= 1.0;
-                    top += 1;
-                }
-                while self.wheel <= -1.0 {
-                    self.wheel += 1.0;
-                    top -= 1;
-                }
                 let n = self.len(cx);
-                let max = n.saturating_sub(self.list.rows_visible()) as i64;
-                let top = top.clamp(0, max.max(0)) as usize;
-                self.scroll = Some(top);
-                self.more_if_near_end(top + self.list.rows_visible(), cx, fx);
+                let max = n.saturating_sub(self.list.rows_visible()) as f32;
+                if self.scroll.is_none() {
+                    self.scroll_to = self.top(cx) as f32;
+                    self.scroll_at.set(self.scroll_to);
+                }
+                self.scroll_to = (self.scroll_to - *dy).clamp(0.0, max.max(0.0));
+                self.scroll = Some(self.scroll_to.floor() as usize);
+                self.more_if_near_end(self.scroll_to as usize + self.list.rows_visible(), cx, fx);
                 fx.invalidate(plx_machine::present::Provenance::Input);
                 return Handled::Yes;
             }
@@ -247,9 +246,20 @@ impl Screen<YtHost> for CommentsScreen {
             return;
         }
         let focus = self.list.focused(cx, c.items.len());
-        let top = self.top(cx);
+        // Wheel / edge scrolling: ease toward the target, drawn with a sub-row offset.
+        let (top, frac) = if self.scroll.is_some() {
+            let at = self.scroll_at.get();
+            let next = at + (self.scroll_to - at) * 0.25;
+            let next = if (self.scroll_to - next).abs() < 0.01 { self.scroll_to } else { ui::animating(); next };
+            self.scroll_at.set(next);
+            (next.floor() as usize, next.fract())
+        } else {
+            (self.top(cx), 0.0)
+        };
+        let p = p.translate(0.0, -frac * self.list.row_h);
+        let _clip = plx_ui::screen::ClipScope::open_in(f.painter, Rect::new(PANEL.x, self.list.rect.y - 8.0, PANEL.w, self.list.rect.h + 8.0));
         let vis = self.list.rows_visible();
-        for (i, cm) in c.items.iter().enumerate().skip(top).take(vis) {
+        for (i, cm) in c.items.iter().enumerate().skip(top).take(vis + 1) {
             let y = self.list.rect.y + (i - top) as f32 * self.list.row_h;
             let r = Rect::new(self.list.rect.x, y, self.list.rect.w, self.list.row_h - 12.0);
             if focus == Some(i) {
