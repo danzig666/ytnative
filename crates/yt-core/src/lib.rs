@@ -8,6 +8,7 @@ pub mod captions;
 pub mod channel_groups;
 pub mod clients;
 pub mod comments;
+pub mod demux;
 pub mod ext;
 pub mod fsutil;
 pub mod gdrive;

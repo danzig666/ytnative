@@ -90,7 +90,6 @@ impl Machine<YtHost> for FeedScreen {
                 return Handled::Yes;
             }
             ScreenEvent::Async(..) => fx.invalidate(plx_machine::present::Provenance::Lifecycle),
-            ScreenEvent::Async(_, YtMsg::Loaded(_) | YtMsg::Failed(..)) => fx.invalidate(plx_machine::present::Provenance::Lifecycle),
             _ => {}
         }
         // Up from the top row of search results opens the filters panel.

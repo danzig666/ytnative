@@ -4,6 +4,8 @@
 //! SDL + GLES2 window, transparent UI plane over the video plane, the plx_ui dispatcher.
 
 mod crashtrace; // fatal-signal tracer -> /tmp/ytnative/crash.log (see `cargo xtask crash`)
+#[cfg(not(windows))]
+mod feed;
 mod host;
 mod images;
 mod input;
