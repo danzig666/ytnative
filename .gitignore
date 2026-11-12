@@ -31,3 +31,6 @@ mp4url.txt
 
 # local Claude Code settings
 /.claude/
+
+# firmware snapshots for `cargo xtask fwcompat` (LG binaries, never commit)
+/sysroots

@@ -30,4 +30,7 @@ unexpected_cfgs = "allow"
 [profile.release]
 opt-level = "s"
 lto = true
-strip = true
+# The TV binary keeps line tables; `cargo xtask build` saves that as ytnative.debug (for
+# `cargo xtask crash`) and ships a copy stripped with zig objcopy.
+strip = false
+debug = "line-tables-only"
