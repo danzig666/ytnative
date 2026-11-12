@@ -6,5 +6,6 @@ pub mod model;
 pub mod mpd;
 pub mod parse;
 pub mod paths;
+pub mod sabr;
 pub mod session;
 pub mod streams;

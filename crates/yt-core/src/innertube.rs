@@ -22,7 +22,8 @@ impl Client {
         }
     }
 
-    fn context(self, cfg: &TvConfig) -> (Value, &'static str, String) {
+    /// InnerTube `context.client` JSON, `X-YouTube-Client-Name` id and client version.
+    pub fn context(self, cfg: &TvConfig) -> (Value, &'static str, String) {
         let visitor = cfg.visitor_data.clone().unwrap_or_default();
         match self {
             Client::VisionOs => (
