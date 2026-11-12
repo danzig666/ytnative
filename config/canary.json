@@ -1,0 +1,228 @@
+{
+  "comment": "Public videos checked by `ytcli canary`. expect: playable | unplayable (expected failure). Live entries are discovered at run time with the search Live filter, upcoming ones from the Upcoming shelf of YouTube's Live channel. Age-restricted and made-for-kids entries record what currently happens anonymously (`ytcli canary --update`).",
+  "videos": [
+    {
+      "id": "jNQXAC9IVRw",
+      "category": "normal",
+      "title": "Me at the zoo",
+      "expect": "playable"
+    },
+    {
+      "id": "M7lc1UVf-VE",
+      "category": "normal",
+      "title": "YouTube Developers Live: Embedded Web Player Customization",
+      "expect": "playable"
+    },
+    {
+      "id": "pHJIhxZEoxg",
+      "category": "normal",
+      "title": "Kurzgesagt: Why Are There No Holes Around Trees?",
+      "expect": "playable"
+    },
+    {
+      "id": "aircAruvnKk",
+      "category": "normal",
+      "title": "3Blue1Brown: But what is a neural network?",
+      "expect": "playable"
+    },
+    {
+      "id": "EkXKfa3xQSc",
+      "category": "normal",
+      "title": "AFV 2024 Year in Review",
+      "expect": "playable"
+    },
+    {
+      "id": "dQw4w9WgXcQ",
+      "category": "music-vevo",
+      "title": "Rick Astley - Never Gonna Give You Up",
+      "expect": "playable"
+    },
+    {
+      "id": "kJQP7kiw5Fk",
+      "category": "music-vevo",
+      "title": "Luis Fonsi - Despacito",
+      "expect": "playable"
+    },
+    {
+      "id": "JGwWNGJdvx8",
+      "category": "music-vevo",
+      "title": "Ed Sheeran - Shape of You",
+      "expect": "playable"
+    },
+    {
+      "id": "OPf0YbXqDm0",
+      "category": "music-vevo",
+      "title": "Mark Ronson - Uptown Funk",
+      "expect": "playable"
+    },
+    {
+      "id": "fJ9rUzIMcZQ",
+      "category": "music",
+      "title": "Queen - Bohemian Rhapsody",
+      "expect": "playable"
+    },
+    {
+      "id": "kffacxfA7G4",
+      "category": "music-vevo",
+      "title": "Justin Bieber - Baby",
+      "expect": "playable"
+    },
+    {
+      "id": "Uc2PPbfKcG4",
+      "category": "shorts",
+      "title": "Ranking funniest basketball moments",
+      "expect": "playable"
+    },
+    {
+      "id": "00Sel5fqBCs",
+      "category": "shorts",
+      "title": "revenge of the midnight mosquitoes",
+      "expect": "playable"
+    },
+    {
+      "id": "ipxkqTZj6P8",
+      "category": "shorts",
+      "title": "failed strategies of predator mosquito",
+      "expect": "playable"
+    },
+    {
+      "id": "4A0CpDdnl2o",
+      "category": "shorts",
+      "title": "When practice finally pays off",
+      "expect": "playable"
+    },
+    {
+      "id": "HtVdAasjOgU",
+      "category": "age-restricted",
+      "title": "age-gated (yt-dlp test id)",
+      "expect": "unplayable"
+    },
+    {
+      "id": "Tq92D6wQ1mg",
+      "category": "age-restricted",
+      "title": "age-gated (yt-dlp test id)",
+      "expect": "unplayable"
+    },
+    {
+      "id": "6kLq3WMV1nU",
+      "category": "age-restricted",
+      "title": "age-gated (yt-dlp test id)",
+      "expect": "unplayable"
+    },
+    {
+      "id": "XqZsoesa55w",
+      "category": "kids",
+      "title": "Pinkfong - Baby Shark Dance",
+      "expect": "unplayable"
+    },
+    {
+      "id": "e_04ZrNroTo",
+      "category": "kids",
+      "title": "Cocomelon - Wheels on the Bus",
+      "expect": "unplayable"
+    },
+    {
+      "id": "j8z7UjET1Is",
+      "category": "kids",
+      "title": "Bounce Patrol - Baby Shark",
+      "expect": "unplayable"
+    },
+    {
+      "id": "aqz-KE-bpKQ",
+      "category": "4k-hdr",
+      "title": "Big Buck Bunny 60fps 4K",
+      "expect": "playable"
+    },
+    {
+      "id": "NNS5Piu-EII",
+      "category": "4k-hdr",
+      "title": "Amazing Colors of Nature in 4K HDR 60fps",
+      "expect": "playable"
+    },
+    {
+      "id": "xeXV1KoX034",
+      "category": "4k-hdr",
+      "title": "Dolby Vision 4K 60 FPS HDR",
+      "expect": "playable"
+    },
+    {
+      "id": "LXb3EKWsInQ",
+      "category": "4k-hdr",
+      "title": "Costa Rica in 4K 60fps HDR",
+      "expect": "playable"
+    },
+    {
+      "id": "f1A7SdVTlok",
+      "category": "long-10h",
+      "title": "10 hour timer",
+      "expect": "playable"
+    },
+    {
+      "id": "6jGFVmIZfTY",
+      "category": "long-10h",
+      "title": "10 Hour Timer",
+      "expect": "playable"
+    },
+    {
+      "id": "AKeUssuu3Is",
+      "category": "long-10h",
+      "title": "10 Hours Fantastic Views of Nature 4K",
+      "expect": "playable"
+    },
+    {
+      "id": "9bZkp7q19f0",
+      "category": "non-english",
+      "title": "PSY - Gangnam Style (Korean)",
+      "expect": "playable"
+    },
+    {
+      "id": "GkG60kISnfc",
+      "category": "non-english",
+      "title": "ILLIT - jellyous (Korean)",
+      "expect": "playable"
+    },
+    {
+      "id": "EQ-DKvLQlyQ",
+      "category": "non-english",
+      "title": "The Apothecary Diaries Opening (Japanese)",
+      "expect": "playable"
+    },
+    {
+      "id": "oAVhUAaVCVQ",
+      "category": "non-english",
+      "title": "Chammak Challo (Hindi)",
+      "expect": "playable"
+    },
+    {
+      "id": "hxMNYkLN7tI",
+      "category": "non-english",
+      "title": "Aaj Ki Raat - Stree 2 (Hindi)",
+      "expect": "playable"
+    }
+  ],
+  "discover": [
+    {
+      "category": "live",
+      "queries": [
+        "live news",
+        "live music radio 24/7",
+        "live cam"
+      ],
+      "live_filter": true,
+      "kind": "live",
+      "count": 4,
+      "expect": "playable"
+    },
+    {
+      "category": "upcoming",
+      "queries": [],
+      "browse": [
+        "UC4R8DWoMoI7CAwX8_LjQHig"
+      ],
+      "live_filter": false,
+      "kind": "upcoming",
+      "count": 3,
+      "expect": "unplayable"
+    }
+  ]
+}

@@ -2110,6 +2110,7 @@ dependencies = [
  "anyhow",
  "regex",
  "reqwest",
+ "serde",
  "serde_json",
  "yt-core",
 ]

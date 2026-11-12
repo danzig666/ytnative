@@ -11,8 +11,8 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Clients tried in order. Each entry: (client, send auth?).
-pub const RING: &[(Client, bool)] = &[(Client::VisionOs, false), (Client::AndroidVr, false), (Client::Ios, false)];
+// The clients tried, their order and whether they get the bearer token come from
+// `clients::active()` (built-in `config/clients.json`, optionally refreshed from the repo).
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaptionTrack {
@@ -65,7 +65,8 @@ impl Default for Prefs {
 
 pub fn resolve(api: &Api, video_id: &str, bearer: Option<&str>) -> Result<Resolved> {
     let mut errors = Vec::new();
-    for &(client, auth) in RING {
+    for profile in crate::clients::active(api.http).ring_profiles() {
+        let (client, auth) = (Client::Profile(profile), profile.send_auth);
         match api.player(client, video_id, if auth { bearer } else { None }) {
             Ok(pr) => {
                 let status = pr["playabilityStatus"]["status"].as_str().unwrap_or("?").to_string();

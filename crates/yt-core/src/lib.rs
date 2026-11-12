@@ -6,6 +6,7 @@ pub mod backup;
 pub mod bootstrap;
 pub mod captions;
 pub mod channel_groups;
+pub mod clients;
 pub mod comments;
 pub mod ext;
 pub mod fsutil;

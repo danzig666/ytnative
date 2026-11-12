@@ -1,3 +1,5 @@
+mod canary;
+
 use yt_core::{auth, bootstrap, innertube, mpd};
 
 use anyhow::{bail, Context, Result};
@@ -14,6 +16,8 @@ USAGE:
   ytcli streams <id|url>    Resolve + verify 1080p video/audio URLs and the HLS manifest
         [--sample <secs>]          ...and mux the first <secs> seconds into sample.mp4 (needs ffmpeg)
         [--tv]                     ...also report what the signed-in TV client returns
+  ytcli canary [--update]   Resolve + range-fetch the videos in config/canary.json; exit 1 on
+        [--file <path>]            regressions. --update rewrites the expectations.
 ";
 
 fn main() {
@@ -25,6 +29,9 @@ fn main() {
 
 fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("canary") {
+        return canary::run(&args[1..]);
+    }
     let http = reqwest::blocking::Client::builder()
         .gzip(true)
         .timeout(std::time::Duration::from_secs(30))
