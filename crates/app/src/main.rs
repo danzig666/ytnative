@@ -10,6 +10,8 @@ mod host;
 mod images;
 mod input;
 mod i18n;
+#[cfg(not(windows))]
+mod relaunch;
 mod lounge;
 // The Windows desktop simulator swaps the TV-only modules (LS2 bus, Wayland surface, FIFO remote)
 // for stand-ins under `sim/`; see `sim/mod.rs`.
@@ -151,6 +153,8 @@ fn main() {
             log(&format!("SDL_Init failed: {}", sdl::error()));
             std::process::exit(1);
         }
+        #[cfg(not(windows))]
+        relaunch::install();
         #[cfg(windows)]
         let win = sim_window();
         #[cfg(not(windows))]
@@ -364,7 +368,9 @@ fn main() {
                 match deeplink(&raw) {
                     Some(Link::Video(v)) => {
                         log(&format!("launch: play {v}"));
-                        d.request(MachineId::Nav, NavOp::Push(YtArg::Player { video_id: v, playlist: None }));
+                        let arg = YtArg::Player { video_id: v, playlist: None };
+                        let in_player = d.top_screen().map(|s| s.name()) == Some("player");
+                        d.request(MachineId::Nav, if in_player { NavOp::Replace(arg) } else { NavOp::Push(arg) });
                     }
                     Some(Link::Search(q)) => {
                         log(&format!("launch: search {q}"));
