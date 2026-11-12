@@ -210,6 +210,7 @@ fn main() {
         let mut input_echo = 0u8;
         let mut pointer_at: Option<(f32, f32)> = None;
         let mut edge_step_at = 0u32;
+        let (mut cursor_motion_at, mut cursor_hidden) = (0u32, true);
 
         let mut remote = remote::Remote::open();
         {
@@ -251,6 +252,8 @@ fn main() {
                 match input::rd_u32(&ev, 0) {
                     sdl::SDL_QUIT => running = false,
                     sdl::SDL_MOUSEMOTION => {
+                        cursor_motion_at = now;
+                        cursor_hidden = false;
                         let (x, y) = input::pointer_xy(&ev);
                         pointer_at = Some((x, y));
                         inputs.push(if mouse_down { input::drag(x, y, tick) } else { input::pointer(x, y, tick) });
@@ -278,6 +281,12 @@ fn main() {
                     }
                     sdl::SDL_KEYDOWN | sdl::SDL_KEYUP => {
                         let (state, wcode, sym) = input::decode_key(&ev);
+                        // An arrow key puts the pointer away (D-pad mode).
+                        if state & 0xff != 0 && !cursor_hidden && sym & (1 << 30) != 0 && (79..=82).contains(&(sym & 0xff)) {
+                            hide_cursor();
+                            cursor_hidden = true;
+                            pointer_at = None;
+                        }
                         if wcode == 505 {
                             running = false; // EXIT key
                         }
@@ -466,6 +475,15 @@ fn main() {
                     }
                 }
             }
+            // Idle pointer: hide it after a few seconds without motion (sooner while a video plays).
+            if !cursor_hidden && !mouse_down {
+                let idle = if rig.player.active() { 3000 } else { 5000 };
+                if now.wrapping_sub(cursor_motion_at) > idle {
+                    hide_cursor();
+                    cursor_hidden = true;
+                    pointer_at = None;
+                }
+            }
             let had_input = !inputs.is_empty();
             if had_input {
                 input_echo = 3;
@@ -549,6 +567,30 @@ fn color_key(act: &str, rig: &mut AppRig, d: &mut Dispatcher<YtHost>) {
         _ => {}
     }
 }
+
+/// Hides LG's Magic Remote pointer (`SDL_webOSCursorVisibility(0)`); the compositor shows it again
+/// by itself on the next motion. Native SDL apps get no idle hide from the system, so the app does
+/// it: after a few seconds without motion, and at once on an arrow key (as plx-native does).
+#[cfg(not(windows))]
+fn hide_cursor() {
+    type F = unsafe extern "C" fn(std::ffi::c_int) -> std::ffi::c_int;
+    static FN: std::sync::OnceLock<Option<F>> = std::sync::OnceLock::new();
+    let f = FN.get_or_init(|| {
+        let name = CString::new("SDL_webOSCursorVisibility").unwrap();
+        let p = unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()) };
+        if p.is_null() {
+            log("cursor: no SDL_webOSCursorVisibility");
+            None
+        } else {
+            Some(unsafe { std::mem::transmute::<*mut libc::c_void, F>(p) })
+        }
+    });
+    if let Some(f) = f {
+        unsafe { f(0) };
+    }
+}
+#[cfg(windows)]
+fn hide_cursor() {}
 
 enum Link {
     Video(String),
