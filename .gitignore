@@ -31,3 +31,6 @@ mp4url.txt
 
 # local Claude Code settings
 /.claude/
+
+# Windows simulator third-party libraries (tools/fetch-sim-deps.ps1; never committed)
+/third_party/win/

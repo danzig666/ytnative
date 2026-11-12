@@ -51,6 +51,22 @@ extern "C" {
     pub fn glViewport(x: c_int, y: c_int, w: c_int, h: c_int);
 }
 
+// Windows simulator only.
+#[cfg(windows)]
+pub const SDL_GL_CONTEXT_PROFILE_CORE: c_int = 1;
+#[cfg(windows)]
+pub const SDL_WINDOWPOS_CENTERED: c_int = 0x2FFF_0000;
+#[cfg(windows)]
+pub const SDL_WINDOW_HIDDEN: u32 = 0x8;
+#[cfg(windows)]
+pub const SDL_WINDOW_ALLOW_HIGHDPI: u32 = 0x2000;
+#[cfg(windows)]
+extern "C" {
+    pub fn SDL_GL_GetDrawableSize(win: *mut c_void, w: *mut c_int, h: *mut c_int);
+    pub fn SDL_GL_ResetAttributes();
+    pub fn SDL_DestroyWindow(win: *mut c_void);
+}
+
 pub fn error() -> String {
     unsafe { std::ffi::CStr::from_ptr(SDL_GetError()).to_string_lossy().into_owned() }
 }

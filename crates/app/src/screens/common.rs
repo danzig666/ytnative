@@ -7,6 +7,24 @@ use plx_machine::machine::{Cx, Effects, Fx, NavOp};
 use plx_ui::{Painter, Rect};
 use yt_core::model::{Endpoint, ItemKind};
 
+/// OK on a `Control` element (the sidebar, `VList` rows, the search keyboard) arms a press in the
+/// dispatcher, and its release is delivered as `PressCommit` — never as `Activate`, which only a
+/// `Bare` element gets (plx_ui `screen::ElemKind`). The screens are written against `Activate`, so
+/// this turns a commit on one of `mine`'s elements into `Activate` of the focused element.
+/// (Found with the Windows simulator: without it OK on those elements did nothing.)
+pub fn press_commit_as_activate(
+    ev: &plx_machine::machine::ScreenEvent<YtHost>,
+    cx: &Cx<'_, YtHost>,
+    mine: impl Fn(u32) -> bool,
+) -> Option<plx_machine::machine::ScreenEvent<YtHost>> {
+    match ev {
+        plx_machine::machine::ScreenEvent::PressCommit(_) => {
+            cx.focus.current.map(|k| k.elem).filter(|e| mine(*e)).map(plx_machine::machine::ScreenEvent::Activate)
+        }
+        _ => None,
+    }
+}
+
 /// What activating a card does: play a video, open a channel / playlist, run a search.
 pub fn open_card(card: &Card, fx: &mut Effects<'_, YtHost>) {
     let arg = match (&card.item.endpoint, card.item.kind) {
@@ -75,6 +93,12 @@ pub fn clock(views: &Views<'_>) -> String {
     }
 }
 
+#[cfg(windows)]
+fn local_offset_secs() -> i64 {
+    crate::sim::local_offset_secs()
+}
+
+#[cfg(not(windows))]
 fn local_offset_secs() -> i64 {
     unsafe {
         let t = libc::time(std::ptr::null_mut());

@@ -7,15 +7,22 @@ mod host;
 mod images;
 mod input;
 mod lounge;
+// The Windows desktop simulator swaps the TV-only modules (LS2 bus, Wayland surface, FIFO remote)
+// for stand-ins under `sim/`; see `sim/mod.rs`.
+#[cfg_attr(windows, path = "sim/ls2.rs")]
 mod ls2;
 mod player;
+#[cfg_attr(windows, path = "sim/remote.rs")]
 mod remote;
 mod screens;
 mod sdl;
 mod settings;
 mod signin;
+#[cfg(windows)]
+mod sim;
 mod store;
 mod ui;
+#[cfg_attr(windows, path = "sim/wl.rs")]
 mod wl;
 
 use host::{AppRig, YtArg, YtHost};
@@ -33,6 +40,7 @@ pub fn now_us() -> u64 {
 
 /// Persistent, writable, survives reinstall in the Developer Mode jail (plx-native's finding);
 /// falls back to the app's tmp dir.
+#[cfg(not(windows))]
 fn data_dir() -> std::path::PathBuf {
     let id = plx_base::paths::app_id();
     for d in [format!("/media/developer/{id}-data"), format!("/media/internal/.{id}"), "/tmp/ytnative/data".to_string()] {
@@ -44,6 +52,62 @@ fn data_dir() -> std::path::PathBuf {
     std::path::PathBuf::from("/tmp")
 }
 
+/// Windows simulator: `%LOCALAPPDATA%\ytnative` (token, accounts, settings).
+#[cfg(windows)]
+fn data_dir() -> std::path::PathBuf {
+    let d = sim::base_dir();
+    let _ = std::fs::create_dir_all(&d);
+    d
+}
+
+/// Windows simulator: a 1920x1080 window (`YTNATIVE_SIM_WINDOW=WxH` to change; the UI is scaled
+/// to fit) with a desktop GL context. Tries a 4.1 core profile first (what plx-native's macOS
+/// simulator uses: the vendored renderer then compiles its GLES2 shaders behind a `#version 410
+/// core` preamble and binds a VAO), then an OpenGL ES 2.0 context (shaders as on the TV), then
+/// whatever the driver gives by default. Resolves the GL trampolines once a context exists.
+#[cfg(windows)]
+unsafe fn sim_window() -> *mut std::os::raw::c_void {
+    let (w, h) = std::env::var("YTNATIVE_SIM_WINDOW")
+        .ok()
+        .and_then(|s| s.split_once('x').and_then(|(a, b)| Some((a.trim().parse().ok()?, b.trim().parse().ok()?))))
+        .unwrap_or((1920, 1080));
+    let mut flags = sdl::SDL_WINDOW_OPENGL;
+    if std::env::var_os("YTNATIVE_SIM_HIDDEN").is_some() {
+        flags |= sdl::SDL_WINDOW_HIDDEN;
+    }
+    let title = CString::new("ytnative (simulator)").unwrap();
+    let attempts: [(&str, Option<(i32, i32, i32)>); 3] = [
+        ("GL 4.1 core", Some((sdl::SDL_GL_CONTEXT_PROFILE_CORE, 4, 1))),
+        ("GLES 2.0", Some((sdl::SDL_GL_CONTEXT_PROFILE_ES, 2, 0))),
+        ("driver default", None),
+    ];
+    for (name, profile) in attempts {
+        sdl::SDL_GL_ResetAttributes();
+        if let Some((mask, major, minor)) = profile {
+            sdl::SDL_GL_SetAttribute(sdl::SDL_GL_CONTEXT_PROFILE_MASK, mask);
+            sdl::SDL_GL_SetAttribute(sdl::SDL_GL_CONTEXT_MAJOR_VERSION, major);
+            sdl::SDL_GL_SetAttribute(sdl::SDL_GL_CONTEXT_MINOR_VERSION, minor);
+        }
+        for (a, v) in [(sdl::SDL_GL_RED_SIZE, 8), (sdl::SDL_GL_GREEN_SIZE, 8), (sdl::SDL_GL_BLUE_SIZE, 8), (sdl::SDL_GL_ALPHA_SIZE, 8)] {
+            sdl::SDL_GL_SetAttribute(a, v);
+        }
+        let win = sdl::SDL_CreateWindow(title.as_ptr(), sdl::SDL_WINDOWPOS_CENTERED, sdl::SDL_WINDOWPOS_CENTERED, w, h, flags);
+        if win.is_null() {
+            log(&format!("sim: SDL_CreateWindow failed: {}", sdl::error()));
+            std::process::exit(1);
+        }
+        if !sdl::SDL_GL_CreateContext(win).is_null() {
+            log(&format!("sim: {w}x{h} window, {name} context"));
+            sim::gl::load();
+            return win;
+        }
+        log(&format!("sim: {name} context refused: {}", sdl::error()));
+        sdl::SDL_DestroyWindow(win);
+    }
+    log("sim: no usable OpenGL context");
+    std::process::exit(1);
+}
+
 pub fn log(s: &str) {
     plx_base::eventlog::log(s);
     eprintln!("{s}");
@@ -51,6 +115,14 @@ pub fn log(s: &str) {
 
 fn main() {
     START.get_or_init(Instant::now);
+    // Simulator: plx's runtime root (event log, trigger files) under %LOCALAPPDATA%\ytnative\run,
+    // before any plx path is resolved (the default is the TV's /tmp).
+    #[cfg(windows)]
+    if std::env::var_os("PLXNATIVE_RUNTIME_DIR").is_none() {
+        let run = sim::base_dir().join("run");
+        let _ = std::fs::create_dir_all(&run);
+        std::env::set_var("PLXNATIVE_RUNTIME_DIR", run);
+    }
     // Before anything SDL: ask webOS to deliver BACK (and EXIT) to the app.
     std::env::set_var("SDL_WEBOS_ACCESS_POLICY_KEYS_BACK", "true");
     std::env::set_var("SDL_WEBOS_ACCESS_POLICY_KEYS_EXIT", "true");
@@ -74,30 +146,36 @@ fn main() {
             log(&format!("SDL_Init failed: {}", sdl::error()));
             std::process::exit(1);
         }
-        for (a, v) in [
-            (sdl::SDL_GL_CONTEXT_PROFILE_MASK, sdl::SDL_GL_CONTEXT_PROFILE_ES),
-            (sdl::SDL_GL_CONTEXT_MAJOR_VERSION, 2),
-            (sdl::SDL_GL_CONTEXT_MINOR_VERSION, 0),
-            (sdl::SDL_GL_RED_SIZE, 8),
-            (sdl::SDL_GL_GREEN_SIZE, 8),
-            (sdl::SDL_GL_BLUE_SIZE, 8),
-            (sdl::SDL_GL_ALPHA_SIZE, 8),
-            (sdl::SDL_GL_BUFFER_SIZE, 32),
-            (sdl::SDL_GL_DEPTH_SIZE, 0),
-            (sdl::SDL_GL_STENCIL_SIZE, 0),
-        ] {
-            sdl::SDL_GL_SetAttribute(a, v);
-        }
-        let title = CString::new("ytnative").unwrap();
-        let win = sdl::SDL_CreateWindow(title.as_ptr(), 0, 0, 1920, 1080, sdl::SDL_WINDOW_OPENGL | sdl::SDL_WINDOW_FULLSCREEN);
-        if win.is_null() {
-            log(&format!("SDL_CreateWindow failed: {}", sdl::error()));
-            std::process::exit(1);
-        }
-        if sdl::SDL_GL_CreateContext(win).is_null() {
-            log(&format!("SDL_GL_CreateContext failed: {}", sdl::error()));
-            std::process::exit(1);
-        }
+        #[cfg(windows)]
+        let win = sim_window();
+        #[cfg(not(windows))]
+        let win = {
+            for (a, v) in [
+                (sdl::SDL_GL_CONTEXT_PROFILE_MASK, sdl::SDL_GL_CONTEXT_PROFILE_ES),
+                (sdl::SDL_GL_CONTEXT_MAJOR_VERSION, 2),
+                (sdl::SDL_GL_CONTEXT_MINOR_VERSION, 0),
+                (sdl::SDL_GL_RED_SIZE, 8),
+                (sdl::SDL_GL_GREEN_SIZE, 8),
+                (sdl::SDL_GL_BLUE_SIZE, 8),
+                (sdl::SDL_GL_ALPHA_SIZE, 8),
+                (sdl::SDL_GL_BUFFER_SIZE, 32),
+                (sdl::SDL_GL_DEPTH_SIZE, 0),
+                (sdl::SDL_GL_STENCIL_SIZE, 0),
+            ] {
+                sdl::SDL_GL_SetAttribute(a, v);
+            }
+            let title = CString::new("ytnative").unwrap();
+            let win = sdl::SDL_CreateWindow(title.as_ptr(), 0, 0, 1920, 1080, sdl::SDL_WINDOW_OPENGL | sdl::SDL_WINDOW_FULLSCREEN);
+            if win.is_null() {
+                log(&format!("SDL_CreateWindow failed: {}", sdl::error()));
+                std::process::exit(1);
+            }
+            if sdl::SDL_GL_CreateContext(win).is_null() {
+                log(&format!("SDL_GL_CreateContext failed: {}", sdl::error()));
+                std::process::exit(1);
+            }
+            win
+        };
         plx_base::surface::probe(win);
         sdl::SDL_GL_SetSwapInterval(1);
         plx_platform::tv::window::bind_window(win);
@@ -116,7 +194,10 @@ fn main() {
         d.request(MachineId::Nav, NavOp::Root(YtArg::Browse));
 
         let mut remote = remote::Remote::open();
-        let mut lounge = if rig.store.settings.lounge_enabled {
+        // The simulator would register a second "TV" for phone casting on the signed-in account;
+        // opt in with YTNATIVE_SIM_LOUNGE=1.
+        let lounge_on = rig.store.settings.lounge_enabled && (!cfg!(windows) || std::env::var_os("YTNATIVE_SIM_LOUNGE").is_some());
+        let mut lounge = if lounge_on {
             match lounge::Lounge::start(&rig.store.settings.device_name) {
                 Ok(l) => Some(l),
                 Err(e) => {
@@ -189,7 +270,8 @@ fn main() {
             if playing {
                 last_input = now;
             }
-            if !blanked && now.wrapping_sub(last_input) > rig.idle_blank_ms() {
+            // No OLED to protect in the simulator, and a blank frame would spoil screenshots.
+            if !cfg!(windows) && !blanked && now.wrapping_sub(last_input) > rig.idle_blank_ms() {
                 blanked = true;
                 log("idle: blank screen (no input, nothing playing)");
                 plx_gfx::gfx::frame_clear(0.0, 0.0, 0.0);
@@ -247,6 +329,9 @@ fn main() {
             plx_ui::tex::note_queued(&mut d.budget);
 
             let present = foreground && !blanked && (r.presented || plx_machine::idle::should_present(now) || plx_ui::tex::has_pending());
+            // Simulator: a requested screenshot forces a full draw of the current state.
+            #[cfg(windows)]
+            let present = present || remote.as_ref().is_some_and(|r| r.shot_pending());
             if present {
                 plx_gfx::text::begin_frame();
                 let (x, y, w, h) = plx_base::surface::viewport();
@@ -264,6 +349,12 @@ fn main() {
                 plx_ui::guard(|| {
                     d.draw(&mut rig, true);
                 });
+                #[cfg(windows)]
+                if let Some(r) = remote.as_mut() {
+                    let (mut dw, mut dh) = (0, 0);
+                    sdl::SDL_GL_GetDrawableSize(win, &mut dw, &mut dh);
+                    r.take_shots(dw, dh);
+                }
                 sdl::SDL_GL_SwapWindow(win);
                 plx_gfx::gfx::blur_frame_end();
                 plx_gfx::gfx::region_frame_end();

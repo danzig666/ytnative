@@ -33,6 +33,13 @@ cargo xtask <command>
   shot [file] [method]  screenshot the TV (DISPLAY = video+UI, VIDEO, GRAPHIC) to target/shots/
   pull-sysroot          copy the TV's shared libraries we link/check against into sysroot/
   symcheck              verify every dynamic symbol the TV binary imports exists on the TV
+
+Windows desktop simulator (never touches the TV; needs tools/fetch-sim-deps.ps1 once):
+  sim [--release] [--detach] [-- app-args]
+                        build + run the app in a 1920x1080 window (data: %LOCALAPPDATA%\\ytnative;
+                        the repo's token.json is copied there if no account exists yet)
+  sim-key <tokens...>   press keys in the running simulator (up down left right ok back exit)
+  sim-shot [name]       save the simulator's next frame as target/shots/<name>.png
 ";
 
 fn main() {
@@ -60,6 +67,9 @@ fn run() -> Result<()> {
         Some("shot") => shot(args.get(1).map(String::as_str), args.get(2).map(String::as_str).unwrap_or("DISPLAY")),
         Some("pull-sysroot") => pull_sysroot(),
         Some("symcheck") => symcheck(),
+        Some("sim") => sim::run(&args[1..]),
+        Some("sim-key") => sim::key(&args[1..]),
+        Some("sim-shot") => sim::shot(args.get(1).map(String::as_str)),
         _ => {
             print!("{USAGE}");
             Ok(())
@@ -499,5 +509,128 @@ mod elf {
 
     pub fn defined_symbols(b: &[u8]) -> Result<Vec<String>> {
         Ok(dynsyms(b)?.into_iter().filter(|s| s.1).map(|s| s.0).collect())
+    }
+}
+
+/// The Windows desktop simulator (`crates/app` built for the host with `--features sim`). Nothing
+/// here talks to the TV.
+mod sim {
+    use anyhow::{bail, Context, Result};
+    use std::io::{Read, Write};
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    fn port() -> u16 {
+        std::env::var("YTNATIVE_SIM_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(47800)
+    }
+
+    fn data_dir() -> Result<PathBuf> {
+        let base = std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA is not set (the simulator is Windows-only)")?;
+        Ok(PathBuf::from(base).join("ytnative"))
+    }
+
+    /// The signed-in token for testing: `YTNATIVE_SIM_TOKEN`, else `token.json` in this checkout,
+    /// else in the main checkout (when this is a git worktree).
+    fn token_source() -> Option<PathBuf> {
+        if let Some(p) = std::env::var_os("YTNATIVE_SIM_TOKEN") {
+            return Some(PathBuf::from(p));
+        }
+        let here = PathBuf::from("token.json");
+        if here.is_file() {
+            return Some(here);
+        }
+        let out = Command::new("git").args(["rev-parse", "--path-format=absolute", "--git-common-dir"]).output().ok()?;
+        let common = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+        let main = common.parent()?.join("token.json");
+        main.is_file().then_some(main)
+    }
+
+    /// Copies the token into the simulator's data dir unless an account is already there. Never
+    /// prints the token itself.
+    fn seed_token(data: &Path) -> Result<()> {
+        std::fs::create_dir_all(data)?;
+        if data.join("accounts.json").exists() || data.join("token.json").exists() {
+            return Ok(());
+        }
+        match token_source() {
+            Some(src) => {
+                std::fs::copy(&src, data.join("token.json")).with_context(|| format!("copying {}", src.display()))?;
+                println!("sim: copied the signed-in token from {} into {}", src.display(), data.display());
+            }
+            None => println!("sim: no token.json found; the app starts signed out"),
+        }
+        Ok(())
+    }
+
+    pub fn run(args: &[String]) -> Result<()> {
+        let release = args.iter().any(|a| a == "--release");
+        let detach = args.iter().any(|a| a == "--detach");
+        let app_args: Vec<&String> = args.iter().skip_while(|a| *a != "--").skip(1).collect();
+        if !Path::new("third_party/win").is_dir() {
+            bail!("third_party/win is missing: run `powershell -ExecutionPolicy Bypass -File tools/fetch-sim-deps.ps1` once");
+        }
+        let mut build = Command::new("cargo");
+        build.args(["build", "-p", "ytnative-app", "--features", "sim"]);
+        if release {
+            build.arg("--release");
+        }
+        if !build.status()?.success() {
+            bail!("simulator build failed");
+        }
+        let exe = PathBuf::from(format!("target/{}/ytnative.exe", if release { "release" } else { "debug" }));
+        let data = data_dir()?;
+        seed_token(&data)?;
+        let shots = std::env::current_dir()?.join("target").join("shots");
+        let mut cmd = Command::new(&exe);
+        cmd.args(app_args).env("YTNATIVE_SHOT_DIR", &shots);
+        println!("sim: {} (keys: 127.0.0.1:{}, shots: {}, data: {})", exe.display(), port(), shots.display(), data.display());
+        if detach {
+            let log = std::fs::File::create("target/sim.log")?;
+            cmd.stdout(log.try_clone()?).stderr(log);
+            let child = cmd.spawn().context("starting the simulator")?;
+            println!("sim: running detached as pid {} (log: target/sim.log)", child.id());
+            return Ok(());
+        }
+        let st = cmd.status().context("starting the simulator")?;
+        if !st.success() {
+            bail!("simulator exited with {st}");
+        }
+        Ok(())
+    }
+
+    fn send(line: &str) -> Result<String> {
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", port()))
+            .with_context(|| format!("no simulator listening on 127.0.0.1:{} (start it with `cargo xtask sim`)", port()))?;
+        s.set_read_timeout(Some(std::time::Duration::from_secs(120)))?;
+        s.write_all(format!("{line}\n").as_bytes())?;
+        let mut reply = String::new();
+        s.read_to_string(&mut reply).context("waiting for the simulator")?;
+        Ok(reply.trim().to_string())
+    }
+
+    pub fn key(tokens: &[String]) -> Result<()> {
+        if tokens.is_empty() {
+            bail!("usage: cargo xtask sim-key <up|down|left|right|ok|back|exit>...");
+        }
+        let r = send(&tokens.join(" "))?;
+        if r != "ok" {
+            println!("{r}");
+        }
+        Ok(())
+    }
+
+    pub fn shot(name: Option<&str>) -> Result<()> {
+        let tok = match name {
+            Some(n) => format!("shot:{}", n.trim_end_matches(".png")),
+            None => "shot".into(),
+        };
+        let r = send(&tok)?;
+        match r.lines().find_map(|l| l.strip_prefix("shot ")) {
+            Some(path) => {
+                println!("{path}");
+                Ok(())
+            }
+            None => bail!("simulator: {r}"),
+        }
     }
 }
