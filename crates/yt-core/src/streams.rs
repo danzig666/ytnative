@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Clients tried in order. Each entry: (client, send auth?).
-pub const RING: &[(Client, bool)] = &[(Client::VisionOs, false)];
+pub const RING: &[(Client, bool)] = &[(Client::VisionOs, false), (Client::AndroidVr, false), (Client::Ios, false)];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaptionTrack {
@@ -145,6 +145,14 @@ impl Resolved {
         mpd::build(&self.adaptive, dur, prefs.codec, prefs.min_height, prefs.max_height).map(|m| m.0)
     }
 
+    /// Live / HLS: the master playlist reduced to H.264 renditions up to `max_height`, keeping the
+    /// audio groups they use. Returned as text to be written to a local file for the player.
+    pub fn hls_master(&self, http: &reqwest::blocking::Client, max_height: u64) -> anyhow::Result<String> {
+        let url = self.hls.as_deref().ok_or_else(|| anyhow::anyhow!("no HLS manifest"))?;
+        let text = http.get(url).send()?.error_for_status()?.text()?;
+        Ok(filter_hls(&text, max_height))
+    }
+
     /// Caption download URL in the given format ("vtt" or "ttml"), optionally auto-translated.
     pub fn caption_url(&self, track: &CaptionTrack, fmt: &str, translate_to: Option<&str>) -> String {
         let mut u = format!("{}&fmt={fmt}", track.base_url);
@@ -152,5 +160,76 @@ impl Resolved {
             u.push_str(&format!("&tlang={l}"));
         }
         u
+    }
+}
+
+/// Keeps `#EXT-X-STREAM-INF` variants whose CODECS start with avc1 and whose height is within
+/// `max_height`, plus the `#EXT-X-MEDIA` groups they reference and all global tags.
+pub fn filter_hls(master: &str, max_height: u64) -> String {
+    let lines: Vec<&str> = master.lines().collect();
+    let mut keep_groups = std::collections::HashSet::new();
+    let mut variants = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let l = lines[i];
+        if l.starts_with("#EXT-X-STREAM-INF") {
+            let uri = lines.get(i + 1).copied().unwrap_or("");
+            let height = l
+                .split("RESOLUTION=")
+                .nth(1)
+                .and_then(|r| r.split(',').next())
+                .and_then(|r| r.split('x').nth(1))
+                .and_then(|h| h.parse::<u64>().ok())
+                .unwrap_or(0);
+            if l.contains("avc1") && height <= max_height {
+                if let Some(g) = l.split("AUDIO=\"").nth(1).and_then(|r| r.split('"').next()) {
+                    keep_groups.insert(g.to_string());
+                }
+                variants.push((l, uri));
+            }
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    let mut out = Vec::new();
+    for l in &lines {
+        if l.starts_with("#EXT-X-STREAM-INF") || (!l.starts_with('#') && !l.trim().is_empty()) {
+            continue;
+        }
+        if l.starts_with("#EXT-X-MEDIA") {
+            let g = l.split("GROUP-ID=\"").nth(1).and_then(|r| r.split('"').next()).unwrap_or("");
+            if !keep_groups.contains(g) {
+                continue;
+            }
+        }
+        out.push(l.to_string());
+    }
+    for (inf, uri) in variants {
+        out.push(inf.to_string());
+        out.push(uri.to_string());
+    }
+    out.join("\n") + "\n"
+}
+
+#[cfg(test)]
+mod hls_tests {
+    #[test]
+    fn keeps_h264_within_height() {
+        let m = "#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a1\",URI=\"x\"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a2\",URI=\"y\"
+#EXT-X-STREAM-INF:BANDWIDTH=1,CODECS=\"avc1.4d401f,mp4a\",RESOLUTION=1280x720,AUDIO=\"a1\"
+v720
+#EXT-X-STREAM-INF:BANDWIDTH=2,CODECS=\"avc1.64002a,mp4a\",RESOLUTION=1920x1080,AUDIO=\"a1\"
+v1080
+#EXT-X-STREAM-INF:BANDWIDTH=3,CODECS=\"vp09.00.50.08,mp4a\",RESOLUTION=2560x1440,AUDIO=\"a2\"
+vp9
+";
+        let f = super::filter_hls(m, 1080);
+        assert!(f.contains("v720") && f.contains("v1080") && !f.contains("vp9"));
+        assert!(f.contains("GROUP-ID=\"a1\"") && !f.contains("GROUP-ID=\"a2\""));
+        let f = super::filter_hls(m, 720);
+        assert!(f.contains("v720") && !f.contains("v1080"));
     }
 }

@@ -10,8 +10,13 @@ use serde_json::{json, Value};
 pub enum Client {
     VisionOs,
     Tv,
+    /// Fallbacks for videos VISIONOS refuses; both return direct URLs anonymously (2026-11).
+    AndroidVr,
+    Ios,
 }
 
+const ANDROID_VR_UA: &str = "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip";
+const IOS_UA: &str = "com.google.ios.youtube/21.26.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)";
 const VISIONOS_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
 
 impl Client {
@@ -19,6 +24,8 @@ impl Client {
         match self {
             Client::VisionOs => VISIONOS_UA,
             Client::Tv => TV_UA,
+            Client::AndroidVr => ANDROID_VR_UA,
+            Client::Ios => IOS_UA,
         }
     }
 
@@ -43,6 +50,26 @@ impl Client {
                 }),
                 "7",
                 cfg.tv_client_version.clone(),
+            ),
+            Client::AndroidVr => (
+                json!({
+                    "clientName": "ANDROID_VR", "clientVersion": "1.65.10",
+                    "deviceMake": "Oculus", "deviceModel": "Quest 3", "androidSdkVersion": 32,
+                    "userAgent": ANDROID_VR_UA, "osName": "Android", "osVersion": "12L",
+                    "hl": "en", "gl": "US", "visitorData": visitor,
+                }),
+                "28",
+                "1.65.10".into(),
+            ),
+            Client::Ios => (
+                json!({
+                    "clientName": "IOS", "clientVersion": "21.26.4",
+                    "deviceMake": "Apple", "deviceModel": "iPhone16,2",
+                    "userAgent": IOS_UA, "osName": "iPhone", "osVersion": "18.3.2.22D82",
+                    "hl": "en", "gl": "US", "visitorData": visitor,
+                }),
+                "5",
+                "21.26.4".into(),
             ),
         }
     }

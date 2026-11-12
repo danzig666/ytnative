@@ -261,10 +261,22 @@ fn run(
         s.storyboard = resolved.storyboard_spec.clone();
         s.captions = resolved.captions.clone();
     }
-    let mpd = resolved.mpd(prefs).ok_or_else(|| anyhow::anyhow!("no H.264 streams for this video"))?;
-    let path = "/tmp/ytnative/play.mpd";
     std::fs::create_dir_all("/tmp/ytnative")?;
-    std::fs::write(path, mpd)?;
+    // Live: the HLS master reduced to H.264 renditions (DASH-from-formats only works for VOD).
+    // Needs TV validation: LG's hlsdemux2 stalled on YouTube's VOD TS playlists in early tests.
+    let path = if resolved.is_live || resolved.adaptive.iter().all(|f| f["initRange"].is_null()) {
+        let http = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(15)).build()?;
+        let master = resolved.hls_master(&http, prefs.max_height)?;
+        let path = "/tmp/ytnative/live.m3u8";
+        std::fs::write(path, master)?;
+        crate::log("player: live stream via HLS");
+        path
+    } else {
+        let mpd = resolved.mpd(prefs).ok_or_else(|| anyhow::anyhow!("no H.264 streams for this video"))?;
+        let path = "/tmp/ytnative/play.mpd";
+        std::fs::write(path, mpd)?;
+        path
+    };
 
     let app_id = plx_base::paths::app_id();
     let load = format!(
