@@ -291,6 +291,16 @@ pub fn stop(f: &mut plx_ui::screen::DrawFrame<'_, '_, YtHost>, key: FocusKey<u32
     f.stop(p, Stop { key, rect, rest_rect: rect, clip, hover: Hover::Focus, activate: Activate::Press });
 }
 
+/// A page header's ground: the page background over `r`, fading out over its last 28 px, so
+/// content scrolled up under the title is hidden instead of drawn over it.
+pub fn header_band(p: Painter, r: Rect) {
+    let c = plx_ui::theme::CLEAR_RGB;
+    let bg = [c.0, c.1, c.2, 1.0];
+    let fade = 28.0;
+    p.rect(Rect::new(r.x, r.y, r.w, r.h - fade), 0.0, bg, bg, 0.0);
+    p.rect(Rect::new(r.x, r.y + r.h - fade, r.w, fade), 0.0, bg, [c.0, c.1, c.2, 0.0], 0.0);
+}
+
 /// One row of a vertical list.
 #[derive(Clone, Debug, Default)]
 pub struct Row {

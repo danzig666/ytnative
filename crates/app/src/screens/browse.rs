@@ -319,7 +319,11 @@ impl Machine<YtHost> for BrowseScreen {
 
 impl Focusable<YtHost> for BrowseScreen {
     fn groups(&self, cx: &Cx<'_, YtHost>, out: &mut Vec<GroupSpec>) {
-        out.push(self.nav.spec(nav_items(cx).len()));
+        // The sidebar is entered sideways only: its tall extent would otherwise win the geometric
+        // search for Up/Down from a shelf over the shelf above or below.
+        let mut nav = self.nav.spec(nav_items(cx).len());
+        nav.reachable = plx_ui::screen::AxisMask::HORIZONTAL;
+        out.push(nav);
         if self.rows_mode(cx) {
             self.stack.view(&self.rows).groups(cx, out);
         } else {
@@ -412,7 +416,6 @@ impl Screen<YtHost> for BrowseScreen {
         let cx = f.cx;
         // Content
         let feed = cx.views.store.feed(&self.key());
-        ui::text(p, self.section.title(), 420.0, 56.0, 44, ui::WHITE, ui::ALIGN_LEFT, true);
         let src = self.src(cx);
         if self.rows_mode(cx) {
             let mut view = self.stack.view(&self.rows);
@@ -429,6 +432,9 @@ impl Screen<YtHost> for BrowseScreen {
             self.grid.record_stops(f, p, &src);
         }
         // Sidebar
+        // Page title over a header band, after the content: scrolled rows go under it.
+        ui::header_band(p, Rect::new(390.0, 0.0, 1530.0, 118.0));
+        ui::text(p, self.section.title(), 420.0, 30.0, 44, ui::WHITE, ui::ALIGN_LEFT, true);
         // Drawn after the content and opaque: a scrolled shelf's cards slide under it.
         let bg = plx_ui::theme::CLEAR_RGB;
         ui::fill(p, Rect::new(0.0, 0.0, 390.0, 1080.0), 0.0, [bg.0 * 0.65, bg.1 * 0.65, bg.2 * 0.65, 1.0]);

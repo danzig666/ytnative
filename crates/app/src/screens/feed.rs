@@ -193,6 +193,16 @@ impl Screen<YtHost> for FeedScreen {
     fn draw(&mut self, f: &mut DrawFrame<'_, '_, YtHost>) {
         let p = f.painter;
         let cx = f.cx;
+        let src = self.src(cx);
+        if src.cards.is_empty() {
+            common::empty_state(p, cx.views.store.feed(&self.key), Rect::new(112.0, 170.0, 1700.0, 800.0));
+        } else {
+            ui::reset_focused_caption();
+            self.grid.draw(f, p, &src);
+            ui::draw_focused_caption(p, f.measure, 20.0);
+            self.grid.record_stops(f, p, &src);
+        }
+        ui::header_band(p, Rect::new(0.0, 0.0, 1920.0, 150.0));
         ui::text(p, &ui::ellipsize(&self.title(cx), 70), 112.0, 64.0, 46, ui::WHITE, ui::ALIGN_LEFT, true);
         if self.channel().is_some() {
             ui::stop(f, FocusKey { entry: self.entry, elem: SUB_BTN }, SUB_RECT, Rect::new(0.0, 0.0, 1920.0, 1080.0));
@@ -213,15 +223,6 @@ impl Screen<YtHost> for FeedScreen {
             let f = &cx.views.store.search_filters;
             let hint = if params.is_some() && !f.is_default() { format!("{}   \u{25B2} Filters", f.summary()) } else { "\u{25B2} Filters".into() };
             ui::text(p, &hint, 1808.0, 74.0, 26, ui::FAINT, ui::ALIGN_RIGHT, false);
-        }
-        let src = self.src(cx);
-        if src.cards.is_empty() {
-            common::empty_state(p, cx.views.store.feed(&self.key), Rect::new(112.0, 170.0, 1700.0, 800.0));
-        } else {
-            ui::reset_focused_caption();
-            self.grid.draw(f, p, &src);
-            ui::draw_focused_caption(p, f.measure, 20.0);
-            self.grid.record_stops(f, p, &src);
         }
         common::toast(p, cx);
     }
