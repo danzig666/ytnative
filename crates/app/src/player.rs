@@ -358,7 +358,7 @@ fn track_history(video_id: &str, session: &Mutex<Option<yt_core::session::Sessio
 
 static EXT: std::sync::OnceLock<yt_core::ext::Ext> = std::sync::OnceLock::new();
 
-fn ext() -> &'static yt_core::ext::Ext {
+pub fn ext() -> &'static yt_core::ext::Ext {
     EXT.get_or_init(|| {
         let http = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(10)).build().unwrap_or_default();
         yt_core::ext::Ext::new(http)

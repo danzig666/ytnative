@@ -205,6 +205,8 @@ type Done = (Addr, Work);
 /// Results workers post back to the main thread.
 enum Work {
     Toast { msg: String, accounts_changed: bool },
+    /// DeArrow replacements: (video id, title, thumbnail url).
+    Branding(Vec<(String, Option<String>, Option<String>)>),
     Comments { video_id: String, page: Option<yt_core::comments::CommentsPage>, append: bool },
     Page { key: FeedKey, page: yt_core::model::Page, append: bool, failed: Option<String> },
     Suggestions(Vec<String>),
@@ -304,8 +306,10 @@ impl AppRig {
                         self.store.fail(&key, e.clone());
                         out.push((addr, YtMsg::Failed(key, e)));
                     } else {
+                        let before = if append { self.store.cards(&key).len() } else { 0 };
                         self.store.apply(&key, page, append);
                         crate::log(&format!("feed {key:?}: {} cards", self.store.cards(&key).len()));
+                        self.dearrow(addr, &key, before);
                         out.push((addr, YtMsg::Loaded(key)));
                     }
                 }
@@ -334,6 +338,22 @@ impl AppRig {
                     }
                     c.loading = false;
                     out.push((addr, YtMsg::Comments));
+                }
+                Work::Branding(list) => {
+                    for (vid, title, thumb) in list {
+                        for f in self.store.feeds.values_mut() {
+                            for c in f.cards.iter_mut().filter(|c| c.video_id() == Some(vid.as_str())) {
+                                if let Some(t) = &title {
+                                    c.title = t.clone();
+                                }
+                                if let Some(u) = &thumb {
+                                    c.thumb = u.clone();
+                                }
+                            }
+                            f.gen += 1;
+                        }
+                    }
+                    out.push((addr, YtMsg::Acted));
                 }
                 Work::Suggestions(s) => {
                     self.store.suggestions = s;
@@ -381,6 +401,38 @@ impl AppRig {
             }
         }
         self.sb.mark_done(&seg);
+    }
+
+    /// DeArrow: replace clickbait titles / thumbnails of newly loaded cards (when enabled).
+    fn dearrow(&mut self, addr: Addr, key: &FeedKey, from: usize) {
+        let s = &self.store.settings;
+        let (titles, thumbs) = (s.dearrow_titles, s.dearrow_thumbnails);
+        if !titles && !thumbs {
+            return;
+        }
+        let ids: Vec<String> = self.store.cards(key)[from.min(self.store.cards(key).len())..]
+            .iter()
+            .filter_map(|c| c.video_id().map(str::to_string))
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        let done = self.done.clone();
+        let _ = plx_base::task::spawn("dearrow", move || {
+            let mut out = Vec::new();
+            for id in ids {
+                let Ok(Some(b)) = crate::player::ext().branding(&id) else { continue };
+                let title = if titles { b.title() } else { None };
+                let thumb = if thumbs { b.thumbnail_url(&id) } else { None };
+                if title.is_some() || thumb.is_some() {
+                    out.push((id, title, thumb));
+                }
+            }
+            if !out.is_empty() {
+                done.lock().unwrap().push((addr, Work::Branding(out)));
+                plx_machine::present::wake_from_worker();
+            }
+        });
     }
 
     /// OK during an "Ask" segment skips it. Returns true when it did.
