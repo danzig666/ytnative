@@ -23,6 +23,8 @@ const OK_SETTLE_MS: u32 = 400;
 
 enum Step {
     Key(u32, u32),
+    /// A key held down for this long (ms), then released: "okhold" (a card's menu).
+    Hold(u32, u32, u32),
     Move(f32, f32),
     Wheel(f32),
     Click(f32, f32),
@@ -69,6 +71,7 @@ fn parse(tok: &str) -> Option<Step> {
         "left" => Step::Key(80 | ARROW, 0),
         "right" => Step::Key(79 | ARROW, 0),
         "ok" | "enter" => Step::Key(13, 0),
+        "okhold" => Step::Hold(13, 0, 1000),
         "back" => Step::Key(0, 482),
         // Any remote key by its webOS code, e.g. wcode:261 (play/pause).
         t if t.starts_with("wcode:") => Step::Key(0, t[6..].parse().ok()?),
@@ -176,6 +179,12 @@ impl Remote {
                     out.push(crate::input::key_input(sym, wcode, 1, now));
                     self.steps.push_front(Step::Release(sym, wcode));
                     self.not_before = now.ms + KEY_GAP_MS / 2;
+                    break;
+                }
+                Step::Hold(sym, wcode, ms) => {
+                    out.push(crate::input::key_input(sym, wcode, 1, now));
+                    self.steps.push_front(Step::Release(sym, wcode));
+                    self.not_before = now.ms + ms;
                     break;
                 }
                 Step::Release(sym, wcode) => {

@@ -40,6 +40,8 @@ pub enum Cmd {
     Resume,
     Seek(u64),
     Volume(i32),
+    /// Playback speed (1.0 = normal).
+    Rate(f32),
 }
 
 #[derive(Clone)]
@@ -347,6 +349,9 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
     let mut af = LaneFeed::default();
     let mut priming = true;
     let mut user_paused = false;
+    // Playback speed asked for; applied once playing and again after every Play (a reload or a
+    // seek that rebuilds the pipeline starts at normal speed).
+    let mut rate: f32 = 1.0;
     let mut eos_pushed = false;
     let mut seeking: Option<i64> = None;
     let mut gen = 0u64;
@@ -380,6 +385,16 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
                 Cmd::Seek(ms) => seek_to = Some(ms), // coalesce: the last one wins
                 Cmd::Volume(v) => {
                     sys::set_volume(v);
+                }
+                Cmd::Rate(r) => {
+                    rate = r;
+                    if !priming {
+                        let ok = sys::set_play_rate(r);
+                        crate::log(&format!("feed: SetPlayRate {r} -> {ok}"));
+                        if !ok && (r - 1.0).abs() > 0.01 {
+                            sh.status.lock().unwrap().rate_refused = true;
+                        }
+                    }
                 }
             }
         }
@@ -489,7 +504,7 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
         let est = if pres != PRES_NONE {
             Some(pres)
         } else {
-            play_at.filter(|t| t.elapsed() > Duration::from_secs(2)).map(|t| base + t.elapsed().as_nanos() as i64)
+            play_at.filter(|t| t.elapsed() > Duration::from_secs(2)).map(|t| base + (t.elapsed().as_nanos() as f64 * rate as f64) as i64)
         };
         let vlimit = if priming {
             base + BLIND_AHEAD_NS
@@ -525,6 +540,13 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
             if !user_paused {
                 if !sys::play() {
                     crate::log("feed: Play refused");
+                }
+                if (rate - 1.0).abs() > 0.01 {
+                    let ok = sys::set_play_rate(rate);
+                    crate::log(&format!("feed: SetPlayRate {rate} -> {ok}"));
+                    if !ok {
+                        sh.status.lock().unwrap().rate_refused = true;
+                    }
                 }
                 play_at = Some(Instant::now());
             }

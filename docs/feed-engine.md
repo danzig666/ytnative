@@ -125,9 +125,13 @@ per seek for the rest of the session. The picture lands on the keyframe at/befor
 
 **Pause/resume**: `Pause()` / `Play()`; feeding continues under the throttle.
 
-**Rate**: not supported. StarfishMediaAPIs has no playback-rate verb for BUFFERSTREAM; plx gets
-speed by decoding audio to PCM in the app and rescaling PTS, which is out of scope. `set_rate`
-returns false; the host should use engine A when the user changes speed.
+**Rate**: `StarfishMediaAPIs::SetPlayRate(const char*)` with `{"playRate":r,"audioOutput":true}`
+(what webOS's browser sends for a `<video>` playbackRate), applied once playing and again after
+every Play (a reload starts at 1x); the wall-clock position fallback is scaled by the rate. If the
+TV refuses it (plx-native reported BUFFERSTREAM pipelines may), the engine sets
+`Status::rate_refused`; the host then restarts the video at the same position on engine A (which
+has `setPlayRate`) and sends later videos wanting a speed other than 1x there for the rest of the
+run.
 
 **Teardown** (`stop`): the feed thread `Unload`s, waits ≤ 3 s for callback type 23 (unload
 completed), retires the callback gate (waits for in-flight callbacks), and lets the shim destruct

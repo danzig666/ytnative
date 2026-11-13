@@ -629,6 +629,14 @@ impl Settings {
             self.hide_watched_home = true;
             self.hide_watched_subscriptions = true;
         }
+        // Card-menu kinds added later go where the default order has them, not at the end.
+        let defaults: Vec<&str> = crate::screens::menu::CARD_ITEMS.iter().map(|(k, _)| *k).collect();
+        for (i, k) in defaults.iter().enumerate() {
+            if !self.card_menu.iter().any(|x| x == k) {
+                let after = defaults[..i].iter().rev().find_map(|p| self.card_menu.iter().position(|x| x == p));
+                self.card_menu.insert(after.map_or(0, |a| a + 1), k.to_string());
+            }
+        }
         if !has("hide_upcoming_home") && v["hide_upcoming"].as_bool() == Some(true) {
             self.hide_upcoming_home = true;
             self.hide_upcoming_subscriptions = true;

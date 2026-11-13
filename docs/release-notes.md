@@ -1,3 +1,3 @@
-- Fixed: a channel page shows the channel's name as its title instead of "Channel"
-- Fixed: the Subscribe button on a channel page no longer overlaps the first row of videos
-- Fixed: an account whose name was blank (signed in before names were stored) gets its name filled in, on the Accounts page and in the sidebar
+- New: "Play next" in a video's menu (hold OK on a thumbnail): queued videos play in order after the current one, before YouTube's up next; the Next button goes to them too, and "Remove from Play next" takes one out
+- Fixed: playback speed (for example 1.5x) now works with the 4K / VP9 / AV1 engine; if the TV refuses a speed there, the video continues at that speed on the system player
+- Fixed: choosing an item in a menu (for example Save to Watch later) on Home no longer leaves a blank screen

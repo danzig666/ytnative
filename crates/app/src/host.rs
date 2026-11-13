@@ -184,6 +184,8 @@ pub enum YtFx {
     SignInCancel,
     SignOut,
     Toast(String),
+    /// Add the video to "Play next" (or take it out).
+    PlayNext { video_id: String, title: String, add: bool },
 }
 
 pub enum YtMsg {
@@ -329,6 +331,15 @@ pub struct AppRig {
     pub last_key_ms: u32,
     /// The last video a phone started ("no watch history for videos started from the phone").
     pub phone_video: Option<String>,
+    /// Engine B refused a speed change this run: videos wanting a speed other than 1x go to the
+    /// system player.
+    feed_no_rate: bool,
+    /// The video to start again on the system player (refused speed), for the frame loop.
+    pub system_restart: Option<(String, Option<String>)>,
+    /// The speed that restart keeps.
+    restart_rate: Option<f32>,
+    /// The playlist the current video was started with.
+    current_playlist: Option<String>,
     /// "Play without history": asked for the next Play of this video / the one playing so.
     pending_private: Option<String>,
     private_video: Option<String>,
@@ -370,6 +381,10 @@ impl AppRig {
             shown_extras: None,
             pending_start: None,
             pending_rate: None,
+            feed_no_rate: false,
+            system_restart: None,
+            restart_rate: None,
+            current_playlist: None,
             audio_choice: None,
             last_key_ms: 0,
             phone_video: None,
@@ -467,6 +482,19 @@ impl AppRig {
             self.player.set_video_rect(if r == [0, 0, 1920, 1080] { None } else { Some(r) });
         }
         self.player_view = self.player.status.lock().unwrap().clone();
+        // Engine B refused the speed: play this video again on the system player, from here.
+        if self.player_view.rate_refused && self.system_restart.is_none() {
+            self.player.status.lock().unwrap().rate_refused = false;
+            let v = self.player_view.video_id.clone();
+            if !v.is_empty() {
+                crate::log(&format!("speed {}x refused by engine B; restarting {v} on the system player", self.player_view.rate));
+                self.feed_no_rate = true;
+                self.restart_rate = Some(self.player_view.rate);
+                self.pending_start = Some((v.clone(), self.player_view.position_ms));
+                self.system_restart = Some((v, self.current_playlist.clone()));
+                self.store.toast("This speed needs the system player: switching", now_ms);
+            }
+        }
         self.raw_extras = self.player_view.extras.clone();
         self.player_view.extras = self.shown_extras();
         yt_core::ext::sponsorblock::set_alt_server(self.store.settings.sb_alt_server);
@@ -1045,6 +1073,8 @@ impl Rig<YtHost> for AppRig {
             }
             YtFx::Play { video_id, playlist } => {
                 crate::log(&format!("play {video_id} (playlist {playlist:?})"));
+                // A queued video leaves "Play next" once it plays, however it was started.
+                self.store.play_next.retain(|(v, _)| *v != video_id);
                 // Without history: asked for this video, or the same playback starting again
                 // (repeat, another audio track).
                 let again = self.player_view.video_id == video_id && self.player_view.phase != Phase::Idle;
@@ -1083,7 +1113,9 @@ impl Rig<YtHost> for AppRig {
                     _ => None,
                 }
                 .unwrap_or(s.speed);
+                let speed = self.restart_rate.take().unwrap_or(speed);
                 self.pending_rate = ((speed - 1.0).abs() > 0.01).then_some(speed);
+                self.current_playlist = playlist.clone();
                 // Resume: not for short videos (under 5 minutes) or live streams unless allowed.
                 let stored = memory.positions.peek(&video_id).copied();
                 let duration_secs = stored.map(|p| p.duration).filter(|d| *d > 0).or_else(|| self.store.card_duration_ms(&video_id).map(|ms| ms / 1000));
@@ -1108,7 +1140,8 @@ impl Rig<YtHost> for AppRig {
                     let mut fp = crate::feed::Prefs::new(s.max_height as u32, codec);
                     fp.allow_hdr = s.hdr;
                     self.player.feed_prefs = Some(fp);
-                    self.player.prefer_feed = s.engine == "auto";
+                    // A speed other than 1x on a TV whose engine B refused one: the system player.
+                    self.player.prefer_feed = s.engine == "auto" && !(self.feed_no_rate && (speed - 1.0).abs() > 0.01);
                 }
                 self.player.start(video_id, self.session.clone(), prefs, extras, start);
             }
@@ -1250,6 +1283,17 @@ impl Rig<YtHost> for AppRig {
                 });
             }
             YtFx::Toast(m) => self.store.toast(m, self.now_ms),
+            YtFx::PlayNext { video_id, title, add } => {
+                self.store.play_next.retain(|(v, _)| *v != video_id);
+                let msg = if add {
+                    self.store.play_next.push((video_id, title));
+                    let n = self.store.play_next.len();
+                    if n == 1 { crate::i18n::tr("Plays next").to_string() } else { crate::i18n::tr("Plays next ({} in the queue)").replace("{}", &n.to_string()) }
+                } else {
+                    crate::i18n::tr("Removed from Play next").to_string()
+                };
+                self.store.toast(msg, self.now_ms);
+            }
             YtFx::SetQueue(q, shorts) => {
                 self.store.queue = q;
                 self.store.queue_shorts = shorts;

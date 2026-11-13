@@ -223,6 +223,10 @@ fn go_to(video_id: String, playlist: Option<String>, fx: &mut Effects<'_, YtHost
 impl PlayerScreen {
     /// Next: the playlist's / YouTube's up-next video, else the next one in the opened list.
     fn next(&mut self, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
+        if let Some(v) = queued_next(cx, &self.video_id) {
+            go_to(v, None, fx);
+            return;
+        }
         match next_video(cx, &self.video_id, false) {
             Some((v, pl)) => go_to(v, pl.or(self.playlist.clone()), fx),
             None => self.step_queue(1, cx, fx),
@@ -269,6 +273,13 @@ impl PlayerScreen {
         if store.queue_shorts && s.loop_shorts && store.queue.contains(&self.video_id) {
             fx.push(Fx::App(replay));
             return;
+        }
+        // "Play next" goes first (unless this video repeats).
+        if s.playback_mode != PlaybackMode::RepeatOne {
+            if let Some(v) = queued_next(cx, &self.video_id) {
+                go_to(v, None, fx);
+                return;
+            }
         }
         let target = match s.playback_mode {
             PlaybackMode::RepeatOne => {
@@ -1593,6 +1604,11 @@ fn draw_suggestions_at(p: plx_ui::Painter, m: &dyn plx_machine::machine::Measure
 /// The playing video has chapters.
 fn has_chapters(cx: &Cx<'_, YtHost>) -> bool {
     cx.views.player.extras.watch.as_ref().is_some_and(|w| !w.chapters.is_empty())
+}
+
+/// The first video in "Play next" other than the one playing.
+fn queued_next(cx: &Cx<'_, YtHost>, current: &str) -> Option<String> {
+    cx.views.store.play_next.iter().map(|(v, _)| v).find(|v| v.as_str() != current).cloned()
 }
 
 fn next_video(cx: &Cx<'_, YtHost>, current: &str, repeat_list: bool) -> Option<(String, Option<String>)> {

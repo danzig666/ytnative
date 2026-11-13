@@ -27,6 +27,8 @@ enum Act {
     UnblockChannel(String),
     /// Play (video id) from the start and / or without watch history.
     PlayWith(String, bool, bool),
+    /// Add to / remove from "Play next": (video id, title, add).
+    PlayNext(String, String, bool),
     Pin(String, String, Option<String>),
     AddToGroup(Option<String>, String, String, Option<String>),
     Unpin(String),
@@ -86,10 +88,11 @@ const SUB_STYLES: &[&str] = &["outline", "shadow", "box"];
 const SUB_FONTS: &[&str] = &["default", "sans", "serif", "mono", "roboto"];
 
 /// Card-menu item kinds, in the default order, with their settings labels.
-pub const CARD_ITEMS: [(&str, &str); 14] = [
+pub const CARD_ITEMS: [(&str, &str); 15] = [
     ("play", "Card menu: Play"),
     ("play_start", "Card menu: Play from the start"),
     ("play_private", "Card menu: Play without history"),
+    ("play_next", "Card menu: Play next"),
     ("open", "Card menu: Open channel / playlist"),
     ("groups", "Card menu: Channel groups"),
     ("pin", "Card menu: Pin to sidebar"),
@@ -130,6 +133,11 @@ impl MenuScreen {
                 tagged.push((kind, "Play".to_string(), Act::Play(v.to_string())));
                 tagged.push(("play_start", "Play from the start".to_string(), Act::PlayWith(v.to_string(), true, false)));
                 tagged.push(("play_private", "Play without history".to_string(), Act::PlayWith(v.to_string(), false, true)));
+                if cx.views.store.play_next.iter().any(|(q, _)| q == v) {
+                    tagged.push(("play_next", "Remove from Play next".to_string(), Act::PlayNext(v.to_string(), card.title.clone(), false)));
+                } else {
+                    tagged.push(("play_next", "Play next".to_string(), Act::PlayNext(v.to_string(), card.title.clone(), true)));
+                }
                 if !cx.views.store.settings.child_mode {
                     tagged.push(("comments", "Comments".to_string(), Act::Comments(v.to_string())));
                 }
@@ -404,43 +412,43 @@ impl MenuScreen {
     fn run(&self, act: &Act, dir: i32, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
         match act {
             Act::Play(v) => {
-                fx.push(Fx::Nav(NavOp::Pop));
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
                 fx.push(Fx::Nav(NavOp::Push(YtArg::Player { video_id: v.clone(), playlist: None })));
             }
             Act::PlayWith(v, from_start, no_history) => {
                 fx.push(Fx::App(YtFx::PlayOptions { video_id: v.clone(), from_start: *from_start, no_history: *no_history }));
-                fx.push(Fx::Nav(NavOp::Pop));
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
                 fx.push(Fx::Nav(NavOp::Push(YtArg::Player { video_id: v.clone(), playlist: None })));
             }
             Act::UnblockChannel(ch) => {
                 let ch = ch.clone();
                 fx.push(Fx::App(YtFx::Toast(crate::i18n::tr("{} unblocked").replace("{}", &ch))));
                 fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| s.blocked_channels.retain(|c| *c != ch)))));
-                fx.push(Fx::Nav(NavOp::Pop));
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
             }
             Act::OpenChannel(id) | Act::OpenPlaylist(id) => {
-                fx.push(Fx::Nav(NavOp::Pop));
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
                 fx.push(Fx::Nav(NavOp::Push(YtArg::Feed(FeedKey::Browse { id: id.clone(), params: None }))));
             }
             Act::SearchFor(q) => {
-                fx.push(Fx::Nav(NavOp::Pop));
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
                 fx.push(Fx::Nav(NavOp::Push(YtArg::Feed(FeedKey::Search { query: q.clone(), params: None }))));
             }
             Act::AddToGroup(g, ch, t, icon) => {
                 fx.push(Fx::App(YtFx::Act(UserAction::AddToGroup { group_id: g.clone(), channel_id: ch.clone(), title: t.clone(), icon: icon.clone() })));
-                fx.push(Fx::Nav(NavOp::Pop));
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
             }
             Act::Pin(t, id, p) => {
                 let (t, id, p) = (t.clone(), id.clone(), p.clone());
                 fx.push(Fx::App(YtFx::Toast(format!("Pinned {t}"))));
                 fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| s.pinned.push((t, id, p))))));
-                fx.push(Fx::Nav(NavOp::Pop));
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
             }
             Act::Unpin(id) => {
                 let id = id.clone();
                 fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| s.pinned.retain(|p| p.1 != id)))));
                 fx.push(Fx::App(YtFx::Toast("Unpinned".into())));
-                fx.push(Fx::Nav(NavOp::Pop));
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
             }
             Act::BlockChannel(ch) => {
                 let ch = ch.clone();
@@ -450,7 +458,7 @@ impl MenuScreen {
                         s.blocked_channels.push(ch);
                     }
                 }))));
-                fx.push(Fx::Nav(NavOp::Pop));
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
             }
             Act::Speed => {
                 let cur = if cx.views.player.rate > 0.0 { cx.views.player.rate } else { 1.0 };
@@ -522,27 +530,31 @@ impl MenuScreen {
             }
             Act::User(a) => {
                 fx.push(Fx::App(YtFx::Act(a.clone())));
-                fx.push(Fx::Nav(NavOp::Pop));
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
             }
             Act::PickPlaylist(v, t) => {
                 fx.push(Fx::App(YtFx::LoadPlaylists(v.clone())));
-                fx.push(Fx::Nav(NavOp::Pop));
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
                 fx.push(Fx::Nav(NavOp::Present(YtArg::PlaylistPicker(v.clone(), t.clone()))));
             }
             Act::TogglePlaylist(pl, v, add) => {
                 fx.push(Fx::App(YtFx::Act(UserAction::Playlist { playlist_id: pl.clone(), video_id: v.clone(), add: *add })));
-                fx.push(Fx::Nav(NavOp::Pop));
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
             }
             Act::NewPlaylist(t, v) => {
                 fx.push(Fx::App(YtFx::Act(UserAction::NewPlaylist { title: t.clone(), video_id: v.clone() })));
-                fx.push(Fx::Nav(NavOp::Pop));
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
             }
             Act::Info => {
-                fx.push(Fx::Nav(NavOp::Pop));
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
                 fx.push(Fx::Nav(NavOp::Push(YtArg::Info)));
             }
+            Act::PlayNext(v, title, add) => {
+                fx.push(Fx::App(YtFx::PlayNext { video_id: v.clone(), title: title.clone(), add: *add }));
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
+            }
             Act::Comments(v) => {
-                fx.push(Fx::Nav(NavOp::Pop));
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
                 fx.push(Fx::Nav(NavOp::Present(YtArg::Comments(v.clone()))));
             }
             Act::Filter(i) => {
@@ -567,10 +579,10 @@ impl MenuScreen {
             }
             Act::ApplyFilters(q) => {
                 let params = cx.views.store.search_filters.params();
-                fx.push(Fx::Nav(NavOp::Pop));
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
                 fx.push(Fx::Nav(NavOp::Replace(YtArg::Feed(FeedKey::Search { query: q.clone(), params }))));
             }
-            Act::Close => fx.push(Fx::Nav(NavOp::Pop)),
+            Act::Close => fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry))),
         }
         fx.invalidate(plx_machine::present::Provenance::Input);
     }

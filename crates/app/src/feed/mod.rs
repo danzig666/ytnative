@@ -219,14 +219,15 @@ impl FeedPlayer {
         self.seek_to(to as u64);
     }
 
-    /// Playback speed is not supported by engine B: StarfishMediaAPIs has no rate verb for a
-    /// BUFFERSTREAM pipeline (plx-native reaches speed by decoding audio to PCM in-app and
-    /// rescaling PTS, which is out of scope here). Returns false; use engine A for speed changes.
+    /// Playback speed, through StarfishMediaAPIs::SetPlayRate (re-applied by the engine after
+    /// every reload).
     pub fn set_rate(&mut self, rate: f32) -> bool {
-        if (rate - 1.0).abs() > f32::EPSILON {
-            crate::log(&format!("feed: playback rate {rate} not supported by engine B"));
+        if !self.active() {
+            return false;
         }
-        false
+        self.status.lock().unwrap().rate = rate;
+        self.send(Cmd::Rate(rate.clamp(0.25, 2.0)));
+        true
     }
 
     /// This pipeline's volume, 0..100.

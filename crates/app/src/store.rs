@@ -201,6 +201,9 @@ pub struct Store {
     /// they are Shorts (Up/Down then switch videos, like YouTube's Shorts player).
     pub queue: Vec<String>,
     pub queue_shorts: bool,
+    /// "Play next": videos (id, title) the viewer queued, played in order before YouTube's up
+    /// next. For this run only.
+    pub play_next: Vec<(String, String)>,
     /// Filters of the last search (the filters panel edits these).
     pub search_filters: yt_core::search_filters::Filters,
     pub comments: HashMap<String, Comments>,

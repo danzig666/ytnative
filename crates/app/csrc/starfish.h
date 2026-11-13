@@ -25,6 +25,7 @@ int  sf_blocked(void);
 int  sf_is_load_completed(void);
 int  sf_play(void);
 int  sf_pause(void);
+int  sf_set_play_rate(double rate); /* SetPlayRate {"playRate":r,"audioOutput":true}; library bool */
 int  sf_set_volume(int volume);   /* 0..100 (setVolume {"volume":n}); library bool */
 int  sf_flush(void);
 int  sf_seek_ms(long long ms);    /* public StarfishMediaAPIs::Seek(millis): flushes + re-anchors at ms; 0 = refused */

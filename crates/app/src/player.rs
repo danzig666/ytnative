@@ -103,6 +103,9 @@ pub struct Status {
     pub audio_track: Option<String>,
     pub zoom: Zoom,
     pub rate: f32,
+    /// Engine B: the TV refused a speed change (SetPlayRate), so this video needs the system
+    /// player for it.
+    pub rate_refused: bool,
     /// A live stream (engine B): `position_ms` is stream time, `live_edge_ms` the newest media.
     pub live: bool,
     pub live_edge_ms: u64,
@@ -362,7 +365,7 @@ impl Player {
     /// Playback speed (0.25..2.0) through uMediaServer's setPlayRate.
     pub fn set_rate(&mut self, rate: f32) {
         if self.feed.active() {
-            // Starfish has no play-rate call in this mode.
+            self.status.lock().unwrap().rate = rate;
             self.feed.set_rate(rate);
             return;
         }

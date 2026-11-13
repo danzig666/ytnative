@@ -46,6 +46,7 @@ static void sf_log(const char *fmt, ...) {
 #define SYM_FLUSH     "_ZN17StarfishMediaAPIs5flushEv"
 #define SYM_SEEK      "_ZN17StarfishMediaAPIs4SeekEPKc"
 #define SYM_VOLUME    "_ZN17StarfishMediaAPIs9setVolumeEPKc"
+#define SYM_PLAYRATE  "_ZN17StarfishMediaAPIs11SetPlayRateEPKc"
 #define SYM_EOS       "_ZN17StarfishMediaAPIs7pushEOSEv"
 #define SYM_FEED_CXX11 "_ZN17StarfishMediaAPIs4FeedB5cxx11EPKc"
 #define SYM_FEED_COW  "_ZN17StarfishMediaAPIs4FeedEPKc"
@@ -72,7 +73,7 @@ static struct {
     SMP_VoidFn dtor;
     SMP_IntFn play, pause, unload, is_loaded, flush, push_eos;
     SMP_VoidFn foreground;
-    SMP_StrArgFn seek, set_volume;
+    SMP_StrArgFn seek, set_volume, set_play_rate;
     SMP_LoadWithContextFn load_ctx;
     SMP_FeedFn feed;
     CowStringDtorFn feed_reply_dtor;
@@ -114,6 +115,7 @@ static void sf_resolve_once(void) {
     R(foreground, SMP_VoidFn, SYM_FOREGROUND);
     R(seek, SMP_StrArgFn, SYM_SEEK);
     R(set_volume, SMP_StrArgFn, SYM_VOLUME);
+    R(set_play_rate, SMP_StrArgFn, SYM_PLAYRATE);
     R(load_ctx, SMP_LoadWithContextFn, SMP_LOAD_WITH_CONTEXT_SYMBOL);
     R(real_hook, SMP_CallbackHook, SMP_CALLBACK_HOOK_SYMBOL);
 #undef R
@@ -312,6 +314,15 @@ int sf_set_volume(int volume) {
     char json[32];
     snprintf(json, sizeof json, "{\"volume\":%d}", volume);
     return L.set_volume(o, json) & 0xff;
+}
+/* Playback speed: SetPlayRate {"playRate":r,"audioOutput":true} (what webOS's browser sends for a
+ * <video> playbackRate; audio keeps playing, pitch-corrected by the pipeline). */
+int sf_set_play_rate(double rate) {
+    void *o = sf_ready_object();
+    if (!o || !L.set_play_rate || !(rate > 0.0)) return 0;
+    char json[64];
+    snprintf(json, sizeof json, "{\"playRate\":%.2f,\"audioOutput\":true}", rate);
+    return L.set_play_rate(o, json) & 0xff;
 }
 int sf_flush(void) {
     void *o = sf_ready_object();

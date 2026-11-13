@@ -386,3 +386,9 @@ Description	Leírás	Beschreibung	Descripción	Description	Описание
 Members only	Csak tagoknak	Nur für Mitglieder	Solo para miembros	Réservé aux membres	Только для спонсоров
 Can't play this video	Nem lehet lejátszani ezt a videót	Dieses Video kann nicht abgespielt werden	No se puede reproducir este vídeo	Impossible de lire cette vidéo	Не удаётся воспроизвести это видео
 Only this channel's members can watch it.	Csak a csatorna tagjai nézhetik meg.	Nur Mitglieder dieses Kanals können es ansehen.	Solo los miembros de este canal pueden verlo.	Seuls les membres de cette chaîne peuvent la regarder.	Смотреть его могут только спонсоры этого канала.
+This speed needs the system player: switching	Ehhez a sebességhez a rendszer lejátszója kell: váltás	Diese Geschwindigkeit braucht den Systemplayer: Wechsel	Esta velocidad necesita el reproductor del sistema: cambiando	Cette vitesse demande le lecteur du système : changement	Для этой скорости нужен системный плеер: переключение
+Remove from Play next	Eltávolítás a következők közül	Aus „Als Nächstes“ entfernen	Quitar de la cola	Retirer de la file	Убрать из очереди
+Plays next	Ez jön következőnek	Wird als Nächstes abgespielt	Se reproducirá a continuación	Sera lue ensuite	Будет воспроизведено следующим
+Plays next ({} in the queue)	Következőnek jön ({} a sorban)	Als Nächstes ({} in der Warteschlange)	A continuación ({} en la cola)	Lue ensuite ({} dans la file)	Следующим ({} в очереди)
+Removed from Play next	Eltávolítva a következők közül	Aus „Als Nächstes“ entfernt	Quitado de la cola	Retiré de la file	Убрано из очереди
+Card menu: Play next	Kártyamenü: Lejátszás következőként	Kartenmenü: Als Nächstes abspielen	Menú de tarjeta: Reproducir a continuación	Menu de la carte : Lire ensuite	Меню карточки: Воспроизвести следующим

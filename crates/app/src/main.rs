@@ -413,6 +413,13 @@ fn main() {
                 last_input = now;
             }
 
+            // A speed engine B refused: the same video again, on the system player (the player
+            // screen is replaced, so its Mount starts the playback).
+            if let Some((video_id, playlist)) = rig.system_restart.take() {
+                if d.top_screen().map(|s| s.name()) == Some("player") {
+                    d.request(MachineId::Nav, NavOp::Replace(YtArg::Player { video_id, playlist }));
+                }
+            }
             if let Some(l) = lounge.as_mut() {
                 rig.store.lounge_code = l.code.lock().unwrap().clone();
                 let top = d.top_screen().map(|s| s.name());

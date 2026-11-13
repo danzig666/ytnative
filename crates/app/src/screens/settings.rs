@@ -364,6 +364,7 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
                 card_item!(11),
                 card_item!(12),
                 card_item!(13),
+                card_item!(14),
             ]);
             v
         }

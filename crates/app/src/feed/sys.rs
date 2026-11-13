@@ -128,6 +128,7 @@ mod ffi {
         pub fn sf_play() -> c_int;
         pub fn sf_pause() -> c_int;
         pub fn sf_set_volume(v: c_int) -> c_int;
+        pub fn sf_set_play_rate(rate: f64) -> c_int;
         pub fn sf_seek_ms(ms: i64) -> c_int;
         pub fn sf_push_eos() -> c_int;
         pub fn sf_feed(p: *const u8, size: u32, pts: i64, es: c_int) -> c_char;
@@ -152,6 +153,7 @@ mod ffi {
     pub unsafe fn sf_play() -> c_int { 0 }
     pub unsafe fn sf_pause() -> c_int { 0 }
     pub unsafe fn sf_set_volume(_: c_int) -> c_int { 0 }
+    pub unsafe fn sf_set_play_rate(_: f64) -> c_int { 0 }
     pub unsafe fn sf_seek_ms(_: i64) -> c_int { 0 }
     pub unsafe fn sf_push_eos() -> c_int { 0 }
     pub unsafe fn sf_feed(_: *const u8, _: u32, _: i64, _: c_int) -> c_char { b'e' as c_char }
@@ -190,6 +192,9 @@ pub fn pause() -> bool {
 }
 pub fn set_volume(v: i32) -> bool {
     unsafe { ffi::sf_set_volume(v) != 0 }
+}
+pub fn set_play_rate(rate: f32) -> bool {
+    unsafe { ffi::sf_set_play_rate(rate as f64) != 0 }
 }
 pub fn seek_ms(ms: i64) -> bool {
     unsafe { ffi::sf_seek_ms(ms) != 0 }
