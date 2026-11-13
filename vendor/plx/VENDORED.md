@@ -54,3 +54,5 @@ The ytnative simulator (`cargo xtask sim`, `crates/app/src/sim/`) builds these c
   reordering for Indic and South-East Asian scripts), with their own `FACES_SCRIPT` slots; without
   the library they stay on SDL2_ttf. The shaping library itself is built from plx-native's
   `src/ass_text.c` in `native/textshape/` against the TV's FreeType/HarfBuzz/FriBidi.
+- ui/src/screen.rs: `DrawFrame::drop_stops_since(n)` drops the stops registered after the first `n`
+  (ytnative's browse screen: cards behind the open sidebar take no pointer hover).

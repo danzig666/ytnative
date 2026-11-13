@@ -316,7 +316,9 @@ impl Machine<YtHost> for BrowseScreen {
         }
         if let ScreenEvent::Input(plx_machine::machine::InputEvent { kind: plx_machine::machine::InputKind::Click { x, .. }, .. }) = ev {
             if self.nav_open.get() && *x > NAV_W {
+                // A click beside the open sidebar closes it, back to the card focus left.
                 self.nav_open.set(false);
+                self.focus_req.set(Some(self.content_last.get()));
                 fx.invalidate(plx_machine::present::Provenance::Input);
                 return Handled::Yes;
             }
@@ -565,6 +567,9 @@ impl Screen<YtHost> for BrowseScreen {
         let src = self.src(cx);
         let on_nav = cx.focus.current.is_some_and(|k| k.entry == self.entry && k.elem >= NAV_BASE);
         ui::PAGE_SCROLLS.store(self.rows_mode(cx) && !(self.nav_open.get() && on_nav), std::sync::atomic::Ordering::Relaxed);
+        // While the sidebar is open the cards behind it take no pointer: hovering one would move
+        // focus there and straight back to the sidebar, the card popping in and out.
+        let stops_before = f.stops().len();
         if self.rows_mode(cx) {
             let mut view = self.stack.view(&self.rows);
             ui::reset_focused_caption();
@@ -583,6 +588,9 @@ impl Screen<YtHost> for BrowseScreen {
             if !self.nav_open.get() {
                 self.grid.record_stops(f, p, &src);
             }
+        }
+        if self.nav_open.get() {
+            f.drop_stops_since(stops_before);
         }
         // Sidebar
         // Page title over a header band, after the content: scrolled rows go under it.

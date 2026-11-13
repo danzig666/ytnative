@@ -38,7 +38,8 @@ Root is not required.
 
 ### Requirements
 
-- An LG TV with webOS 5 or newer (developed and tested on an LG C3, webOS 23 / 10.2.2).
+- An LG TV with webOS 5 or newer. Tested on an LG C3 (OLED65C3, webOS 23 / 10.2.2), where it is developed,
+  and an LG BX (OLED55BX, webOS 5.5).
 - Any GPU: the app links only the generic `libGLESv2`, loads EGL at runtime and falls back where
   an extension or shader precision is missing (developed on Mali; other GPUs are untested).
 - A Google account is optional: sign in with a code from **Settings > Account** to get your Home,

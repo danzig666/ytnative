@@ -1,1 +1,3 @@
-- Fixed: the package installs on webOS 5 TVs (it was refused with "ipk verified failed"): the package size is now given in bytes and the files carry a real date
+- Fixed: with the sidebar open, moving the pointer over a thumbnail behind it no longer makes the thumbnail grow and shrink rapidly
+- Changed: clicking beside the open sidebar closes it and goes back to the thumbnail you were on
+- Changed: the README lists the LG BX (webOS 5.5) as a tested TV

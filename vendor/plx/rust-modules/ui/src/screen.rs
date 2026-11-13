@@ -1056,6 +1056,12 @@ impl<'a, 'views, H: Host> DrawFrame<'a, 'views, H> {
         &self.stops
     }
 
+    /// Drops the stops registered after the first `n` (content drawn under a panel that owns the
+    /// pointer: it stays visible but must not take hover or clicks).
+    pub fn drop_stops_since(&mut self, n: usize) {
+        self.stops.truncate(n);
+    }
+
     pub fn into_stops(self) -> Vec<Stop<H::Elem>> {
         self.stops
     }
