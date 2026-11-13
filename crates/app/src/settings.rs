@@ -10,16 +10,257 @@ pub enum Codec {
     Av1,
 }
 
+/// What happens when a video ends (SmartTube's playback modes).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Repeat {
-    /// Play the next suggestion when a video ends.
-    Autoplay,
-    /// Stop at the end.
-    Off,
+pub enum PlaybackMode {
+    /// YouTube's up next (the playlist's next item first).
+    PlayNext,
     /// Repeat the current video.
-    One,
-    /// Repeat the current playlist / queue.
-    List,
+    RepeatOne,
+    /// The list (playlist / opened list) to its end, then stop.
+    ListOnce,
+    /// The list, starting over after its last item.
+    ListRepeat,
+    /// A random item of the list.
+    Shuffle,
+    /// The list backwards; stop at its first item.
+    Reverse,
+    /// Pause at the end and show the controls.
+    PauseEach,
+    /// Leave the player.
+    CloseEach,
+}
+
+impl PlaybackMode {
+    pub const ALL: &'static [PlaybackMode] = &[
+        PlaybackMode::PlayNext,
+        PlaybackMode::RepeatOne,
+        PlaybackMode::ListOnce,
+        PlaybackMode::ListRepeat,
+        PlaybackMode::Shuffle,
+        PlaybackMode::Reverse,
+        PlaybackMode::PauseEach,
+        PlaybackMode::CloseEach,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PlaybackMode::PlayNext => "Play next",
+            PlaybackMode::RepeatOne => "Repeat this video",
+            PlaybackMode::ListOnce => "Play the list then stop",
+            PlaybackMode::ListRepeat => "Repeat the list",
+            PlaybackMode::Shuffle => "Shuffle the list",
+            PlaybackMode::Reverse => "Play the list in reverse",
+            PlaybackMode::PauseEach => "Pause after each video",
+            PlaybackMode::CloseEach => "Close the player after each video",
+        }
+    }
+}
+
+/// Which speed a video starts at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RememberSpeed {
+    /// Always the default speed.
+    Off,
+    /// The last chosen speed becomes the default.
+    All,
+    PerVideo,
+    PerChannel,
+}
+
+impl RememberSpeed {
+    pub const ALL: &'static [RememberSpeed] = &[RememberSpeed::Off, RememberSpeed::All, RememberSpeed::PerVideo, RememberSpeed::PerChannel];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            RememberSpeed::Off => "Off",
+            RememberSpeed::All => "Same for all videos",
+            RememberSpeed::PerVideo => "Per video",
+            RememberSpeed::PerChannel => "Per channel",
+        }
+    }
+}
+
+/// What OK does while a video plays with the controls hidden.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OkAction {
+    Controls,
+    ControlsAndPause,
+    Pause,
+    ToggleSpeed,
+}
+
+impl OkAction {
+    pub const ALL: &'static [OkAction] = &[OkAction::Controls, OkAction::ControlsAndPause, OkAction::Pause, OkAction::ToggleSpeed];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            OkAction::Controls => "Show controls only",
+            OkAction::ControlsAndPause => "Show controls and pause",
+            OkAction::Pause => "Pause only",
+            OkAction::ToggleSpeed => "Toggle speed",
+        }
+    }
+}
+
+/// The time shown at the right of the seek bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ControlsTime {
+    Remaining,
+    /// The wall-clock time the video ends.
+    Ending,
+    Off,
+}
+
+impl ControlsTime {
+    pub const ALL: &'static [ControlsTime] = &[ControlsTime::Remaining, ControlsTime::Ending, ControlsTime::Off];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ControlsTime::Remaining => "Remaining time",
+            ControlsTime::Ending => "Ending time",
+            ControlsTime::Off => "Off",
+        }
+    }
+}
+
+/// Playback speeds offered (SmartTube's list).
+pub const SPEEDS: &[f32] = &[
+    0.25, 0.5, 0.75, 0.8, 0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.15, 1.2, 1.25, 1.3, 1.4, 1.5, 1.6, 1.7, 1.75, 1.8, 1.9, 2.0, 2.25, 2.5, 2.75, 3.0,
+    3.25, 3.5, 3.75, 4.0,
+];
+
+/// Thumbnail frame choices ("default" = YouTube's / the uploader's picture).
+pub const THUMBNAIL_FRAMES: &[&str] = &["default", "start", "middle", "end"];
+
+pub fn thumbnail_frame_label(k: &str) -> &'static str {
+    match k {
+        "start" => "From the start",
+        "middle" => "From the middle",
+        "end" => "From the end",
+        _ => "YouTube's default",
+    }
+}
+
+/// A thumbnail-frame setting as DeArrow's frame choice.
+pub fn thumbnail_frame(k: &str) -> yt_core::ext::dearrow::FallbackFrame {
+    use yt_core::ext::dearrow::FallbackFrame as F;
+    match k {
+        "start" => F::Start,
+        "middle" => F::Middle,
+        "end" => F::End,
+        _ => F::Default,
+    }
+}
+
+/// Content countries offered (region code, the country's own name); "" = automatic.
+pub const COUNTRIES: &[(&str, &str)] = &[
+    ("", "Automatic"),
+    ("US", "United States"),
+    ("GB", "United Kingdom"),
+    ("CA", "Canada"),
+    ("AU", "Australia"),
+    ("NZ", "New Zealand"),
+    ("IE", "Ireland"),
+    ("HU", "Magyarország"),
+    ("DE", "Deutschland"),
+    ("AT", "Österreich"),
+    ("CH", "Schweiz"),
+    ("FR", "France"),
+    ("BE", "Belgique"),
+    ("NL", "Nederland"),
+    ("LU", "Luxembourg"),
+    ("ES", "España"),
+    ("PT", "Portugal"),
+    ("IT", "Italia"),
+    ("PL", "Polska"),
+    ("CZ", "Česko"),
+    ("SK", "Slovensko"),
+    ("SI", "Slovenija"),
+    ("HR", "Hrvatska"),
+    ("RS", "Србија"),
+    ("BA", "Bosna i Hercegovina"),
+    ("RO", "România"),
+    ("BG", "България"),
+    ("GR", "Ελλάδα"),
+    ("TR", "Türkiye"),
+    ("UA", "Україна"),
+    ("RU", "Россия"),
+    ("SE", "Sverige"),
+    ("NO", "Norge"),
+    ("DK", "Danmark"),
+    ("FI", "Suomi"),
+    ("IS", "Ísland"),
+    ("EE", "Eesti"),
+    ("LV", "Latvija"),
+    ("LT", "Lietuva"),
+    ("IL", "ישראל"),
+    ("AE", "الإمارات"),
+    ("SA", "السعودية"),
+    ("EG", "مصر"),
+    ("IN", "भारत"),
+    ("PK", "پاکستان"),
+    ("ID", "Indonesia"),
+    ("TH", "ประเทศไทย"),
+    ("VN", "Việt Nam"),
+    ("PH", "Pilipinas"),
+    ("MY", "Malaysia"),
+    ("SG", "Singapore"),
+    ("JP", "日本"),
+    ("KR", "대한민국"),
+    ("TW", "臺灣"),
+    ("HK", "香港"),
+    ("MX", "México"),
+    ("BR", "Brasil"),
+    ("AR", "Argentina"),
+    ("CL", "Chile"),
+    ("CO", "Colombia"),
+    ("PE", "Perú"),
+    ("ZA", "South Africa"),
+    ("NG", "Nigeria"),
+    ("KE", "Kenya"),
+];
+
+/// A content country's name ("" = "Automatic", translated).
+pub fn country_name(code: &str) -> String {
+    match COUNTRIES.iter().find(|(c, _)| c.eq_ignore_ascii_case(code)) {
+        Some(("", n)) => crate::i18n::tr(n).to_string(),
+        Some((_, n)) => n.to_string(),
+        None => code.to_string(),
+    }
+}
+
+/// Index of the listed speed closest to `r`.
+pub fn speed_index(r: f32) -> usize {
+    let r = if r > 0.0 { r } else { 1.0 };
+    (0..SPEEDS.len()).min_by(|a, b| (SPEEDS[*a] - r).abs().total_cmp(&(SPEEDS[*b] - r).abs())).unwrap_or(7)
+}
+
+/// Sleep timer choices in minutes: off, then half an hour to ten hours in half-hour steps.
+pub const SLEEP_MINS: &[u32] = &[0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330, 360, 390, 420, 450, 480, 510, 540, 570, 600];
+
+/// "Off" / "1.5 hours" (translated).
+pub fn sleep_label(mins: u32) -> String {
+    use crate::i18n::tr;
+    if mins == 0 {
+        return tr("Off").to_string();
+    }
+    let h = mins as f32 / 60.0;
+    format!("{h} {}", tr(if mins == 60 { "hour" } else { "hours" }))
+}
+
+/// "Off" / "0.5 seconds" for a duration in milliseconds (translated).
+pub fn ms_label(ms: u32) -> String {
+    if ms == 0 {
+        return crate::i18n::tr("Off").to_string();
+    }
+    let v = ms as f32 / 1000.0;
+    format!("{v} {}", crate::i18n::tr(if ms == 1000 { "second" } else { "seconds" }))
+}
+
+/// "5 seconds" (translated).
+pub fn secs_label(n: u32) -> String {
+    format!("{n} {}", crate::i18n::tr(if n == 1 { "second" } else { "seconds" }))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,16 +281,37 @@ pub struct Settings {
     /// Play HDR (PQ/HLG) formats when a video has them (engine B).
     pub hdr: bool,
     pub speed: f32,
-    pub remember_speed_per_channel: bool,
+    pub remember_speed: RememberSpeed,
+    /// Speeds remembered per channel (by channel name).
     pub speed_by_channel: std::collections::HashMap<String, f32>,
+    /// The speed OK switches to ("Toggle speed"): the last speed other than 1.0 chosen.
+    pub toggle_speed: f32,
     pub seek_step_secs: u32,
-    pub repeat: Repeat,
+    pub playback_mode: PlaybackMode,
     pub resume_playback: bool,
+    /// Resume videos shorter than 5 minutes too (off: they start over).
+    pub resume_short_videos: bool,
+    /// Resume live streams where they were left.
+    pub resume_live: bool,
+    /// Hide the controls after this many seconds (0 = never).
     pub hud_timeout_secs: u32,
     pub show_clock: bool,
     /// A clock at the top right of the video lists.
     pub clock_on_pages: bool,
-    pub show_ending_time: bool,
+    pub controls_time: ControlsTime,
+    pub ok_action: OkAction,
+    /// Pause after this many minutes without a key press (0 = off).
+    pub sleep_timer_mins: u32,
+    /// In a Shorts list, a Short repeats at its end instead of moving on.
+    pub loop_shorts: bool,
+    /// Number keys 0..9 seek to 0..90 % of the video.
+    pub seek_number_keys: bool,
+    /// With the controls hidden, BACK has to be pressed twice to leave the player.
+    pub double_back_exit: bool,
+    /// Show the controls when the next video starts by itself (or with next / previous).
+    pub hud_on_next_video: bool,
+    /// Preferred audio language code ("" = the video's original track).
+    pub audio_language: String,
     // Subtitles
     pub subtitles: bool,
     pub subtitle_language: String,
@@ -66,6 +328,9 @@ pub struct Settings {
     pub subtitle_bold: bool,
     /// Background opacity 0..=100.
     pub subtitle_background: u32,
+    /// Subtitles switched on / off or a language chosen while watching a channel are remembered
+    /// for that channel.
+    pub subtitles_per_channel: bool,
     // SponsorBlock / DeArrow / RYD
     pub sponsorblock: bool,
     pub sb_sponsor: SbAction,
@@ -76,19 +341,47 @@ pub struct Settings {
     pub sb_music_offtopic: SbAction,
     pub sb_preview: SbAction,
     pub sb_filler: SbAction,
+    /// The highlight point: skip = jump to it when the video starts, ask = offer the jump.
+    pub sb_highlight: SbAction,
     pub sb_skip_once: bool,
+    /// Segment markers on the seek bar (all categories)...
     pub sb_markers: bool,
+    /// ...except these categories (API names: "sponsor", "intro", ...).
+    pub sb_marker_hidden: Vec<String>,
+    /// Segments shorter than this are not skipped (0 = all are).
+    pub sb_min_segment_ms: u32,
+    /// Channels (by name) SponsorBlock leaves alone.
+    pub sb_excluded_channels: Vec<String>,
+    /// Ask SponsorBlock's alternative server first.
+    pub sb_alt_server: bool,
+    /// A notice when YouTube marks the video as containing paid promotion.
+    pub sb_paid_notice: bool,
     pub dearrow_titles: bool,
     pub dearrow_thumbnails: bool,
+    /// Videos DeArrow has no thumbnail for: "default" (keep it), "start", "middle", "end"
+    /// (YouTube's frames).
+    pub dearrow_fallback: String,
     pub return_dislikes: bool,
     // Content filters
     pub hide_shorts_home: bool,
     pub hide_shorts_subscriptions: bool,
     pub hide_shorts_search: bool,
-    pub hide_watched: bool,
-    pub hide_upcoming: bool,
+    /// Shorts hidden in every list (channel pages, history, trending too).
+    pub hide_shorts_everywhere: bool,
+    pub hide_watched_home: bool,
+    pub hide_watched_subscriptions: bool,
+    pub hide_upcoming_home: bool,
+    pub hide_upcoming_subscriptions: bool,
+    pub hide_upcoming_channels: bool,
+    /// Live and past live streams hidden in Subscriptions.
+    pub hide_streams_subscriptions: bool,
     pub hide_mixes: bool,
     pub blocked_channels: Vec<String>,
+    /// "auto" (YouTube's account setting decides), "on" or "off" (no history pings, no resume
+    /// positions saved).
+    pub watch_history: String,
+    /// Searches are recorded (off: the history is cleared and nothing is recorded).
+    pub search_history: bool,
     // Interface
     pub sections: Vec<String>,
     /// Channels / playlists pinned to the sidebar: (title, browse id, params).
@@ -99,9 +392,20 @@ pub struct Settings {
     /// "red" | "blue" | "green" | "purple" | "orange".
     pub accent: String,
     pub ui_language: String,
+    /// Region of YouTube's content (InnerTube `gl`), "" = automatic.
     pub content_country: String,
+    /// Card thumbnails: "default" (the uploader's), "start", "middle" or "end" (YouTube's frames).
+    pub thumbnail_frame: String,
+    /// Channels page sorted alphabetically (off: YouTube's order, last viewed first).
+    pub channels_alphabetical: bool,
     // Remote
     pub lounge_enabled: bool,
+    /// A message when a phone connects / disconnects.
+    pub lounge_connect_notice: bool,
+    /// Leave the player when the phone disconnects.
+    pub lounge_close_on_disconnect: bool,
+    /// Videos started from the phone stay out of the watch history.
+    pub lounge_no_history: bool,
     /// True black background (OLED).
     pub black_background: bool,
     /// Title and channel under every thumbnail (SmartTube style).
@@ -138,15 +442,25 @@ impl Default for Settings {
             codec: Codec::Avc,
             hdr: false,
             speed: 1.0,
-            remember_speed_per_channel: false,
+            remember_speed: RememberSpeed::Off,
             speed_by_channel: Default::default(),
+            toggle_speed: 1.5,
             seek_step_secs: 10,
-            repeat: Repeat::Autoplay,
+            playback_mode: PlaybackMode::PlayNext,
             resume_playback: true,
-            hud_timeout_secs: 4,
+            resume_short_videos: false,
+            resume_live: true,
+            hud_timeout_secs: 3,
             show_clock: true,
             clock_on_pages: false,
-            show_ending_time: true,
+            controls_time: ControlsTime::Remaining,
+            ok_action: OkAction::Controls,
+            sleep_timer_mins: 0,
+            loop_shorts: true,
+            seek_number_keys: true,
+            double_back_exit: false,
+            hud_on_next_video: false,
+            audio_language: String::new(),
             subtitles: false,
             subtitle_language: "en".into(),
             subtitle_auto_translate: false,
@@ -157,6 +471,7 @@ impl Default for Settings {
             subtitle_bottom_offset: 90,
             subtitle_color: "white".into(),
             subtitle_background: 72,
+            subtitles_per_channel: true,
             sponsorblock: true,
             sb_sponsor: SbAction::SkipWithToast,
             sb_intro: SbAction::Off,
@@ -166,18 +481,32 @@ impl Default for Settings {
             sb_music_offtopic: SbAction::Off,
             sb_preview: SbAction::Off,
             sb_filler: SbAction::Off,
+            sb_highlight: SbAction::Ask,
             sb_skip_once: true,
             sb_markers: true,
+            sb_marker_hidden: Vec::new(),
+            sb_min_segment_ms: 5000,
+            sb_excluded_channels: Vec::new(),
+            sb_alt_server: false,
+            sb_paid_notice: false,
             dearrow_titles: false,
             dearrow_thumbnails: false,
+            dearrow_fallback: "default".into(),
             return_dislikes: true,
             hide_shorts_home: false,
             hide_shorts_subscriptions: false,
             hide_shorts_search: false,
-            hide_watched: false,
-            hide_upcoming: false,
+            hide_shorts_everywhere: false,
+            hide_watched_home: false,
+            hide_watched_subscriptions: false,
+            hide_upcoming_home: false,
+            hide_upcoming_subscriptions: false,
+            hide_upcoming_channels: false,
+            hide_streams_subscriptions: false,
             hide_mixes: false,
             blocked_channels: Vec::new(),
+            watch_history: "auto".into(),
+            search_history: true,
             pinned: Vec::new(),
             // Trending is off by default: YouTube retired the page (browse answers HTTP 400).
             sections: crate::store::Section::ALL.iter().filter(|s| **s != crate::store::Section::Trending).map(|s| s.key().to_string()).collect(),
@@ -187,7 +516,12 @@ impl Default for Settings {
             accent: "red".into(),
             ui_language: "system".into(),
             content_country: "".into(),
+            thumbnail_frame: "default".into(),
+            channels_alphabetical: false,
             lounge_enabled: true,
+            lounge_connect_notice: false,
+            lounge_close_on_disconnect: false,
+            lounge_no_history: false,
             black_background: false,
             titles_under: true,
             ui_scale: 100,
@@ -212,7 +546,43 @@ impl Settings {
     }
 
     pub fn load() -> Settings {
-        std::fs::read_to_string(Self::path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+        let raw: Option<serde_json::Value> = std::fs::read_to_string(Self::path()).ok().and_then(|s| serde_json::from_str(&s).ok());
+        Self::from_json(raw)
+    }
+
+    fn from_json(raw: Option<serde_json::Value>) -> Settings {
+        let Some(v) = raw else { return Settings::default() };
+        let mut s: Settings = serde_json::from_value(v.clone()).unwrap_or_default();
+        s.migrate(&v);
+        s
+    }
+
+    /// Carries older single options over to the ones that replaced them.
+    fn migrate(&mut self, v: &serde_json::Value) {
+        let has = |k: &str| v.get(k).is_some();
+        if !has("playback_mode") {
+            self.playback_mode = match v["repeat"].as_str() {
+                Some("Off") => PlaybackMode::PauseEach,
+                Some("One") => PlaybackMode::RepeatOne,
+                Some("List") => PlaybackMode::ListRepeat,
+                _ => PlaybackMode::PlayNext,
+            };
+        }
+        if !has("remember_speed") && v["remember_speed_per_channel"].as_bool() == Some(true) {
+            self.remember_speed = RememberSpeed::PerChannel;
+        }
+        if !has("controls_time") && v["show_ending_time"].as_bool() == Some(false) {
+            self.controls_time = ControlsTime::Off;
+        }
+        if !has("hide_watched_home") && v["hide_watched"].as_bool() == Some(true) {
+            self.hide_watched_home = true;
+            self.hide_watched_subscriptions = true;
+        }
+        if !has("hide_upcoming_home") && v["hide_upcoming"].as_bool() == Some(true) {
+            self.hide_upcoming_home = true;
+            self.hide_upcoming_subscriptions = true;
+            self.hide_upcoming_channels = true;
+        }
     }
 
     pub fn save(&self) {
@@ -235,5 +605,17 @@ mod tests {
         assert_eq!(s.max_height, 2160);
         assert_eq!(s.seek_step_secs, 10);
         assert!(s.sponsorblock);
+    }
+
+    #[test]
+    fn old_options_migrate() {
+        let v = serde_json::json!({"repeat": "One", "remember_speed_per_channel": true, "show_ending_time": false, "hide_watched": true});
+        let s = Settings::from_json(Some(v));
+        assert!(s.hide_watched_home && s.hide_watched_subscriptions && !s.hide_upcoming_home);
+        assert_eq!(s.playback_mode, PlaybackMode::RepeatOne);
+        assert_eq!(s.remember_speed, RememberSpeed::PerChannel);
+        assert_eq!(s.controls_time, ControlsTime::Off);
+        let s = Settings::from_json(Some(serde_json::json!({"playback_mode": "Shuffle", "repeat": "One"})));
+        assert_eq!(s.playback_mode, PlaybackMode::Shuffle);
     }
 }

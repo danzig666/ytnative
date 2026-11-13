@@ -83,6 +83,11 @@ pub struct ExtrasPrefs {
     pub sponsorblock: bool,
     pub categories: Vec<yt_core::ext::sponsorblock::Category>,
     pub dislikes: bool,
+    /// Use the subtitle state remembered for the video's channel, if any.
+    pub channel_subtitles: bool,
+    /// Report the playback to YouTube's watch history.
+    #[cfg_attr(windows, allow(dead_code))]
+    pub history: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -112,6 +117,8 @@ pub struct Status {
     /// Engine B: the pipeline's HDR type ("" / "none" when SDR).
     pub hdr: String,
     pub fps: u32,
+    /// YouTube marks the video as containing paid promotion.
+    pub paid_promotion: bool,
 }
 
 #[cfg(not(windows))]
@@ -235,8 +242,10 @@ impl Player {
             }
             match run(luna, &video_id, &window_id, &session, &status, &media_id, prefs, start_ms, feed, &live, my_gen) {
                 Ok(true) => {
-                    let (v, s2, st2) = (video_id.clone(), session.clone(), status.clone());
-                    let _ = plx_base::task::spawn("track", move || track_history(&v, &s2, &st2));
+                    if extras.history {
+                        let (v, s2, st2) = (video_id.clone(), session.clone(), status.clone());
+                        let _ = plx_base::task::spawn("track", move || track_history(&v, &s2, &st2));
+                    }
                     load_extras(&video_id, &session, &status, &extras)
                 }
                 Ok(false) => crate::log(&format!("player: {video_id} was left while starting; dropped")),
@@ -447,6 +456,7 @@ fn run(
         s.title = resolved.title.clone();
         s.author = resolved.author.clone();
         s.duration_ms = resolved.length_secs * 1000;
+        s.paid_promotion = resolved.raw.get("paidContentOverlay").is_some();
         // Where it will start, so a BACK before the first position event saves this, not 0.
         s.position_ms = start_ms.unwrap_or(0);
         s.phase = Phase::Loading;
@@ -458,7 +468,7 @@ fn run(
         s.storyboard = resolved.storyboard_spec.clone();
         s.captions = resolved.captions.clone();
         s.audio_tracks = resolved.audio_tracks();
-        s.audio_track = prefs.audio_track.clone();
+        s.audio_track = prefs.audio_track.clone().or_else(|| prefs.audio_language.as_deref().and_then(|l| resolved.audio_track_for(l)));
         s.quality_hint = resolved
             .adaptive
             .iter()
@@ -655,8 +665,19 @@ pub(crate) fn load_extras(video_id: &str, session: &Mutex<Option<yt_core::sessio
     }
     publish(&ex);
     let _ = tracks;
-    if prefs.subtitles {
-        load_captions(video_id, session, status, &prefs.language, prefs.auto_translate);
+    // The channel's remembered subtitles ("" = off) win over the global setting.
+    let (mut subtitles, mut language) = (prefs.subtitles, prefs.language.clone());
+    if prefs.channel_subtitles {
+        let channel = status.lock().unwrap().channel_id.clone();
+        if let Some(l) = yt_core::memory::PlayerMemory::load().channel_subtitle.peek(&channel).filter(|_| !channel.is_empty()) {
+            subtitles = !l.is_empty();
+            if subtitles {
+                language = l.clone();
+            }
+        }
+    }
+    if subtitles {
+        load_captions(video_id, session, status, &language, prefs.auto_translate);
     }
 }
 

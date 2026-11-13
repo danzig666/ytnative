@@ -286,3 +286,90 @@ Video info	Videó adatai	Videoinfo	Información del vídeo	Infos sur la vidéo	�
 Remaining:	Hátralévő:	Verbleibend:	Restante:	Restant :	Осталось:
 SponsorBlock on	SponsorBlock bekapcsolva	SponsorBlock an	SponsorBlock activado	SponsorBlock activé	SponsorBlock включён
 SponsorBlock off	SponsorBlock kikapcsolva	SponsorBlock aus	SponsorBlock desactivado	SponsorBlock désactivé	SponsorBlock выключен
+Video zoom	Videó nagyítása	Videozoom	Zoom del vídeo	Zoom de la vidéo	Масштаб видео
+Remember speed	Sebesség megjegyzése	Geschwindigkeit merken	Recordar velocidad	Mémoriser la vitesse	Запоминать скорость
+OK button during playback	OK gomb lejátszás közben	OK-Taste bei der Wiedergabe	Botón OK durante la reproducción	Bouton OK pendant la lecture	Кнопка OK при воспроизведении
+Seek with number keys	Tekerés a számgombokkal	Mit Zifferntasten spulen	Avanzar con las teclas numéricas	Avancer avec les touches numériques	Перемотка цифровыми кнопками
+Time in the controls	Idő a vezérlőkön	Zeit in der Steuerung	Tiempo en los controles	Heure dans les commandes	Время на панели управления
+Resume short videos (under 5 minutes)	Rövid videók folytatása (5 perc alatt)	Kurze Videos fortsetzen (unter 5 Minuten)	Reanudar vídeos cortos (menos de 5 minutos)	Reprendre les vidéos courtes (moins de 5 minutes)	Продолжать короткие видео (до 5 минут)
+Remember live stream position	Élő közvetítés pozíciójának megjegyzése	Position in Livestreams merken	Recordar la posición en directos	Mémoriser la position des directs	Запоминать позицию в трансляциях
+Loop Shorts	Shorts ismétlése	Shorts wiederholen	Repetir Shorts	Lire les Shorts en boucle	Повторять Shorts
+Leave the player with a double BACK	Kilépés a lejátszóból dupla VISSZA gombbal	Player mit zweimal ZURÜCK verlassen	Salir del reproductor con doble ATRÁS	Quitter le lecteur avec un double RETOUR	Выход из плеера двойным НАЗАД
+Show the controls when the next video starts	Vezérlők megjelenítése a következő videó indulásakor	Steuerung beim Start des nächsten Videos zeigen	Mostrar los controles al empezar el siguiente vídeo	Afficher les commandes au début de la vidéo suivante	Показывать управление при запуске следующего видео
+Preferred audio language	Előnyben részesített hangnyelv	Bevorzugte Audiosprache	Idioma de audio preferido	Langue audio préférée	Предпочитаемый язык аудио
+Repeat this video	A videó ismétlése	Dieses Video wiederholen	Repetir este vídeo	Répéter cette vidéo	Повторять это видео
+Play the list then stop	A lista lejátszása, majd leállás	Liste abspielen, dann stoppen	Reproducir la lista y parar	Lire la liste puis arrêter	Воспроизвести список и остановиться
+Repeat the list	A lista ismétlése	Liste wiederholen	Repetir la lista	Répéter la liste	Повторять список
+Shuffle the list	A lista keverése	Liste zufällig abspielen	Reproducir la lista en orden aleatorio	Lire la liste en aléatoire	Перемешать список
+Play the list in reverse	A lista lejátszása visszafelé	Liste rückwärts abspielen	Reproducir la lista al revés	Lire la liste à l'envers	Воспроизводить список в обратном порядке
+Pause after each video	Szünet minden videó után	Nach jedem Video pausieren	Pausar tras cada vídeo	Pause après chaque vidéo	Пауза после каждого видео
+Close the player after each video	A lejátszó bezárása minden videó után	Player nach jedem Video schließen	Cerrar el reproductor tras cada vídeo	Fermer le lecteur après chaque vidéo	Закрывать плеер после каждого видео
+Same for all videos	Minden videónál ugyanaz	Für alle Videos gleich	Igual para todos los vídeos	Identique pour toutes les vidéos	Одинаково для всех видео
+Per video	Videónként	Pro Video	Por vídeo	Par vidéo	Для каждого видео
+Per channel	Csatornánként	Pro Kanal	Por canal	Par chaîne	Для каждого канала
+Show controls only	Csak a vezérlők megjelenítése	Nur Steuerung zeigen	Solo mostrar controles	Afficher seulement les commandes	Только показать управление
+Show controls and pause	Vezérlők megjelenítése és szünet	Steuerung zeigen und pausieren	Mostrar controles y pausar	Afficher les commandes et mettre en pause	Показать управление и пауза
+Pause only	Csak szünet	Nur pausieren	Solo pausar	Pause seulement	Только пауза
+Toggle speed	Sebesség váltása	Geschwindigkeit umschalten	Alternar velocidad	Basculer la vitesse	Переключать скорость
+Remaining time	Hátralévő idő	Restzeit	Tiempo restante	Temps restant	Оставшееся время
+Ending time	Befejezés időpontja	Endzeit	Hora de finalización	Heure de fin	Время окончания
+Never	Soha	Nie	Nunca	Jamais	Никогда
+Original	Eredeti	Original	Original	Originale	Оригинал
+second	másodperc	Sekunde	segundo	seconde	секунда
+seconds	másodperc	Sekunden	segundos	secondes	секунд
+hour	óra	Stunde	hora	heure	час
+hours	óra	Stunden	horas	heures	часа
+{} left	{} van hátra	noch {}	quedan {}	{} restantes	осталось {}
+Ends at {}	Vége: {}	Endet um {}	Termina a las {}	Se termine à {}	Закончится в {}
+Press BACK again to leave	A kilépéshez nyomd meg újra a VISSZA gombot	Zum Verlassen erneut ZURÜCK drücken	Pulsa ATRÁS otra vez para salir	Appuyez à nouveau sur RETOUR pour quitter	Нажмите НАЗАД ещё раз для выхода
+Subtitles per channel	Feliratok csatornánként	Untertitel pro Kanal	Subtítulos por canal	Sous-titres par chaîne	Субтитры для каждого канала
+Content country	Tartalom országa	Land der Inhalte	País del contenido	Pays du contenu	Страна контента
+Automatic	Automatikus	Automatisch	Automático	Automatique	Автоматически
+Thumbnail picture	Bélyegkép	Vorschaubild	Miniatura	Miniature	Миниатюра
+YouTube's default	A YouTube alapértelmezése	Standard von YouTube	Predeterminada de YouTube	Par défaut de YouTube	Как на YouTube
+From the start	Az elejéről	Vom Anfang	Del principio	Du début	С начала
+From the middle	A közepéről	Aus der Mitte	De la mitad	Du milieu	Из середины
+From the end	A végéről	Vom Ende	Del final	De la fin	С конца
+Channels sorting	Csatornák rendezése	Sortierung der Kanäle	Orden de los canales	Tri des chaînes	Сортировка каналов
+Last viewed	Utoljára megtekintett	Zuletzt angesehen	Vistos recientemente	Derniers regardés	Недавно просмотренные
+Alphabetically	Betűrendben	Alphabetisch	Alfabéticamente	Par ordre alphabétique	По алфавиту
+Hide Shorts everywhere	Shorts elrejtése mindenhol	Shorts überall ausblenden	Ocultar Shorts en todas partes	Masquer les Shorts partout	Скрывать Shorts везде
+Hide watched videos on Home	Megnézett videók elrejtése a kezdőlapon	Angesehene Videos auf der Startseite ausblenden	Ocultar vídeos vistos en Inicio	Masquer les vidéos regardées sur l'accueil	Скрывать просмотренные видео на главной
+Hide watched videos in Subscriptions	Megnézett videók elrejtése a feliratkozásokban	Angesehene Videos in Abos ausblenden	Ocultar vídeos vistos en Suscripciones	Masquer les vidéos regardées dans les abonnements	Скрывать просмотренные видео в подписках
+Hide upcoming streams on Home	Közelgő közvetítések elrejtése a kezdőlapon	Geplante Livestreams auf der Startseite ausblenden	Ocultar directos programados en Inicio	Masquer les directs à venir sur l'accueil	Скрывать предстоящие трансляции на главной
+Hide upcoming streams in Subscriptions	Közelgő közvetítések elrejtése a feliratkozásokban	Geplante Livestreams in Abos ausblenden	Ocultar directos programados en Suscripciones	Masquer les directs à venir dans les abonnements	Скрывать предстоящие трансляции в подписках
+Hide upcoming streams on channel pages	Közelgő közvetítések elrejtése a csatornaoldalakon	Geplante Livestreams auf Kanalseiten ausblenden	Ocultar directos programados en los canales	Masquer les directs à venir sur les pages des chaînes	Скрывать предстоящие трансляции на страницах каналов
+Hide streams in Subscriptions	Közvetítések elrejtése a feliratkozásokban	Livestreams in Abos ausblenden	Ocultar directos en Suscripciones	Masquer les directs dans les abonnements	Скрывать трансляции в подписках
+Blocked channels	Letiltott csatornák	Blockierte Kanäle	Canales bloqueados	Chaînes bloquées	Заблокированные каналы
+No blocked channels	Nincs letiltott csatorna	Keine blockierten Kanäle	No hay canales bloqueados	Aucune chaîne bloquée	Нет заблокированных каналов
+Unblock	Letiltás feloldása	Freigeben	Desbloquear	Débloquer	Разблокировать
+{} unblocked	{} letiltása feloldva	{} freigegeben	{} desbloqueado	{} débloquée	{} разблокирован
+Watch history	Megtekintési előzmények	Wiedergabeverlauf	Historial de reproducciones	Historique des vidéos regardées	История просмотра
+Search history	Keresési előzmények	Suchverlauf	Historial de búsqueda	Historique des recherches	История поиска
+Highlight	Kiemelt rész	Highlight	Momento destacado	Moment fort	Главный момент
+Ignore short segments	Rövid szakaszok figyelmen kívül hagyása	Kurze Segmente ignorieren	Ignorar segmentos cortos	Ignorer les segments courts	Игнорировать короткие сегменты
+Segment markers	Szakaszjelölők	Segmentmarken	Marcadores de segmentos	Repères de segments	Метки сегментов
+Use the alternative server	Alternatív szerver használata	Alternativen Server verwenden	Usar el servidor alternativo	Utiliser le serveur alternatif	Использовать запасной сервер
+Paid promotion notice	Értesítés fizetett promócióról	Hinweis auf bezahlte Werbung	Aviso de promoción pagada	Avis de promotion payée	Уведомление о платной рекламе
+Fallback thumbnail when DeArrow has none	Bélyegkép, ha a DeArrow-nak nincs	Vorschaubild, wenn DeArrow keines hat	Miniatura cuando DeArrow no tiene	Miniature si DeArrow n'en a pas	Миниатюра, если у DeArrow её нет
+This video contains paid promotion	Ez a videó fizetett promóciót tartalmaz	Dieses Video enthält bezahlte Werbung	Este vídeo incluye promoción pagada	Cette vidéo contient une promotion payée	Это видео содержит платную рекламу
+Jumped to the highlight	Ugrás a kiemelt részre	Zum Highlight gesprungen	Saltado al momento destacado	Passage au moment fort	Переход к главному моменту
+Highlight: press OK to jump there	Kiemelt rész: ugráshoz nyomd meg az OK gombot	Highlight: OK drücken, um hinzuspringen	Momento destacado: pulsa OK para ir	Moment fort : appuyez sur OK pour y aller	Главный момент: нажмите OK для перехода
+SponsorBlock on this channel	SponsorBlock ezen a csatornán	SponsorBlock auf diesem Kanal	SponsorBlock en este canal	SponsorBlock sur cette chaîne	SponsorBlock на этом канале
+Card menu: SponsorBlock on this channel	Kártyamenü: SponsorBlock ezen a csatornán	Kartenmenü: SponsorBlock auf diesem Kanal	Menú de tarjeta: SponsorBlock en este canal	Menu de la carte : SponsorBlock sur cette chaîne	Меню карточки: SponsorBlock на этом канале
+Show a message when a phone connects or disconnects	Üzenet, ha egy telefon csatlakozik vagy leválik	Meldung, wenn sich ein Handy verbindet oder trennt	Mostrar un mensaje cuando un teléfono se conecte o desconecte	Afficher un message quand un téléphone se connecte ou se déconnecte	Сообщать о подключении и отключении телефона
+Close the player when the phone disconnects	A lejátszó bezárása, ha a telefon leválik	Player schließen, wenn sich das Handy trennt	Cerrar el reproductor cuando el teléfono se desconecte	Fermer le lecteur quand le téléphone se déconnecte	Закрывать плеер при отключении телефона
+No watch history for videos started from the phone	Nincs megtekintési előzmény a telefonról indított videóknál	Kein Wiedergabeverlauf für vom Handy gestartete Videos	Sin historial para los vídeos iniciados desde el teléfono	Pas d'historique pour les vidéos lancées depuis le téléphone	Не сохранять в историю видео, запущенные с телефона
+{} connected	{} csatlakozott	{} verbunden	{} conectado	{} connecté	{} подключён
+{} disconnected	{} levált	{} getrennt	{} desconectado	{} déconnecté	{} отключён
+A phone	Egy telefon	Ein Handy	Un teléfono	Un téléphone	Телефон
+Play from the start	Lejátszás az elejéről	Von Anfang an abspielen	Reproducir desde el principio	Lire depuis le début	Воспроизвести с начала
+Play without history	Lejátszás előzmények nélkül	Ohne Verlauf abspielen	Reproducir sin historial	Lire sans historique	Воспроизвести без истории
+Subscribe to {}	Feliratkozás: {}	{} abonnieren	Suscribirse a {}	S'abonner à {}	Подписаться на {}
+Unsubscribe from {}	Leiratkozás: {}	{} deabonnieren	Cancelar suscripción a {}	Se désabonner de {}	Отписаться от {}
+Unblock {}	{} letiltásának feloldása	{} freigeben	Desbloquear {}	Débloquer {}	Разблокировать {}
+Card menu: Play from the start	Kártyamenü: Lejátszás az elejéről	Kartenmenü: Von Anfang an abspielen	Menú de tarjeta: Reproducir desde el principio	Menu de la carte : Lire depuis le début	Меню карточки: Воспроизвести с начала
+Card menu: Play without history	Kártyamenü: Lejátszás előzmények nélkül	Kartenmenü: Ohne Verlauf abspielen	Menú de tarjeta: Reproducir sin historial	Menu de la carte : Lire sans historique	Меню карточки: Воспроизвести без истории
+Card menu: Subscribe / unsubscribe	Kártyamenü: Feliratkozás / leiratkozás	Kartenmenü: Abonnieren / deabonnieren	Menú de tarjeta: Suscribirse / cancelar suscripción	Menu de la carte : S'abonner / se désabonner	Меню карточки: Подписаться / отписаться
+Card menu: Comments	Kártyamenü: Hozzászólások	Kartenmenü: Kommentare	Menú de tarjeta: Comentarios	Menu de la carte : Commentaires	Меню карточки: Комментарии
+pixels	pixel	Pixel	píxeles	pixels	пикселей

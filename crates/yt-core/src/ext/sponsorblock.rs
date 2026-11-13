@@ -14,6 +14,13 @@ use std::collections::HashSet;
 pub const SERVER: &str = "https://sponsor.ajay.app";
 pub const SERVER_ALT: &str = "https://api.sponsor.ajay.app";
 
+static ALT_FIRST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Ask [`SERVER_ALT`] first (SmartTube's "alternative server"), falling back to [`SERVER`].
+pub fn set_alt_server(first: bool) {
+    ALT_FIRST.store(first, std::sync::atomic::Ordering::Relaxed);
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Category {
@@ -234,7 +241,8 @@ pub fn fetch(http: &Client, video_id: &str, categories: &[Category]) -> Result<V
     let path = format!("/api/skipSegments/{}", hash_prefix(video_id));
     let query = [("categories", cats.as_str()), ("actionTypes", actions.as_str())];
     let mut last_err = None;
-    for server in [SERVER, SERVER_ALT] {
+    let servers = if ALT_FIRST.load(std::sync::atomic::Ordering::Relaxed) { [SERVER_ALT, SERVER] } else { [SERVER, SERVER_ALT] };
+    for server in servers {
         match get_json::<Vec<HashedVideo>>(http, &format!("{server}{path}"), &query) {
             Ok(None) => return Ok(Vec::new()),
             Ok(Some(videos)) => {

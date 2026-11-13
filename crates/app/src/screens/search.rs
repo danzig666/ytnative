@@ -90,13 +90,15 @@ impl SearchScreen {
             &cx.views.store.suggestions
         }
     }
-    fn search(&self, q: &str, fx: &mut Effects<'_, YtHost>) {
+    fn search(&self, q: &str, record: bool, fx: &mut Effects<'_, YtHost>) {
         if !q.trim().is_empty() {
-            let _ = yt_core::search_history::record(q.trim());
+            if record {
+                let _ = yt_core::search_history::record(q.trim());
+            }
             fx.push(Fx::Nav(NavOp::Push(YtArg::Feed(FeedKey::Search { query: q.trim().to_string(), params: None }))));
         }
     }
-    fn press(&mut self, k: K, fx: &mut Effects<'_, YtHost>) {
+    fn press(&mut self, k: K, record: bool, fx: &mut Effects<'_, YtHost>) {
         match k {
             K::Ch(c) => self.query.push(c),
             K::Space => self.query.push(' '),
@@ -106,7 +108,7 @@ impl SearchScreen {
             K::Clear => self.query.clear(),
             K::Go => {
                 let q = self.query.clone();
-                self.search(&q, fx);
+                self.search(&q, record, fx);
                 return;
             }
         }
@@ -127,13 +129,13 @@ impl Machine<YtHost> for SearchScreen {
         match ev {
             ScreenEvent::Activate(e) if (KEY_BASE..SUG_BASE).contains(e) => {
                 if let Some(k) = keys().get((e - KEY_BASE) as usize).copied() {
-                    self.press(k, fx);
+                    self.press(k, cx.views.store.settings.search_history, fx);
                 }
                 Handled::Yes
             }
             ScreenEvent::Activate(e) if *e >= SUG_BASE => {
                 if let Some(q) = self.suggestions(cx).get((e - SUG_BASE) as usize).cloned() {
-                    self.search(&q, fx);
+                    self.search(&q, cx.views.store.settings.search_history, fx);
                 }
                 Handled::Yes
             }

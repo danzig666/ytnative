@@ -7,7 +7,7 @@
 use super::common;
 use crate::host::{YtArg, YtFx, YtHost};
 use crate::player::Phase;
-use crate::settings::Repeat;
+use crate::settings::{OkAction, PlaybackMode};
 use crate::ui;
 use plx_machine::machine::{
     Canon, Cx, Edge, Effects, EntryId, FocusKey, Fx, GroupId, Handled, InputEvent, InputKind, Key, LogicalState, Machine, NavOp, ScreenEvent,
@@ -59,19 +59,42 @@ pub struct PlayerScreen {
     /// Pointer jitter guard (see the Pointer event).
     ptr_quiet: bool,
     ptr_anchor: Option<(f32, f32)>,
+    /// "Leave with a double BACK": when the first BACK was pressed (views.now_ms clock).
+    back_armed: Option<u32>,
+    /// The release of that first BACK is swallowed too.
+    back_swallow_up: bool,
     state: State,
 }
 
 impl PlayerScreen {
     pub fn new(entry: EntryId, video_id: String, playlist: Option<String>) -> Self {
-        PlayerScreen { entry, state: State(video_id.clone()), video_id, playlist, hud: true, ended_handled: false, preview_until: 0, pointer: None, osd_sel: None, sugg_sel: None, last_rate: 1.5, ptr_quiet: false, ptr_anchor: None }
+        PlayerScreen {
+            entry,
+            state: State(video_id.clone()),
+            video_id,
+            playlist,
+            hud: true,
+            ended_handled: false,
+            preview_until: 0,
+            pointer: None,
+            osd_sel: None,
+            sugg_sel: None,
+            last_rate: 1.5,
+            ptr_quiet: false,
+            ptr_anchor: None,
+            back_armed: None,
+            back_swallow_up: false,
+        }
     }
 
     fn show_hud(&mut self, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
         self.hud = true;
-        let secs = cx.views.store.settings.hud_timeout_secs.max(2);
+        // 0 = never hide.
+        let secs = cx.views.store.settings.hud_timeout_secs;
         fx.push(Fx::CancelTimer(T_HIDE));
-        fx.push(Fx::Timer { id: T_HIDE, after_ms: secs * 1000 });
+        if secs > 0 {
+            fx.push(Fx::Timer { id: T_HIDE, after_ms: secs * 1000 });
+        }
         // One tick chain only: timers are not deduplicated, and every key / pointer move lands here.
         fx.push(Fx::CancelTimer(T_TICK));
         fx.push(Fx::Timer { id: T_TICK, after_ms: 500 });
@@ -90,7 +113,7 @@ impl PlayerScreen {
             fx.push(Fx::App(YtFx::Toast(if dir < 0 { "This is the first video".into() } else { "This is the last video".into() })));
             return;
         }
-        fx.push(Fx::Nav(NavOp::Replace(YtArg::Player { video_id: q[j as usize].clone(), playlist: self.playlist.clone() })));
+        go_to(q[j as usize].clone(), self.playlist.clone(), fx);
     }
 
     fn seek(&mut self, dir: i64, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
@@ -157,19 +180,26 @@ fn suggestions(cx: &Cx<'_, YtHost>) -> Vec<yt_core::model::Item> {
     out
 }
 
-/// The playback-mode cycle of the playback mode button.
-const REPEAT_CYCLE: [Repeat; 4] = [Repeat::Autoplay, Repeat::List, Repeat::One, Repeat::Off];
+
 
 thread_local! {
     /// Videos played in this run, oldest first (the "previous" button walks back through it).
     static PLAYED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The next player was started by this one (end of video, next / previous), not opened.
+    static MOVED_ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The player moves on to another video (replacing itself).
+fn go_to(video_id: String, playlist: Option<String>, fx: &mut Effects<'_, YtHost>) {
+    MOVED_ON.with(|m| m.set(true));
+    fx.push(Fx::Nav(NavOp::Replace(YtArg::Player { video_id, playlist })));
 }
 
 impl PlayerScreen {
     /// Next: the playlist's / YouTube's up-next video, else the next one in the opened list.
     fn next(&mut self, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
         match next_video(cx, &self.video_id, false) {
-            Some((v, pl)) => fx.push(Fx::Nav(NavOp::Replace(YtArg::Player { video_id: v, playlist: pl.or(self.playlist.clone()) }))),
+            Some((v, pl)) => go_to(v, pl.or(self.playlist.clone()), fx),
             None => self.step_queue(1, cx, fx),
         }
     }
@@ -186,7 +216,7 @@ impl PlayerScreen {
                         h.pop();
                     }
                 });
-                fx.push(Fx::Nav(NavOp::Replace(YtArg::Player { video_id, playlist: Some(pl.id.clone()) })));
+                go_to(video_id, Some(pl.id.clone()), fx);
                 return;
             }
         }
@@ -200,8 +230,40 @@ impl PlayerScreen {
             }
         });
         match before {
-            Some(video_id) => fx.push(Fx::Nav(NavOp::Replace(YtArg::Player { video_id, playlist: None }))),
+            Some(video_id) => go_to(video_id, None, fx),
             None => self.step_queue(-1, cx, fx),
+        }
+    }
+
+    /// The video ended: what comes next, per the playback mode.
+    fn on_ended(&mut self, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
+        let store = cx.views.store;
+        let s = &store.settings;
+        let replay = YtFx::Replay { video_id: self.video_id.clone(), playlist: self.playlist.clone() };
+        // A Short in a Shorts list loops (as on YouTube).
+        if store.queue_shorts && s.loop_shorts && store.queue.contains(&self.video_id) {
+            fx.push(Fx::App(replay));
+            return;
+        }
+        let target = match s.playback_mode {
+            PlaybackMode::RepeatOne => {
+                fx.push(Fx::App(replay));
+                return;
+            }
+            PlaybackMode::PauseEach => None,
+            PlaybackMode::CloseEach => {
+                fx.push(Fx::Nav(NavOp::Pop));
+                return;
+            }
+            PlaybackMode::PlayNext => next_video(cx, &self.video_id, false),
+            PlaybackMode::ListOnce => list_step(cx, &self.video_id, 1, false),
+            PlaybackMode::ListRepeat => list_step(cx, &self.video_id, 1, true).or_else(|| next_video(cx, &self.video_id, true)),
+            PlaybackMode::Shuffle => list_random(cx, &self.video_id).or_else(|| next_video(cx, &self.video_id, false)),
+            PlaybackMode::Reverse => list_step(cx, &self.video_id, -1, false),
+        };
+        match target {
+            Some((v, pl)) => go_to(v, pl.or(self.playlist.clone()), fx),
+            None => self.show_hud(cx, fx),
         }
     }
 
@@ -218,11 +280,13 @@ impl PlayerScreen {
             OSD_PLAY => fx.push(Fx::App(YtFx::TogglePause)),
             OSD_NEXT => self.next(cx, fx),
             OSD_REPEAT => {
-                let cur = cx.views.store.settings.repeat;
-                let i = REPEAT_CYCLE.iter().position(|r| *r == cur).unwrap_or(0);
-                let next = REPEAT_CYCLE[(i + 1) % REPEAT_CYCLE.len()];
-                fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| s.repeat = next))));
-                fx.push(Fx::App(YtFx::Toast(repeat_label(next).into())));
+                // Steps through every playback mode, naming the new one.
+                let all = PlaybackMode::ALL;
+                let cur = cx.views.store.settings.playback_mode;
+                let i = all.iter().position(|r| *r == cur).unwrap_or(0);
+                let next = all[(i + 1) % all.len()];
+                fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| s.playback_mode = next))));
+                fx.push(Fx::App(YtFx::Toast(next.label().into())));
             }
             OSD_SPEED => {
                 let rate = if st.rate > 0.0 { st.rate } else { 1.0 };
@@ -319,6 +383,11 @@ impl Machine<YtHost> for PlayerScreen {
                 });
                 fx.push(Fx::App(YtFx::Play { video_id: self.video_id.clone(), playlist: self.playlist.clone() }));
                 self.show_hud(cx, fx);
+                // A video that follows another starts without the controls unless asked for.
+                if MOVED_ON.with(|m| m.replace(false)) && !cx.views.store.settings.hud_on_next_video {
+                    self.hud = false;
+                    fx.push(Fx::CancelTimer(T_HIDE));
+                }
                 Handled::Yes
             }
             ScreenEvent::Unmount => {
@@ -346,22 +415,7 @@ impl Machine<YtHost> for PlayerScreen {
                 }
                 if p.phase == Phase::Ended && !self.ended_handled {
                     self.ended_handled = true;
-                    match cx.views.store.settings.repeat {
-                        Repeat::One => {
-                            fx.push(Fx::App(YtFx::Replay { video_id: self.video_id.clone(), playlist: self.playlist.clone() }));
-                        }
-                        Repeat::Autoplay | Repeat::List => {
-                            let repeat_list = cx.views.store.settings.repeat == Repeat::List;
-                            match next_video(cx, &self.video_id, repeat_list) {
-                                Some((v, pl)) => fx.push(Fx::Nav(NavOp::Replace(YtArg::Player {
-                                    video_id: v,
-                                    playlist: pl.or(self.playlist.clone()),
-                                }))),
-                                None => self.show_hud(cx, fx),
-                            }
-                        }
-                        Repeat::Off => self.show_hud(cx, fx),
-                    }
+                    self.on_ended(cx, fx);
                 }
                 // Always keep ticking: the end of the video must be noticed with the controls
                 // hidden too (it used to wait for a key press). Redraw only when something shows.
@@ -423,13 +477,19 @@ impl Machine<YtHost> for PlayerScreen {
                 fx.invalidate(plx_machine::present::Provenance::Input);
                 Handled::Yes
             }
-            ScreenEvent::Input(InputEvent { kind: InputKind::Key { key, wcode, edge, .. }, .. }) => {
+            ScreenEvent::Input(InputEvent { kind: InputKind::Key { key, sym, wcode, edge, .. }, .. }) => {
                 self.ptr_quiet = true;
                 self.ptr_anchor = None;
                 // Keys take over from the pointer: its last hover no longer highlights a button.
                 self.pointer = None;
                 if *edge == Edge::Up {
+                    if *key == Key::Back && std::mem::take(&mut self.back_swallow_up) {
+                        return Handled::Yes;
+                    }
                     return if *key == Key::Back && !self.hud { Handled::No } else { Handled::Yes };
+                }
+                if *edge == Edge::Repeat && *key == Key::Back && cx.views.store.settings.double_back_exit {
+                    return Handled::Yes; // a held BACK is not a second press
                 }
                 // OSD buttons selected with the keys: Left/Right between them, OK presses, Down again
                 // opens Options, Up / BACK leave the buttons.
@@ -479,11 +539,24 @@ impl Machine<YtHost> for PlayerScreen {
                 match (key, *wcode) {
                     (Key::Back, _) => {
                         // BACK hides the controls while playing or paused (a paused video too).
-                        if self.hud && matches!(cx.views.player.phase, Phase::Playing | Phase::Paused) {
+                        let watching = matches!(cx.views.player.phase, Phase::Playing | Phase::Paused);
+                        if self.hud && watching {
                             self.hud = false;
                             self.osd_sel = None;
                             fx.invalidate(plx_machine::present::Provenance::Input);
                             Handled::Yes
+                        } else if watching && cx.views.store.settings.double_back_exit {
+                            // Leave only with a second BACK within two seconds.
+                            let now = cx.views.now_ms;
+                            if self.back_armed.take().is_some_and(|t| now.wrapping_sub(t) < 2000) {
+                                Handled::No
+                            } else {
+                                self.back_armed = Some(now);
+                                self.back_swallow_up = true;
+                                fx.push(Fx::App(YtFx::Toast(crate::i18n::tr("Press BACK again to leave").to_string())));
+                                fx.invalidate(plx_machine::present::Provenance::Input);
+                                Handled::Yes
+                            }
                         } else {
                             Handled::No
                         }
@@ -493,7 +566,29 @@ impl Machine<YtHost> for PlayerScreen {
                         Handled::Yes
                     }
                     (Key::Ok, _) if !self.hud => {
-                        self.show_hud(cx, fx);
+                        // An offered SponsorBlock segment is skipped first.
+                        if cx.views.store.sb_offered {
+                            fx.push(Fx::App(YtFx::OkInPlayer));
+                            fx.invalidate(plx_machine::present::Provenance::Input);
+                            return Handled::Yes;
+                        }
+                        match cx.views.store.settings.ok_action {
+                            OkAction::Controls => self.show_hud(cx, fx),
+                            OkAction::ControlsAndPause => {
+                                if cx.views.player.phase == Phase::Playing {
+                                    fx.push(Fx::App(YtFx::TogglePause));
+                                }
+                                self.show_hud(cx, fx);
+                            }
+                            OkAction::Pause => {
+                                fx.push(Fx::App(YtFx::TogglePause));
+                                fx.invalidate(plx_machine::present::Provenance::Input);
+                            }
+                            OkAction::ToggleSpeed => {
+                                fx.push(Fx::App(YtFx::ToggleSpeed));
+                                fx.invalidate(plx_machine::present::Provenance::Input);
+                            }
+                        }
                         Handled::Yes
                     }
                     (Key::Ok, _) => {
@@ -542,6 +637,18 @@ impl Machine<YtHost> for PlayerScreen {
                         } else {
                             self.show_hud(cx, fx);
                         }
+                        Handled::Yes
+                    }
+                    (_, _) if digit_key(*sym, *wcode).is_some() && cx.views.store.settings.seek_number_keys => {
+                        // 0..9: jump to 0..90 % of the video.
+                        let st = cx.views.player;
+                        if st.duration_ms > 0 && !st.live {
+                            let to = st.duration_ms * digit_key(*sym, *wcode).unwrap_or(0) / 10;
+                            fx.push(Fx::App(YtFx::SeekTo(to)));
+                            fx.push(Fx::App(YtFx::Toast(ui::fmt_time(to))));
+                            self.preview_until = cx.views.now_ms + 1500;
+                        }
+                        self.show_hud(cx, fx);
                         Handled::Yes
                     }
                     (Key::Down, _) => {
@@ -804,9 +911,8 @@ impl Screen<YtHost> for PlayerScreen {
                 ui::text(p, &format!("\u{2212}{} behind live", ui::fmt_time(behind)), 1824.0, ROW_B_Y + 16.0, 28, ui::WHITE, ui::ALIGN_RIGHT, false);
             }
         } else {
-            if s.show_ending_time && st.duration_ms > st.position_ms {
-                let left = format!("{} {}", crate::i18n::tr("Remaining:"), ui::fmt_time(st.duration_ms - st.position_ms));
-                ui::text(p, &left, 1824.0, ROW_B_Y + 2.0, 26, ui::DIM, ui::ALIGN_RIGHT, false);
+            if let Some(t) = ending_text(st, s) {
+                ui::text(p, &t, 1824.0, ROW_B_Y + 2.0, 26, ui::DIM, ui::ALIGN_RIGHT, false);
             }
             let pos = format!("{}  /  {}", ui::fmt_time(st.position_ms), ui::fmt_time(st.duration_ms));
             ui::text(p, &pos, 1824.0, ROW_B_Y + 34.0, 28, ui::WHITE, ui::ALIGN_RIGHT, false);
@@ -819,11 +925,11 @@ impl Screen<YtHost> for PlayerScreen {
         let subscribed = w.and_then(|w| w.subscribed).unwrap_or(false);
         use ui::icon::Kind;
         let play = if matches!(st.phase, Phase::Paused | Phase::Ended) { Kind::Play } else { Kind::Pause };
-        let repeat_icon = match s.repeat {
-            Repeat::One => Kind::Repeat1,
-            Repeat::List => Kind::Repeat,
-            Repeat::Off => Kind::PauseEnd,
-            _ => Kind::Autoplay,
+        let repeat_icon = match s.playback_mode {
+            PlaybackMode::RepeatOne => Kind::Repeat1,
+            PlaybackMode::ListOnce | PlaybackMode::ListRepeat | PlaybackMode::Shuffle | PlaybackMode::Reverse => Kind::Repeat,
+            PlaybackMode::PauseEach | PlaybackMode::CloseEach => Kind::PauseEnd,
+            PlaybackMode::PlayNext => Kind::Autoplay,
         };
         let kinds = [
             play,
@@ -856,7 +962,7 @@ impl Screen<YtHost> for PlayerScreen {
                 OSD_SUBSCRIBE => subscribed,
                 OSD_SB => s.sponsorblock,
                 OSD_SPEED => (st.rate - 1.0).abs() > 0.01 && st.rate > 0.0,
-                OSD_REPEAT => s.repeat != Repeat::Autoplay,
+                OSD_REPEAT => s.playback_mode != PlaybackMode::PlayNext,
                 _ => false,
             };
             if hot {
@@ -902,6 +1008,93 @@ impl Screen<YtHost> for PlayerScreen {
     }
 }
 
+/// The remote's number keys: 0..9 (SDL symbols / LG key codes 48..57).
+fn digit_key(sym: u32, wcode: u32) -> Option<u64> {
+    [sym, wcode].into_iter().find(|k| (48..=57).contains(k)).map(|k| (k - 48) as u64)
+}
+
+/// The text after the duration under the seek bar ("Time in the controls"): the time left, or the
+/// wall-clock time the video ends at the current speed; `None` when off (or live / finished).
+pub fn ending_text(st: &crate::host::PlayerView, s: &crate::settings::Settings) -> Option<String> {
+    use crate::settings::ControlsTime;
+    if st.live || st.duration_ms <= st.position_ms {
+        return None;
+    }
+    let left = st.duration_ms - st.position_ms;
+    match s.controls_time {
+        ControlsTime::Off => None,
+        ControlsTime::Remaining => Some(crate::i18n::tr("{} left").replace("{}", &ui::fmt_time(left))),
+        ControlsTime::Ending => {
+            let rate = if st.rate > 0.0 { st.rate as f64 } else { 1.0 };
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;
+            let end = now + (left as f64 / 1000.0 / rate).round() as i64 + local_offset_secs();
+            let (h, m) = ((end / 3600).rem_euclid(24), (end / 60).rem_euclid(60));
+            let t = if s.time_24h {
+                format!("{h:02}:{m:02}")
+            } else {
+                format!("{}:{m:02} {}", if h % 12 == 0 { 12 } else { h % 12 }, if h < 12 { "AM" } else { "PM" })
+            };
+            Some(crate::i18n::tr("Ends at {}").replace("{}", &t))
+        }
+    }
+}
+
+#[cfg(windows)]
+fn local_offset_secs() -> i64 {
+    crate::sim::local_offset_secs()
+}
+
+#[cfg(not(windows))]
+fn local_offset_secs() -> i64 {
+    unsafe {
+        let t = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&t, &mut tm).is_null() {
+            0
+        } else {
+            tm.tm_gmtoff as i64
+        }
+    }
+}
+
+/// The list the current video is in: the playlist's items, else the list it was opened from.
+fn current_list(cx: &Cx<'_, YtHost>, current: &str) -> Option<(Vec<String>, Option<String>)> {
+    if let Some(pl) = cx.views.player.extras.watch.as_ref().and_then(|w| w.playlist.as_ref()) {
+        if pl.items.iter().any(|i| i.id == current) {
+            return Some((pl.items.iter().map(|i| i.id.clone()).collect(), Some(pl.id.clone())));
+        }
+    }
+    let q = &cx.views.store.queue;
+    q.iter().any(|v| v == current).then(|| (q.clone(), None))
+}
+
+/// The item `dir` places from `current` in its list; at an end, wraps (`wrap`) or stops.
+fn list_step(cx: &Cx<'_, YtHost>, current: &str, dir: i32, wrap: bool) -> Option<(String, Option<String>)> {
+    let (ids, pl) = current_list(cx, current)?;
+    let i = ids.iter().position(|v| v == current)? as i32 + dir;
+    let n = ids.len() as i32;
+    let j = if (0..n).contains(&i) {
+        i
+    } else if wrap {
+        i.rem_euclid(n)
+    } else {
+        return None;
+    };
+    Some((ids[j as usize].clone(), pl))
+}
+
+/// A random other item of the current list.
+fn list_random(cx: &Cx<'_, YtHost>, current: &str) -> Option<(String, Option<String>)> {
+    let (ids, pl) = current_list(cx, current)?;
+    let others: Vec<&String> = ids.iter().filter(|v| *v != current).collect();
+    if others.is_empty() {
+        return None;
+    }
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
+    let seed = (nanos as u64 ^ cx.views.now_ms as u64).wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    Some((others[(seed >> 33) as usize % others.len()].clone(), pl))
+}
+
 /// Next video when one ends: the next playlist item (or the first when repeating the list),
 /// else the watch page's autoplay pick.
 /// What each OSD button does, in words (its tooltip).
@@ -927,15 +1120,6 @@ fn osd_name(i: usize) -> &'static str {
     })
 }
 
-/// A playback mode in words.
-fn repeat_label(r: Repeat) -> &'static str {
-    match r {
-        Repeat::Autoplay => "Play next",
-        Repeat::Off => "Stop",
-        Repeat::One => "Repeat",
-        Repeat::List => "Repeat list",
-    }
-}
 
 /// The suggestions as a row of cards at `y`, the selected one lifted and lit.
 fn draw_suggestions(p: plx_ui::Painter, m: &dyn plx_machine::machine::Measure, items: &[yt_core::model::Item], sel: usize, y: f32) {

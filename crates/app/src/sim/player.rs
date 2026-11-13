@@ -53,6 +53,7 @@ impl Player {
                         s.title = resolved.title.clone();
                         s.author = resolved.author.clone();
                         s.duration_ms = resolved.length_secs * 1000;
+                        s.paid_promotion = resolved.raw.get("paidContentOverlay").is_some();
                         s.video_id = video_id.clone();
                         s.channel_id = resolved.channel_id.clone();
                         s.storyboard = resolved.storyboard_spec.clone();

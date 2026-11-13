@@ -55,11 +55,14 @@ pub struct Prefs {
     pub codec: &'static str,
     /// Audio track id for multi-language videos (None = the default track).
     pub audio_track: Option<String>,
+    /// Preferred audio language ("de", "pt-BR"): the track in it when `audio_track` is not set
+    /// (None = the default track).
+    pub audio_language: Option<String>,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { min_height: 720, max_height: 1080, codec: "avc1", audio_track: None }
+        Prefs { min_height: 720, max_height: 1080, codec: "avc1", audio_track: None, audio_language: None }
     }
 }
 
@@ -156,7 +159,22 @@ impl Resolved {
             .iter()
             .find_map(|f| f["approxDurationMs"].as_str()?.parse::<u64>().ok())
             .unwrap_or(self.length_secs * 1000);
-        mpd::build_with_audio(&self.adaptive, dur, prefs.codec, prefs.min_height, prefs.max_height, prefs.audio_track.as_deref()).map(|m| m.0)
+        let track = prefs.audio_track.clone().or_else(|| prefs.audio_language.as_deref().and_then(|l| self.audio_track_for(l)));
+        mpd::build_with_audio(&self.adaptive, dur, prefs.codec, prefs.min_height, prefs.max_height, track.as_deref()).map(|m| m.0)
+    }
+
+    /// The audio track id in language `lang` ("de" matches "de" and "de-DE"; ids look like
+    /// "de-DE.3"), if the video offers one.
+    pub fn audio_track_for(&self, lang: &str) -> Option<String> {
+        let base = |l: &str| l.split(['-', '_']).next().unwrap_or(l).to_ascii_lowercase();
+        let want = base(lang);
+        let tracks = self.audio_tracks();
+        let lang_of = |id: &str| id.split('.').next().unwrap_or(id).to_string();
+        tracks
+            .iter()
+            .find(|t| lang_of(&t.0).eq_ignore_ascii_case(lang))
+            .or_else(|| tracks.iter().find(|t| base(&lang_of(&t.0)) == want))
+            .map(|t| t.0.clone())
     }
 
     /// Audio languages offered: (track id, display name, is default), deduplicated.

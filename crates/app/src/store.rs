@@ -193,8 +193,8 @@ pub struct Store {
     pub groups: Vec<(String, String)>,
     /// Subscribe state per channel id (from YouTube, updated optimistically).
     pub subscribed: HashMap<String, bool>,
-    /// Sleep timer length chosen (0 = off), for the menu.
-    pub sleep_minutes: u32,
+    /// A SponsorBlock segment is offered for skipping (OK skips it).
+    pub sb_offered: bool,
     /// Playlists for the "Save to playlist" picker: video id -> options.
     pub playlist_options: HashMap<String, Vec<yt_core::actions::PlaylistOption>>,
     /// Videos of the list the current video was opened from (for next/previous), and whether
@@ -248,7 +248,7 @@ impl Store {
         let mut fresh = Vec::new();
         let channel_items: Vec<Item>;
         let groups: Vec<(String, Vec<&Item>, Option<String>)> = if *k == FeedKey::Section(Section::Channels) {
-            channel_items = page
+            let mut items: Vec<Item> = page
                 .tabs
                 .iter()
                 .filter(|t| matches!(&t.endpoint, Some(Endpoint::Browse { params: Some(_), .. })))
@@ -261,6 +261,10 @@ impl Store {
                     ..Default::default()
                 })
                 .collect();
+            if self.settings.channels_alphabetical {
+                items.sort_by_cached_key(|i| i.title.to_lowercase());
+            }
+            channel_items = items;
             vec![(String::new(), channel_items.iter().collect(), None)]
         } else {
             page.shelves.iter().map(|s| (s.title.clone(), s.items.iter().collect(), s.continuation.clone())).collect()
@@ -278,7 +282,7 @@ impl Store {
                     elem: self.next_elem,
                     title: it.title.clone(),
                     detail: it.lines.join(" \u{2022} "),
-                    thumb: it.thumbnail.clone().unwrap_or_default(),
+                    thumb: card_thumb(&self.settings, it),
                     item: it.clone(),
                 });
             }
@@ -336,7 +340,7 @@ impl Store {
                 elem: self.next_elem,
                 title: it.title.clone(),
                 detail: it.lines.join(" \u{2022} "),
-                thumb: it.thumbnail.clone().unwrap_or_default(),
+                thumb: card_thumb(&self.settings, &it),
                 item: it,
             });
         }
@@ -378,6 +382,17 @@ impl Store {
         self.feeds.values().flat_map(|f| f.cards.iter()).find(|c| c.video_id() == Some(video_id)).and_then(|c| c.item.channel.clone())
     }
 
+    /// A video's length from its card's duration badge (ms).
+    pub fn card_duration_ms(&self, video_id: &str) -> Option<u64> {
+        let card = self.feeds.values().flat_map(|f| f.cards.iter()).find(|c| c.video_id() == Some(video_id))?;
+        parse_duration(card.item.badge.as_deref()?)
+    }
+
+    /// A card shows `video_id` as a live stream.
+    pub fn card_is_live(&self, video_id: &str) -> bool {
+        self.feeds.values().flat_map(|f| f.cards.iter()).any(|c| c.video_id() == Some(video_id) && c.item.kind == ItemKind::Live)
+    }
+
     /// Where to resume a partly watched video: its card's watched percentage of its duration
     /// badge. Nothing for unwatched or (nearly) finished videos.
     pub fn resume_point(&self, video_id: &str) -> Option<u64> {
@@ -400,30 +415,47 @@ impl Store {
 struct Filter<'a> {
     s: &'a Settings,
     hide_shorts: bool,
+    hide_watched: bool,
+    hide_upcoming: bool,
+    hide_streams: bool,
 }
 
 impl<'a> Filter<'a> {
     fn from(s: &'a Settings, k: &FeedKey) -> Self {
-        let hide_shorts = match k {
-            FeedKey::Section(Section::Home) => s.hide_shorts_home,
-            FeedKey::Section(Section::Subscriptions) => s.hide_shorts_subscriptions,
-            FeedKey::Search { .. } => s.hide_shorts_search,
-            _ => false,
-        };
-        Filter { s, hide_shorts }
+        let home = *k == FeedKey::Section(Section::Home);
+        let subs = *k == FeedKey::Section(Section::Subscriptions);
+        let channel = matches!(k, FeedKey::Browse { id, .. } if id.starts_with("UC"));
+        let hide_shorts = s.hide_shorts_everywhere
+            || match k {
+                FeedKey::Section(Section::Home) => s.hide_shorts_home,
+                FeedKey::Section(Section::Subscriptions) => s.hide_shorts_subscriptions,
+                FeedKey::Search { .. } => s.hide_shorts_search,
+                _ => false,
+            };
+        Filter {
+            s,
+            hide_shorts,
+            hide_watched: (home && s.hide_watched_home) || (subs && s.hide_watched_subscriptions),
+            hide_upcoming: (home && s.hide_upcoming_home) || (subs && s.hide_upcoming_subscriptions) || (channel && s.hide_upcoming_channels),
+            hide_streams: subs && s.hide_streams_subscriptions,
+        }
     }
 
     fn keep(&self, it: &Item) -> bool {
         if self.hide_shorts && it.kind == ItemKind::Short {
             return false;
         }
-        if self.s.hide_upcoming && it.kind == ItemKind::Upcoming {
+        if self.hide_upcoming && it.kind == ItemKind::Upcoming {
+            return false;
+        }
+        // Live now, or a past live stream ("Streamed 2 days ago"; requests are made in English).
+        if self.hide_streams && (it.kind == ItemKind::Live || it.lines.iter().any(|l| l.contains("Streamed "))) {
             return false;
         }
         if self.s.hide_mixes && it.kind == ItemKind::Mix {
             return false;
         }
-        if self.s.hide_watched && it.progress.is_some_and(|p| p >= 90) {
+        if self.hide_watched && it.progress.is_some_and(|p| p >= 90) {
             return false;
         }
         if let Some(ch) = &it.channel {
@@ -432,6 +464,17 @@ impl<'a> Filter<'a> {
             }
         }
         true
+    }
+}
+
+/// A card's picture: the item's thumbnail, or YouTube's frame from the start / middle / end of
+/// a video ("Thumbnail picture").
+fn card_thumb(s: &Settings, it: &Item) -> String {
+    let t = it.thumbnail.clone().unwrap_or_default();
+    if it.kind == ItemKind::Video {
+        crate::settings::thumbnail_frame(&s.thumbnail_frame).rewrite(&t)
+    } else {
+        t
     }
 }
 

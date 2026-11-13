@@ -2,7 +2,7 @@
 //! A panel on the right; OK runs an action, Left/Right change a player option in place.
 
 use crate::host::{UserAction, YtArg, YtFx, YtHost};
-use crate::settings::Repeat;
+use crate::settings::{PlaybackMode, SLEEP_MINS, SPEEDS};
 use crate::store::FeedKey;
 use crate::ui::{self, Row, VList};
 use plx_machine::machine::{
@@ -24,6 +24,9 @@ enum Act {
     OpenChannel(String),
     OpenPlaylist(String),
     BlockChannel(String),
+    UnblockChannel(String),
+    /// Play (video id) from the start and / or without watch history.
+    PlayWith(String, bool, bool),
     Pin(String, String, Option<String>),
     AddToGroup(Option<String>, String, String, Option<String>),
     Unpin(String),
@@ -48,6 +51,8 @@ enum Act {
     SubFont,
     SubBold,
     RepeatMode,
+    /// SponsorBlock on / off for a channel (by name).
+    SbChannel(String),
     Close,
 }
 
@@ -79,11 +84,12 @@ const SUB_SIZES: &[u32] = &[32, 38, 44, 52, 60, 72];
 const SUB_COLORS: &[&str] = &["white", "light gray", "gray", "dark gray", "yellow", "light yellow", "cyan", "green", "orange", "pink"];
 const SUB_STYLES: &[&str] = &["outline", "shadow", "box"];
 const SUB_FONTS: &[&str] = &["default", "sans", "serif", "mono", "roboto"];
-const SPEEDS: &[f32] = &[0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
 
 /// Card-menu item kinds, in the default order, with their settings labels.
-pub const CARD_ITEMS: [(&str, &str); 9] = [
+pub const CARD_ITEMS: [(&str, &str); 14] = [
     ("play", "Card menu: Play"),
+    ("play_start", "Card menu: Play from the start"),
+    ("play_private", "Card menu: Play without history"),
     ("open", "Card menu: Open channel / playlist"),
     ("groups", "Card menu: Channel groups"),
     ("pin", "Card menu: Pin to sidebar"),
@@ -92,6 +98,9 @@ pub const CARD_ITEMS: [(&str, &str); 9] = [
     ("youtube", "Card menu: YouTube's items"),
     ("more_from", "Card menu: More from channel"),
     ("block", "Card menu: Block channel"),
+    ("sponsorblock", "Card menu: SponsorBlock on this channel"),
+    ("subscribe", "Card menu: Subscribe / unsubscribe"),
+    ("comments", "Card menu: Comments"),
 ];
 
 impl MenuScreen {
@@ -119,12 +128,26 @@ impl MenuScreen {
             if let Some(v) = card.video_id() {
                 kind = "play";
                 tagged.push((kind, "Play".to_string(), Act::Play(v.to_string())));
+                tagged.push(("play_start", "Play from the start".to_string(), Act::PlayWith(v.to_string(), true, false)));
+                tagged.push(("play_private", "Play without history".to_string(), Act::PlayWith(v.to_string(), false, true)));
+                if !cx.views.store.settings.child_mode {
+                    tagged.push(("comments", "Comments".to_string(), Act::Comments(v.to_string())));
+                }
             }
             if let Some(Endpoint::Browse { browse_id, params }) = &card.item.endpoint {
                 if browse_id.starts_with("UC") {
                     tagged.push(("open", "Open channel".into(), Act::OpenChannel(browse_id.clone())));
                 } else {
                     tagged.push(("open", "Open".into(), Act::OpenPlaylist(browse_id.clone())));
+                }
+                if browse_id.starts_with("UC") && cx.views.store.signed_in {
+                    // Subscribed: as YouTube said, or it is on the subscribed channels' pages.
+                    let in_subs = [FeedKey::Section(crate::store::Section::Channels), FeedKey::Section(crate::store::Section::Subscriptions)]
+                        .iter()
+                        .any(|k| cx.views.store.cards(k).iter().any(|c| c.elem == card.elem));
+                    let subscribed = cx.views.store.subscribed.get(browse_id).copied().unwrap_or(in_subs);
+                    let label = crate::i18n::tr(if subscribed { "Unsubscribe from {}" } else { "Subscribe to {}" }).replace("{}", &card.title);
+                    tagged.push(("subscribe", label, Act::User(UserAction::Subscribe { channel_id: browse_id.clone(), subscribe: !subscribed })));
                 }
                 if browse_id.starts_with("UC") {
                     for (gid, gt) in &cx.views.store.groups {
@@ -156,7 +179,14 @@ impl MenuScreen {
             }
             if let Some(ch) = card.item.channel.as_ref().filter(|_| !cx.views.store.settings.child_mode) {
                 tagged.push(("more_from", format!("More from {ch}"), Act::SearchFor(ch.clone())));
-                tagged.push(("block", format!("Block {ch}"), Act::BlockChannel(ch.clone())));
+                if cx.views.store.settings.blocked_channels.contains(ch) {
+                    tagged.push(("block", crate::i18n::tr("Unblock {}").replace("{}", ch), Act::UnblockChannel(ch.clone())));
+                } else {
+                    tagged.push(("block", format!("Block {ch}"), Act::BlockChannel(ch.clone())));
+                }
+                if cx.views.store.settings.sponsorblock && card.video_id().is_some() {
+                    tagged.push(("sponsorblock", "SponsorBlock on this channel".into(), Act::SbChannel(ch.clone())));
+                }
             }
         }
         let s = &cx.views.store.settings;
@@ -233,6 +263,7 @@ impl MenuScreen {
         acts.extend(vec![
             ("Playback speed".to_string(), Act::Speed),
             ("Audio language".to_string(), Act::AudioTrack),
+            ("Video zoom".to_string(), Act::ZoomMode),
             ("Sleep timer".to_string(), Act::Sleep),
             ("Maximum quality".to_string(), Act::MaxQuality),
             ("Subtitles".to_string(), Act::Subtitles),
@@ -242,6 +273,11 @@ impl MenuScreen {
             ("Subtitle font".to_string(), Act::SubFont),
             ("Bold subtitles".to_string(), Act::SubBold),
             ("When the video ends".to_string(), Act::RepeatMode),
+        ]);
+        if cx.views.store.settings.sponsorblock && !st.author.is_empty() {
+            acts.push(("SponsorBlock on this channel".to_string(), Act::SbChannel(st.author.clone())));
+        }
+        acts.extend(vec![
             ("Close".to_string(), Act::Close),
         ]);
         Self::make(entry, "Player options".into(), acts)
@@ -315,25 +351,15 @@ impl MenuScreen {
                     crate::player::Zoom::Zoom => "Zoom in",
                 })
             ),
-            Act::Sleep => match cx.views.store.sleep_minutes {
-                0 => format!("{}  \u{203A}", crate::i18n::tr("Off")),
-                m => format!("{m} min  \u{203A}"),
-            },
+            Act::Sleep => format!("{}  \u{203A}", crate::settings::sleep_label(s.sleep_timer_mins)),
             Act::Subtitles => format!("{}  \u{203A}", crate::i18n::tr(if s.subtitles { "On" } else { "Off" })),
             Act::SubSize => format!("{}  \u{203A}", s.subtitle_size),
             Act::SubColor => format!("{}  \u{203A}", crate::i18n::tr(&s.subtitle_color)),
             Act::SubBold => format!("{}  \u{203A}", crate::i18n::tr(if s.subtitle_bold { "On" } else { "Off" })),
             Act::SubFont => format!("{}  \u{203A}", crate::i18n::tr(&s.subtitle_font)),
             Act::SubStyle => format!("{}  \u{203A}", crate::i18n::tr(&s.subtitle_style)),
-            Act::RepeatMode => format!(
-                "{}  \u{203A}",
-                crate::i18n::tr(match s.repeat {
-                    Repeat::Autoplay => "Play next",
-                    Repeat::Off => "Stop",
-                    Repeat::One => "Repeat",
-                    Repeat::List => "Repeat list",
-                })
-            ),
+            Act::RepeatMode => format!("{}  \u{203A}", crate::i18n::tr(s.playback_mode.label())),
+            Act::SbChannel(ch) => crate::i18n::tr(if s.sb_excluded_channels.contains(ch) { "Off" } else { "On" }).to_string(),
             _ => return None,
         })
     }
@@ -345,7 +371,7 @@ impl MenuScreen {
         Some(match act {
             Act::Speed => {
                 let r = if cx.views.player.rate > 0.0 { cx.views.player.rate } else { 1.0 };
-                (SPEEDS.iter().map(|v| format!("{v}x")).collect(), SPEEDS.iter().position(|v| (v - r).abs() < 0.01).unwrap_or(3))
+                (SPEEDS.iter().map(|v| format!("{v}x")).collect(), crate::settings::speed_index(r))
             }
             Act::MaxQuality => {
                 const Q: &[u32] = &[480, 720, 1080, 1440, 2160];
@@ -359,24 +385,18 @@ impl MenuScreen {
                 let cur = st.audio_track.clone().or_else(|| st.audio_tracks.iter().find(|t| t.2).map(|t| t.0.clone()));
                 (st.audio_tracks.iter().map(|t| t.1.clone()).collect(), st.audio_tracks.iter().position(|t| Some(&t.0) == cur.as_ref()).unwrap_or(0))
             }
-            Act::Sleep => {
-                const T: &[u32] = &[0, 15, 30, 60, 90];
-                (
-                    T.iter().map(|m| if *m == 0 { "Off".to_string() } else { format!("{m} min") }).collect(),
-                    T.iter().position(|m| *m == cx.views.store.sleep_minutes).unwrap_or(0),
-                )
-            }
+            Act::Sleep => (
+                SLEEP_MINS.iter().map(|m| crate::settings::sleep_label(*m)).collect(),
+                SLEEP_MINS.iter().position(|m| *m == s.sleep_timer_mins).unwrap_or(0),
+            ),
             Act::SubSize => (SUB_SIZES.iter().map(|v| v.to_string()).collect(), SUB_SIZES.iter().position(|v| *v == s.subtitle_size).unwrap_or(2)),
             Act::SubColor => (SUB_COLORS.iter().map(|v| v.to_string()).collect(), SUB_COLORS.iter().position(|v| *v == s.subtitle_color).unwrap_or(0)),
             Act::SubFont => (SUB_FONTS.iter().map(|v| v.to_string()).collect(), SUB_FONTS.iter().position(|v| *v == s.subtitle_font).unwrap_or(0)),
             Act::SubStyle => (SUB_STYLES.iter().map(|v| v.to_string()).collect(), SUB_STYLES.iter().position(|v| *v == s.subtitle_style).unwrap_or(0)),
-            Act::RepeatMode => {
-                const R: &[Repeat] = &[Repeat::Autoplay, Repeat::Off, Repeat::One, Repeat::List];
-                (
-                    vec!["Play next".into(), "Stop".into(), "Repeat".into(), "Repeat list".into()],
-                    R.iter().position(|x| *x == s.repeat).unwrap_or(0),
-                )
-            }
+            Act::RepeatMode => (
+                PlaybackMode::ALL.iter().map(|m| m.label().to_string()).collect(),
+                PlaybackMode::ALL.iter().position(|x| *x == s.playback_mode).unwrap_or(0),
+            ),
             _ => return None,
         })
     }
@@ -386,6 +406,17 @@ impl MenuScreen {
             Act::Play(v) => {
                 fx.push(Fx::Nav(NavOp::Pop));
                 fx.push(Fx::Nav(NavOp::Push(YtArg::Player { video_id: v.clone(), playlist: None })));
+            }
+            Act::PlayWith(v, from_start, no_history) => {
+                fx.push(Fx::App(YtFx::PlayOptions { video_id: v.clone(), from_start: *from_start, no_history: *no_history }));
+                fx.push(Fx::Nav(NavOp::Pop));
+                fx.push(Fx::Nav(NavOp::Push(YtArg::Player { video_id: v.clone(), playlist: None })));
+            }
+            Act::UnblockChannel(ch) => {
+                let ch = ch.clone();
+                fx.push(Fx::App(YtFx::Toast(crate::i18n::tr("{} unblocked").replace("{}", &ch))));
+                fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| s.blocked_channels.retain(|c| *c != ch)))));
+                fx.push(Fx::Nav(NavOp::Pop));
             }
             Act::OpenChannel(id) | Act::OpenPlaylist(id) => {
                 fx.push(Fx::Nav(NavOp::Pop));
@@ -423,7 +454,7 @@ impl MenuScreen {
             }
             Act::Speed => {
                 let cur = if cx.views.player.rate > 0.0 { cx.views.player.rate } else { 1.0 };
-                let i = SPEEDS.iter().position(|s| (*s - cur).abs() < 0.01).unwrap_or(3) as i32;
+                let i = crate::settings::speed_index(cur) as i32;
                 let r = SPEEDS[((i + dir).clamp(0, SPEEDS.len() as i32 - 1)) as usize];
                 fx.push(Fx::App(YtFx::SetSpeed(r)));
             }
@@ -443,11 +474,10 @@ impl MenuScreen {
                 let i = Z.iter().position(|z| *z == cx.views.player.zoom).unwrap_or(0) as i32;
                 fx.push(Fx::App(YtFx::SetZoom(Z[((i + dir).rem_euclid(3)) as usize])));
             }
-            Act::Sleep => {
-                const M: &[u32] = &[0, 15, 30, 60, 90];
-                let i = M.iter().position(|m| *m == cx.views.store.sleep_minutes).unwrap_or(0) as i32;
-                fx.push(Fx::App(YtFx::SleepTimer(M[((i + dir).rem_euclid(M.len() as i32)) as usize])));
-            }
+            Act::Sleep => fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| {
+                let i = SLEEP_MINS.iter().position(|m| *m == s.sleep_timer_mins).unwrap_or(0) as i32;
+                s.sleep_timer_mins = SLEEP_MINS[((i + dir).rem_euclid(SLEEP_MINS.len() as i32)) as usize];
+            })))),
             Act::MaxQuality => {
                 fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| {
                     const Q: &[u32] = &[480, 720, 1080, 1440, 2160];
@@ -476,10 +506,20 @@ impl MenuScreen {
                 s.subtitle_style = SUB_STYLES[(i + dir).rem_euclid(SUB_STYLES.len() as i32) as usize].into();
             })))),
             Act::RepeatMode => fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| {
-                const R: &[Repeat] = &[Repeat::Autoplay, Repeat::Off, Repeat::One, Repeat::List];
-                let i = R.iter().position(|r| *r == s.repeat).unwrap_or(0) as i32;
-                s.repeat = R[((i + dir).rem_euclid(R.len() as i32)) as usize];
+                let all = PlaybackMode::ALL;
+                let i = all.iter().position(|r| *r == s.playback_mode).unwrap_or(0) as i32;
+                s.playback_mode = all[((i + dir).rem_euclid(all.len() as i32)) as usize];
             })))),
+            Act::SbChannel(ch) => {
+                let ch = ch.clone();
+                fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| {
+                    if let Some(i) = s.sb_excluded_channels.iter().position(|c| *c == ch) {
+                        s.sb_excluded_channels.remove(i);
+                    } else {
+                        s.sb_excluded_channels.push(ch);
+                    }
+                }))));
+            }
             Act::User(a) => {
                 fx.push(Fx::App(YtFx::Act(a.clone())));
                 fx.push(Fx::Nav(NavOp::Pop));

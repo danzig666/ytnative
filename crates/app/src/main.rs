@@ -396,6 +396,7 @@ fn main() {
 
             if !inputs.is_empty() {
                 last_input = now;
+                rig.last_key_ms = now;
                 if std::env::var_os("YTNATIVE_FRAME_DEBUG").is_some() {
                     log(&format!("framedbg input x{} at {now}", inputs.len()));
                 }
@@ -418,6 +419,7 @@ fn main() {
                 let in_player = top == Some("player") || over_player;
                 match l.poll(&rig.player_view) {
                     lounge::Action::Play { video_id, start_ms, playlist } => {
+                        rig.phone_video = Some(video_id.clone());
                         if let Some(ms) = start_ms {
                             rig.pending_start = Some((video_id.clone(), ms));
                         }
@@ -427,6 +429,7 @@ fn main() {
                         }
                         d.request(MachineId::Nav, if in_player { NavOp::Replace(arg) } else { NavOp::Push(arg) });
                         last_input = now;
+                        rig.last_key_ms = now;
                     }
                     lounge::Action::TogglePause(want_play) => {
                         let paused = rig.player_view.phase == player::Phase::Paused;
@@ -441,6 +444,24 @@ fn main() {
                         }
                         if in_player {
                             d.request(MachineId::Nav, NavOp::Pop);
+                        }
+                    }
+                    lounge::Action::Connected(name) => {
+                        if rig.store.settings.lounge_connect_notice {
+                            rig.store.toast(i18n::tr("{} connected").replace("{}", &name), rig.now_ms);
+                        }
+                    }
+                    lounge::Action::Disconnected(name) => {
+                        if rig.store.settings.lounge_connect_notice {
+                            rig.store.toast(i18n::tr("{} disconnected").replace("{}", &name), rig.now_ms);
+                        }
+                        if rig.store.settings.lounge_close_on_disconnect {
+                            if over_player {
+                                d.request(MachineId::Nav, NavOp::Pop);
+                            }
+                            if in_player {
+                                d.request(MachineId::Nav, NavOp::Pop);
+                            }
                         }
                     }
                     lounge::Action::Key(k) => {

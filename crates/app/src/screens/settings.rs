@@ -2,7 +2,7 @@
 //! value; OK or Right steps forward, Left steps back. Changes are saved immediately.
 
 use crate::host::{SettingsPage, YtArg, YtFx, YtHost};
-use crate::settings::{Codec, Repeat, SbAction, Settings};
+use crate::settings::{secs_label, Codec, ControlsTime, OkAction, PlaybackMode, RememberSpeed, SbAction, Settings, SLEEP_MINS, SPEEDS};
 use crate::store::Section;
 use crate::ui::{self, Row, VList};
 use plx_machine::machine::{
@@ -24,6 +24,8 @@ enum Item {
     Opt(&'static str, Get, Change),
     Action(&'static str, fn(&mut Effects<'_, YtHost>)),
     Info(&'static str, fn(&Cx<'_, YtHost>) -> String),
+    /// A blocked channel (by index in the settings): OK unblocks it.
+    Blocked(usize),
 }
 
 fn cycle_key(k: &mut String, d: i32) {
@@ -63,6 +65,18 @@ fn language_name(code: &str) -> String {
     crate::i18n::language_name(code)
 }
 
+/// Language codes offered in language lists (each language once: aliases such as iw / zh-CN are
+/// not offered).
+fn language_codes() -> Vec<&'static str> {
+    crate::i18n::LANGUAGES.iter().map(|(c, _)| *c).filter(|c| !matches!(*c, "iw" | "tl" | "nb" | "zh-CN" | "zh-TW" | "zh")).collect()
+}
+
+/// Steps through `list` (strings) from `cur` by `d`, wrapping.
+fn cycle_str(list: &[&str], cur: &mut String, d: i32) {
+    let i = list.iter().position(|x| *x == cur.as_str()).unwrap_or(0) as i32;
+    *cur = list[((i + d).rem_euclid(list.len() as i32)) as usize].to_string();
+}
+
 fn on_off(b: bool) -> String {
     if b { "On".into() } else { "Off".into() }
 }
@@ -84,9 +98,36 @@ fn sb(a: SbAction) -> String {
 }
 const SB: &[SbAction] = &[SbAction::Off, SbAction::Skip, SbAction::SkipWithToast, SbAction::Ask];
 
-fn items(page: SettingsPage) -> Vec<Item> {
+fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
     use Item::*;
     match page {
+        SettingsPage::Blocked if s.blocked_channels.is_empty() => vec![Info("No blocked channels", |_| String::new())],
+        SettingsPage::Blocked => (0..s.blocked_channels.len()).map(Blocked).collect(),
+        SettingsPage::Markers => {
+            macro_rules! marker {
+                ($label:expr, $cat:expr) => {
+                    Opt($label, |s| on_off(!s.sb_marker_hidden.iter().any(|c| c == $cat)), |s, _| {
+                        if let Some(i) = s.sb_marker_hidden.iter().position(|c| c == $cat) {
+                            s.sb_marker_hidden.remove(i);
+                        } else {
+                            s.sb_marker_hidden.push($cat.to_string());
+                        }
+                    })
+                };
+            }
+            vec![
+                Opt("Segment markers on the seek bar", |s| on_off(s.sb_markers), |s, _| s.sb_markers = !s.sb_markers),
+                marker!("Sponsor", "sponsor"),
+                marker!("Self-promotion", "selfpromo"),
+                marker!("Interaction reminder", "interaction"),
+                marker!("Intro", "intro"),
+                marker!("Outro / endcards", "outro"),
+                marker!("Preview / recap", "preview"),
+                marker!("Non-music section", "music_offtopic"),
+                marker!("Filler", "filler"),
+                marker!("Highlight", "poi_highlight"),
+            ]
+        }
         SettingsPage::Root => vec![
             Page("Playback", SettingsPage::Playback),
             Page("Subtitles", SettingsPage::Subtitles),
@@ -109,43 +150,44 @@ fn items(page: SettingsPage) -> Vec<Item> {
                 |s, d| s.codec = cycle(&[Codec::Avc, Codec::Vp9, Codec::Av1], s.codec, d),
             ),
             Opt("HDR", |s| on_off(s.hdr), |s, _| s.hdr = !s.hdr),
-            Opt("Default speed", |s| format!("{}x", s.speed), |s, d| s.speed = cycle(&[0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0], s.speed, d)),
-            Opt("Remember speed per channel", |s| on_off(s.remember_speed_per_channel), |s, _| s.remember_speed_per_channel = !s.remember_speed_per_channel),
-            Opt("Seek step", |s| format!("{} s", s.seek_step_secs), |s, d| s.seek_step_secs = cycle(&[5, 10, 15, 30, 60], s.seek_step_secs, d)),
-            Opt(
-                "When a video ends",
-                |s| match s.repeat {
-                    Repeat::Autoplay => "Play next".into(),
-                    Repeat::Off => "Stop".into(),
-                    Repeat::One => "Repeat video".into(),
-                    Repeat::List => "Repeat list".into(),
-                },
-                |s, d| s.repeat = cycle(&[Repeat::Autoplay, Repeat::Off, Repeat::One, Repeat::List], s.repeat, d),
-            ),
             Opt("Playback engine", |s| if s.engine == "auto" { "4K / VP9 / AV1 (engine B)".into() } else { "System player".into() }, |s, _| {
                 s.engine = if s.engine == "auto" { "system".into() } else { "auto".into() }
             }),
-            Opt("Resume where you left off", |s| on_off(s.resume_playback), |s, _| s.resume_playback = !s.resume_playback),
-            Opt("Hide controls after", |s| format!("{} s", s.hud_timeout_secs), |s, d| s.hud_timeout_secs = cycle(&[2, 3, 4, 6, 8, 12], s.hud_timeout_secs, d)),
+            Opt("When a video ends", |s| s.playback_mode.label().into(), |s, d| s.playback_mode = cycle(PlaybackMode::ALL, s.playback_mode, d)),
+            Opt("Default speed", |s| format!("{}x", s.speed), |s, d| {
+                let i = crate::settings::speed_index(s.speed) as i32;
+                s.speed = SPEEDS[((i + d).rem_euclid(SPEEDS.len() as i32)) as usize];
+            }),
+            Opt("Remember speed", |s| s.remember_speed.label().into(), |s, d| s.remember_speed = cycle(RememberSpeed::ALL, s.remember_speed, d)),
+            Opt("OK button during playback", |s| s.ok_action.label().into(), |s, d| s.ok_action = cycle(OkAction::ALL, s.ok_action, d)),
+            Opt("Hide controls after", |s| if s.hud_timeout_secs == 0 { "Never".into() } else { secs_label(s.hud_timeout_secs) }, |s, d| {
+                s.hud_timeout_secs = cycle(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], s.hud_timeout_secs, d)
+            }),
+            Opt("Seek step", |s| secs_label(s.seek_step_secs), |s, d| s.seek_step_secs = cycle(&[1, 2, 3, 5, 7, 10, 15, 20, 30, 60], s.seek_step_secs, d)),
+            Opt("Seek with number keys", |s| on_off(s.seek_number_keys), |s, _| s.seek_number_keys = !s.seek_number_keys),
+            Opt("Time in the controls", |s| s.controls_time.label().into(), |s, d| s.controls_time = cycle(ControlsTime::ALL, s.controls_time, d)),
             Opt("Clock in player", |s| on_off(s.show_clock), |s, _| s.show_clock = !s.show_clock),
-            Opt("Show remaining time", |s| on_off(s.show_ending_time), |s, _| s.show_ending_time = !s.show_ending_time),
+            Opt("Sleep timer", |s| crate::settings::sleep_label(s.sleep_timer_mins), |s, d| s.sleep_timer_mins = cycle(SLEEP_MINS, s.sleep_timer_mins, d)),
+            Opt("Resume where you left off", |s| on_off(s.resume_playback), |s, _| s.resume_playback = !s.resume_playback),
+            Opt("Resume short videos (under 5 minutes)", |s| on_off(s.resume_short_videos), |s, _| s.resume_short_videos = !s.resume_short_videos),
+            Opt("Remember live stream position", |s| on_off(s.resume_live), |s, _| s.resume_live = !s.resume_live),
+            Opt("Loop Shorts", |s| on_off(s.loop_shorts), |s, _| s.loop_shorts = !s.loop_shorts),
+            Opt("Leave the player with a double BACK", |s| on_off(s.double_back_exit), |s, _| s.double_back_exit = !s.double_back_exit),
+            Opt("Show the controls when the next video starts", |s| on_off(s.hud_on_next_video), |s, _| s.hud_on_next_video = !s.hud_on_next_video),
+            Opt("Preferred audio language", |s| if s.audio_language.is_empty() { "Original".into() } else { language_name(&s.audio_language) }, |s, d| {
+                let mut l = vec![""];
+                l.extend(language_codes());
+                cycle_str(&l, &mut s.audio_language, d);
+            }),
         ],
         SettingsPage::Subtitles => vec![
             Opt("Subtitles", |s| on_off(s.subtitles), |s, _| s.subtitles = !s.subtitles),
             Opt(
                 "Language",
                 |s| language_name(&s.subtitle_language),
-                |s, d| {
-                    // Every listed language once (aliases such as iw / zh-CN are not offered).
-                    let l: Vec<&str> = crate::i18n::LANGUAGES
-                        .iter()
-                        .map(|(c, _)| *c)
-                        .filter(|c| !matches!(*c, "iw" | "tl" | "nb" | "zh-CN" | "zh-TW" | "zh"))
-                        .collect();
-                    let i = l.iter().position(|x| *x == s.subtitle_language).unwrap_or(0) as i32;
-                    s.subtitle_language = l[((i + d).rem_euclid(l.len() as i32)) as usize].into();
-                },
+                |s, d| cycle_str(&language_codes(), &mut s.subtitle_language, d),
             ),
+            Opt("Subtitles per channel", |s| on_off(s.subtitles_per_channel), |s, _| s.subtitles_per_channel = !s.subtitles_per_channel),
             Opt("Auto-translate when missing", |s| on_off(s.subtitle_auto_translate), |s, _| s.subtitle_auto_translate = !s.subtitle_auto_translate),
             Opt("Size", |s| s.subtitle_size.to_string(), |s, d| s.subtitle_size = cycle(&[32, 38, 44, 52, 60, 72], s.subtitle_size, d)),
             Opt("Colour", |s| s.subtitle_color.clone(), |s, d| {
@@ -164,7 +206,7 @@ fn items(page: SettingsPage) -> Vec<Item> {
                 let i = T.iter().position(|x| *x == s.subtitle_style).unwrap_or(0) as i32;
                 s.subtitle_style = T[((i + d).rem_euclid(T.len() as i32)) as usize].into();
             }),
-            Opt("Position from bottom", |s| format!("{} px", s.subtitle_bottom_offset), |s, d| s.subtitle_bottom_offset = cycle(&[40, 90, 140, 200], s.subtitle_bottom_offset, d)),
+            Opt("Position from bottom", |s| format!("{} {}", s.subtitle_bottom_offset, crate::i18n::tr("pixels")), |s, d| s.subtitle_bottom_offset = cycle(&[40, 90, 140, 200], s.subtitle_bottom_offset, d)),
         ],
         SettingsPage::SponsorBlock => vec![
             Opt("SponsorBlock", |s| on_off(s.sponsorblock), |s, _| s.sponsorblock = !s.sponsorblock),
@@ -176,20 +218,48 @@ fn items(page: SettingsPage) -> Vec<Item> {
             Opt("Preview / recap", |s| sb(s.sb_preview), |s, d| s.sb_preview = cycle(SB, s.sb_preview, d)),
             Opt("Non-music section", |s| sb(s.sb_music_offtopic), |s, d| s.sb_music_offtopic = cycle(SB, s.sb_music_offtopic, d)),
             Opt("Filler", |s| sb(s.sb_filler), |s, d| s.sb_filler = cycle(SB, s.sb_filler, d)),
+            Opt("Highlight", |s| sb(s.sb_highlight), |s, d| s.sb_highlight = cycle(SB, s.sb_highlight, d)),
             Opt("Skip each segment only once", |s| on_off(s.sb_skip_once), |s, _| s.sb_skip_once = !s.sb_skip_once),
-            Opt("Segment markers on the seek bar", |s| on_off(s.sb_markers), |s, _| s.sb_markers = !s.sb_markers),
+            Opt("Ignore short segments", |s| crate::settings::ms_label(s.sb_min_segment_ms), |s, d| {
+                let l: Vec<u32> = (0..=40).map(|i| i * 500).collect();
+                s.sb_min_segment_ms = cycle(&l, s.sb_min_segment_ms, d);
+            }),
+            Page("Segment markers", SettingsPage::Markers),
+            Opt("Use the alternative server", |s| on_off(s.sb_alt_server), |s, _| s.sb_alt_server = !s.sb_alt_server),
+            Opt("Paid promotion notice", |s| on_off(s.sb_paid_notice), |s, _| s.sb_paid_notice = !s.sb_paid_notice),
             Opt("DeArrow titles", |s| on_off(s.dearrow_titles), |s, _| s.dearrow_titles = !s.dearrow_titles),
             Opt("DeArrow thumbnails", |s| on_off(s.dearrow_thumbnails), |s, _| s.dearrow_thumbnails = !s.dearrow_thumbnails),
+            Opt("Fallback thumbnail when DeArrow has none", |s| crate::settings::thumbnail_frame_label(&s.dearrow_fallback).into(), |s, d| {
+                cycle_str(crate::settings::THUMBNAIL_FRAMES, &mut s.dearrow_fallback, d)
+            }),
             Opt("Return YouTube Dislike", |s| on_off(s.return_dislikes), |s, _| s.return_dislikes = !s.return_dislikes),
         ],
         SettingsPage::Content => vec![
+            Opt("Hide Shorts everywhere", |s| on_off(s.hide_shorts_everywhere), |s, _| s.hide_shorts_everywhere = !s.hide_shorts_everywhere),
             Opt("Hide Shorts on Home", |s| on_off(s.hide_shorts_home), |s, _| s.hide_shorts_home = !s.hide_shorts_home),
             Opt("Hide Shorts in Subscriptions", |s| on_off(s.hide_shorts_subscriptions), |s, _| s.hide_shorts_subscriptions = !s.hide_shorts_subscriptions),
             Opt("Hide Shorts in Search", |s| on_off(s.hide_shorts_search), |s, _| s.hide_shorts_search = !s.hide_shorts_search),
-            Opt("Hide watched videos", |s| on_off(s.hide_watched), |s, _| s.hide_watched = !s.hide_watched),
-            Opt("Hide upcoming streams", |s| on_off(s.hide_upcoming), |s, _| s.hide_upcoming = !s.hide_upcoming),
+            Opt("Hide watched videos on Home", |s| on_off(s.hide_watched_home), |s, _| s.hide_watched_home = !s.hide_watched_home),
+            Opt("Hide watched videos in Subscriptions", |s| on_off(s.hide_watched_subscriptions), |s, _| {
+                s.hide_watched_subscriptions = !s.hide_watched_subscriptions
+            }),
+            Opt("Hide upcoming streams on Home", |s| on_off(s.hide_upcoming_home), |s, _| s.hide_upcoming_home = !s.hide_upcoming_home),
+            Opt("Hide upcoming streams in Subscriptions", |s| on_off(s.hide_upcoming_subscriptions), |s, _| {
+                s.hide_upcoming_subscriptions = !s.hide_upcoming_subscriptions
+            }),
+            Opt("Hide upcoming streams on channel pages", |s| on_off(s.hide_upcoming_channels), |s, _| s.hide_upcoming_channels = !s.hide_upcoming_channels),
+            Opt("Hide streams in Subscriptions", |s| on_off(s.hide_streams_subscriptions), |s, _| s.hide_streams_subscriptions = !s.hide_streams_subscriptions),
             Opt("Hide mixes", |s| on_off(s.hide_mixes), |s, _| s.hide_mixes = !s.hide_mixes),
-            Opt("Blocked channels (OK clears)", |s| s.blocked_channels.len().to_string(), |s, _| s.blocked_channels.clear()),
+            Page("Blocked channels", SettingsPage::Blocked),
+            Opt("Watch history", |s| match s.watch_history.as_str() { "on" => "On".into(), "off" => "Off".into(), _ => "Automatic".into() }, |s, d| {
+                cycle_str(&["auto", "on", "off"], &mut s.watch_history, d)
+            }),
+            Opt("Search history", |s| on_off(s.search_history), |s, _| {
+                s.search_history = !s.search_history;
+                if !s.search_history {
+                    let _ = yt_core::search_history::clear();
+                }
+            }),
             Action("Clear search history", |fx| fx.push(Fx::App(YtFx::Act(crate::host::UserAction::ClearSearchHistory)))),
             Action("Import channel groups from USB", |fx| fx.push(Fx::App(YtFx::Act(crate::host::UserAction::ImportGroups)))),
             Opt("Child mode (no search, no comments)", |s| on_off(s.child_mode), |s, _| s.child_mode = !s.child_mode),
@@ -213,6 +283,16 @@ fn items(page: SettingsPage) -> Vec<Item> {
                     l.extend(crate::i18n::languages());
                     let i = l.iter().position(|x| *x == s.ui_language).unwrap_or(0) as i32;
                     s.ui_language = l[((i + d).rem_euclid(l.len() as i32)) as usize].into();
+                }),
+                Opt("Content country", |s| crate::settings::country_name(&s.content_country), |s, d| {
+                    let l: Vec<&str> = crate::settings::COUNTRIES.iter().map(|(c, _)| *c).collect();
+                    cycle_str(&l, &mut s.content_country, d);
+                }),
+                Opt("Thumbnail picture", |s| crate::settings::thumbnail_frame_label(&s.thumbnail_frame).into(), |s, d| {
+                    cycle_str(crate::settings::THUMBNAIL_FRAMES, &mut s.thumbnail_frame, d)
+                }),
+                Opt("Channels sorting", |s| (if s.channels_alphabetical { "Alphabetically" } else { "Last viewed" }).into(), |s, _| {
+                    s.channels_alphabetical = !s.channels_alphabetical
                 }),
                 Opt("Clock on video lists", |s| on_off(s.clock_on_pages), |s, _| s.clock_on_pages = !s.clock_on_pages),
                 Opt("24-hour clock", |s| on_off(s.time_24h), |s, _| s.time_24h = !s.time_24h),
@@ -259,11 +339,33 @@ fn items(page: SettingsPage) -> Vec<Item> {
                     })
                 };
             }
-            v.extend([card_item!(0), card_item!(1), card_item!(2), card_item!(3), card_item!(4), card_item!(5), card_item!(6), card_item!(7), card_item!(8)]);
+            v.extend([
+                card_item!(0),
+                card_item!(1),
+                card_item!(2),
+                card_item!(3),
+                card_item!(4),
+                card_item!(5),
+                card_item!(6),
+                card_item!(7),
+                card_item!(8),
+                card_item!(9),
+                card_item!(10),
+                card_item!(11),
+                card_item!(12),
+                card_item!(13),
+            ]);
             v
         }
         SettingsPage::Remote => vec![
             Opt("Link with TV code (after restart)", |s| on_off(s.lounge_enabled), |s, _| s.lounge_enabled = !s.lounge_enabled),
+            Opt("Show a message when a phone connects or disconnects", |s| on_off(s.lounge_connect_notice), |s, _| {
+                s.lounge_connect_notice = !s.lounge_connect_notice
+            }),
+            Opt("Close the player when the phone disconnects", |s| on_off(s.lounge_close_on_disconnect), |s, _| {
+                s.lounge_close_on_disconnect = !s.lounge_close_on_disconnect
+            }),
+            Opt("No watch history for videos started from the phone", |s| on_off(s.lounge_no_history), |s, _| s.lounge_no_history = !s.lounge_no_history),
             Opt("Red button", |s| s.color_keys[0].clone(), |s, d| cycle_key(&mut s.color_keys[0], d)),
             Opt("Green button", |s| s.color_keys[1].clone(), |s, d| cycle_key(&mut s.color_keys[1], d)),
             Opt("Yellow button", |s| s.color_keys[2].clone(), |s, d| cycle_key(&mut s.color_keys[2], d)),
@@ -310,6 +412,8 @@ fn title(page: SettingsPage) -> &'static str {
         SettingsPage::Interface => "Interface",
         SettingsPage::Remote => "Remote control",
         SettingsPage::About => "Account & about",
+        SettingsPage::Blocked => "Blocked channels",
+        SettingsPage::Markers => "Segment markers",
     }
 }
 
@@ -347,11 +451,11 @@ impl SettingsScreen {
     /// The values option `i` can take, from its own `change` (applied to a copy until it comes
     /// back round), and the current one's index.
     fn values(&self, i: usize, cx: &Cx<'_, YtHost>) -> Option<(Vec<String>, usize)> {
-        let Some(Item::Opt(_, get, change)) = items(self.page).into_iter().nth(i) else { return None };
+        let Some(Item::Opt(_, get, change)) = items(self.page, &cx.views.store.settings).into_iter().nth(i) else { return None };
         let mut s = cx.views.store.settings.clone();
         let first = get(&s);
         let mut v = vec![first.clone()];
-        for _ in 0..40 {
+        for _ in 0..300 {
             change(&mut s, 1);
             let x = get(&s);
             if x == first || v.contains(&x) {
@@ -368,9 +472,16 @@ impl SettingsScreen {
         Some((v, cur))
     }
 
-    fn change(&self, i: usize, dir: i32, fx: &mut Effects<'_, YtHost>) {
-        let list = items(self.page);
+    fn change(&self, i: usize, dir: i32, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
+        let list = items(self.page, &cx.views.store.settings);
         match list.get(i) {
+            Some(Item::Blocked(b)) if dir >= 0 => {
+                if let Some(name) = cx.views.store.settings.blocked_channels.get(*b).cloned() {
+                    fx.push(Fx::App(YtFx::Toast(crate::i18n::tr("{} unblocked").replace("{}", &name))));
+                    fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| s.blocked_channels.retain(|c| *c != name)))));
+                    fx.invalidate(plx_machine::present::Provenance::Input);
+                }
+            }
             Some(Item::Page(_, p)) if dir >= 0 => fx.push(Fx::Nav(NavOp::Push(YtArg::Settings(*p)))),
             Some(Item::Opt(_, _, change)) => {
                 let change = *change;
@@ -389,16 +500,16 @@ impl Machine<YtHost> for SettingsScreen {
         if let Some(a) = super::common::press_commit_as_activate(ev, cx, |_| true) {
             return self.step(&a, cx, fx);
         }
-        let n = items(self.page).len();
+        let n = items(self.page, &cx.views.store.settings).len();
         match ev {
             ScreenEvent::Activate(e) if self.choice.as_ref().is_some_and(|c| c.owns(*e)) => {
                 let c = self.choice.take().unwrap();
                 self.closed_row.set(c.row);
                 let k = c.list.index(*e, c.options.len()).unwrap_or(0);
-                if let Some(Item::Opt(_, get, change)) = items(self.page).into_iter().nth(c.row) {
+                if let Some(Item::Opt(_, get, change)) = items(self.page, &cx.views.store.settings).into_iter().nth(c.row) {
                     let target = c.options[k].clone();
                     fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| {
-                        for _ in 0..40 {
+                        for _ in 0..300 {
                             if get(s) == target {
                                 break;
                             }
@@ -418,7 +529,7 @@ impl Machine<YtHost> for SettingsScreen {
                             self.choice = Some(ui::ChoiceBox::new(self.list.entry, i, v, cur, anchor));
                             fx.invalidate(plx_machine::present::Provenance::Input);
                         }
-                        _ => self.change(i, 1, fx),
+                        _ => self.change(i, 1, cx, fx),
                     }
                 }
                 Handled::Yes
@@ -434,8 +545,8 @@ impl Machine<YtHost> for SettingsScreen {
             ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: Key::Left | Key::Right, .. }, .. }) if self.choice.is_some() => Handled::Yes,
             ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: key @ (Key::Left | Key::Right), edge: Edge::Down | Edge::Repeat, .. }, .. }) => {
                 if let Some(i) = self.list.focused(cx, n) {
-                    if matches!(items(self.page).get(i), Some(Item::Opt(..))) {
-                        self.change(i, if *key == Key::Left { -1 } else { 1 }, fx);
+                    if matches!(items(self.page, &cx.views.store.settings).get(i), Some(Item::Opt(..))) {
+                        self.change(i, if *key == Key::Left { -1 } else { 1 }, cx, fx);
                         return Handled::Yes;
                     }
                 }
@@ -452,38 +563,38 @@ impl Machine<YtHost> for SettingsScreen {
 }
 
 impl Focusable<YtHost> for SettingsScreen {
-    fn groups(&self, _cx: &Cx<'_, YtHost>, out: &mut Vec<GroupSpec>) {
+    fn groups(&self, cx: &Cx<'_, YtHost>, out: &mut Vec<GroupSpec>) {
         if let Some(c) = &self.choice {
             out.push(c.list.spec(c.options.len()));
             return;
         }
-        out.push(self.list.spec(items(self.page).len()));
+        out.push(self.list.spec(items(self.page, &cx.views.store.settings).len()));
     }
     fn group_of(&self, key: &u32, _cx: &Cx<'_, YtHost>) -> Option<GroupId> {
         Some(if self.choice.as_ref().is_some_and(|c| c.owns(*key)) { ui::CHOICE_GROUP } else { G })
     }
-    fn neighbour(&self, key: FocusKey<u32>, dir: Dir, _cx: &Cx<'_, YtHost>) -> Step<u32> {
+    fn neighbour(&self, key: FocusKey<u32>, dir: Dir, cx: &Cx<'_, YtHost>) -> Step<u32> {
         if let Some(c) = &self.choice {
             return c.list.neighbour(key, dir, c.options.len());
         }
-        self.list.neighbour(key, dir, items(self.page).len())
+        self.list.neighbour(key, dir, items(self.page, &cx.views.store.settings).len())
     }
     fn place(&self, key: &u32, cx: &Cx<'_, YtHost>, _at: At) -> Option<Placed> {
         if let Some(c) = self.choice.as_ref().filter(|c| c.owns(*key)) {
             let n = c.options.len();
             return c.list.place(*key, n, c.list.focused(cx, n));
         }
-        let n = items(self.page).len();
+        let n = items(self.page, &cx.views.store.settings).len();
         self.list.place(*key, n, self.list.focused(cx, n))
     }
-    fn reconcile(&self, want: FocusKey<u32>, _cx: &Cx<'_, YtHost>) -> FocusKey<u32> {
+    fn reconcile(&self, want: FocusKey<u32>, cx: &Cx<'_, YtHost>) -> FocusKey<u32> {
         if let Some(c) = &self.choice {
             return if c.owns(want.elem) { want } else { c.list.key(c.current) };
         }
         if want.elem >= ui::CHOICE_BASE {
             return self.list.key(self.closed_row.get());
         }
-        if self.list.index(want.elem, items(self.page).len()).is_some() { want } else { self.list.key(0) }
+        if self.list.index(want.elem, items(self.page, &cx.views.store.settings).len()).is_some() { want } else { self.list.key(0) }
     }
     fn seat(&self, g: GroupId, _from: Placed, _cx: &Cx<'_, YtHost>) -> FocusKey<u32> {
         if let (Some(c), true) = (&self.choice, g == ui::CHOICE_GROUP) {
@@ -509,9 +620,10 @@ impl Screen<YtHost> for SettingsScreen {
         let cx = f.cx;
         ui::text(p, title(self.page), 360.0, 70.0, 48, ui::WHITE, ui::ALIGN_LEFT, true);
         let s = &cx.views.store.settings;
-        let rows: Vec<Row> = items(self.page)
+        let rows: Vec<Row> = items(self.page, s)
             .iter()
             .map(|it| match it {
+                Item::Blocked(i) => Row::new(s.blocked_channels.get(*i).cloned().unwrap_or_default()).value(crate::i18n::tr("Unblock")),
                 Item::Page(l, _) => Row::new(*l).value("\u{203A}"),
                 Item::Opt(l, get, _) => Row::new(*l).value(format!("{}  \u{203A}", crate::i18n::tr(&get(s)))),
                 Item::Action(l, _) => Row::new(*l),

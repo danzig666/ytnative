@@ -28,6 +28,10 @@ pub enum SettingsPage {
     Interface,
     Remote,
     About,
+    /// The blocked channels (OK unblocks one).
+    Blocked,
+    /// SponsorBlock's seek-bar markers, per category.
+    Markers,
 }
 
 /// What a navigation entry shows.
@@ -157,6 +161,8 @@ pub enum YtFx {
     /// More videos of one row of a feed (rows continue to the right).
     MoreShelf { key: FeedKey, row: usize },
     Play { video_id: String, playlist: Option<String> },
+    /// The next Play of `video_id` from the start and / or without watch history (card menu).
+    PlayOptions { video_id: String, from_start: bool, no_history: bool },
     /// Play `video_id` again from the start (Repeat one).
     Replay { video_id: String, playlist: Option<String> },
     Stop,
@@ -166,12 +172,12 @@ pub enum YtFx {
     SeekBy(i64),
     SeekTo(u64),
     SetSpeed(f32),
+    /// OK's "Toggle speed": 1.0 <-> the last other speed chosen.
+    ToggleSpeed,
     SetAudioTrack(String),
     SetZoom(crate::player::Zoom),
     /// Shrink the video into `[x, y, w, h]` (comments beside it), or `None` for full screen.
     VideoRect(Option<[i32; 4]>),
-    /// Minutes until playback pauses (0 = off).
-    SleepTimer(u32),
     Suggest(String),
     EditSettings(Box<dyn FnOnce(&mut Settings) + Send>),
     SignInStart,
@@ -279,8 +285,18 @@ pub struct AppRig {
     video_ms: u32,
     /// `settings.subtitles` as last seen, to load captions when they are switched on mid-video.
     subtitles_were: bool,
+    /// The subtitle language as last seen (a change reloads the captions).
+    subtitle_language_was: String,
+    /// "Subtitles per channel": the video whose channel's subtitles were applied, the state seen
+    /// since (a change is the user's, remembered for the channel), and the global state to put
+    /// back for channels without one.
+    subs_applied_for: String,
+    subs_seen: (bool, String),
+    subs_global: Option<(bool, String)>,
     /// `ui_language` the translations were last switched to.
     applied_language: String,
+    /// `content_country` YouTube's requests were last switched to (None: not yet).
+    applied_country: Option<String>,
     mounter: Mount,
     pub store: Store,
     pub player_view: PlayerView,
@@ -293,16 +309,29 @@ pub struct AppRig {
     next_req: u32,
     pub player: Player,
     sb: yt_core::ext::sponsorblock::SkipTracker,
-    /// A segment the user may skip with OK ("Ask" action): (end_ms, label).
-    pub sb_offer: Option<(u64, String)>,
+    /// A jump the user may take with OK ("Ask" action): (target ms, label, offered until ms).
+    pub sb_offer: Option<(u64, String, u64)>,
+    /// The video whose highlight was handled.
+    highlight_for: String,
+    /// The video the paid-promotion notice was shown for.
+    paid_noticed: String,
+    /// The player's extras as fetched (the view's copy shows only the wanted markers), and the
+    /// view's copy with what it was made from.
+    raw_extras: Arc<crate::player::Extras>,
+    shown_extras: Option<(Arc<crate::player::Extras>, (Vec<String>, bool, bool, u64), Arc<crate::player::Extras>)>,
     /// Start position for the next Play of this video (phone cast, resume).
     pub pending_start: Option<(String, u64)>,
     /// Default speed to apply once the new video is playing.
     pending_rate: Option<f32>,
     /// Chosen audio track for the current video: (video id, track id).
     audio_choice: Option<(String, String)>,
-    /// Sleep timer deadline (ms, frame clock).
-    pub sleep_at: Option<u32>,
+    /// Last key press (ms, frame clock): the sleep timer pauses after a while without one.
+    pub last_key_ms: u32,
+    /// The last video a phone started ("no watch history for videos started from the phone").
+    pub phone_video: Option<String>,
+    /// "Play without history": asked for the next Play of this video / the one playing so.
+    pending_private: Option<String>,
+    private_video: Option<String>,
 }
 
 impl AppRig {
@@ -314,7 +343,12 @@ impl AppRig {
             video_applied: [0, 0, 1920, 1080],
             video_ms: 0,
             subtitles_were: false,
+            subtitle_language_was: String::new(),
+            subs_applied_for: String::new(),
+            subs_seen: (false, String::new()),
+            subs_global: None,
             applied_language: String::new(),
+            applied_country: None,
             mounter: Mount,
             store,
             player_view: PlayerView::default(),
@@ -328,10 +362,17 @@ impl AppRig {
             player: Player::new(),
             sb: Default::default(),
             sb_offer: None,
+            highlight_for: String::new(),
+            paid_noticed: String::new(),
+            raw_extras: Default::default(),
+            shown_extras: None,
             pending_start: None,
             pending_rate: None,
             audio_choice: None,
-            sleep_at: None,
+            last_key_ms: 0,
+            phone_video: None,
+            pending_private: None,
+            private_video: None,
         };
         rig.refresh_accounts();
         rig.refresh_groups();
@@ -395,6 +436,14 @@ impl AppRig {
             self.applied_language = self.store.settings.ui_language.clone();
             crate::i18n::set_language(&self.applied_language, plx_platform::i18n::current().format_locale());
         }
+        if self.applied_country.as_deref() != Some(self.store.settings.content_country.as_str()) {
+            yt_core::innertube::set_content_country(&self.store.settings.content_country);
+            // Another region: the lists reload with its content.
+            if self.applied_country.is_some() {
+                self.store.feeds.clear();
+            }
+            self.applied_country = Some(self.store.settings.content_country.clone());
+        }
         self.player.tick();
         // Ease the video window toward its target (comments: zoom out to the left), one placement
         // per frame while it moves.
@@ -416,8 +465,21 @@ impl AppRig {
             self.player.set_video_rect(if r == [0, 0, 1920, 1080] { None } else { Some(r) });
         }
         self.player_view = self.player.status.lock().unwrap().clone();
+        self.raw_extras = self.player_view.extras.clone();
+        self.player_view.extras = self.shown_extras();
+        yt_core::ext::sponsorblock::set_alt_server(self.store.settings.sb_alt_server);
+        crate::images::set_dearrow_fallback(crate::settings::thumbnail_frame(&self.store.settings.dearrow_fallback));
+        let v = &self.player_view;
+        if self.store.settings.sb_paid_notice && v.paid_promotion && v.phase == Phase::Playing && self.paid_noticed != v.video_id {
+            self.paid_noticed = v.video_id.clone();
+            self.store.toast(crate::i18n::tr("This video contains paid promotion"), now_ms);
+        }
+        self.channel_subtitles();
         let subs = self.store.settings.subtitles;
-        if subs && !self.subtitles_were && !self.player_view.video_id.is_empty() && self.player_view.extras.cues.is_empty() {
+        let language_changed = self.store.settings.subtitle_language != self.subtitle_language_was;
+        self.subtitle_language_was = self.store.settings.subtitle_language.clone();
+        let wanted = (!self.subtitles_were && self.player_view.extras.cues.is_empty()) || (self.subtitles_were && language_changed);
+        if subs && wanted && !self.player_view.video_id.is_empty() && self.player_view.phase != Phase::Idle {
             let (v, session, status) = (self.player_view.video_id.clone(), self.session.clone(), self.player.status.clone());
             let (lang, tr) = (self.store.settings.subtitle_language.clone(), self.store.settings.subtitle_auto_translate);
             plx_base::task::spawn("captions", move || crate::player::load_captions(&v, &session, &status, &lang, tr));
@@ -428,15 +490,12 @@ impl AppRig {
                 self.store.toast = None;
             }
         }
-        if let Some(at) = self.sleep_at {
-            if now_ms >= at {
-                self.sleep_at = None;
-                self.store.sleep_minutes = 0;
-                if self.player_view.phase == Phase::Playing {
-                    self.player.toggle_pause();
-                }
-                self.store.toast("Sleep timer: playback paused", now_ms);
-            }
+        // Sleep timer: pause after the chosen time without a key press (any key starts it over).
+        let sleep_ms = self.store.settings.sleep_timer_mins.saturating_mul(60_000);
+        if sleep_ms > 0 && self.player_view.phase == Phase::Playing && now_ms.wrapping_sub(self.last_key_ms) >= sleep_ms {
+            self.last_key_ms = now_ms;
+            self.player.toggle_pause();
+            self.store.toast("Sleep timer: playback paused", now_ms);
         }
         if self.player_view.phase == Phase::Playing {
             if let Some(r) = self.pending_rate.take() {
@@ -444,6 +503,7 @@ impl AppRig {
             }
         }
         self.sponsorblock(now_ms);
+        self.store.sb_offered = self.sb_offer.is_some();
         let done = std::mem::take(&mut *self.done.lock().unwrap());
         let mut out = Vec::new();
         for (addr, work) in done {
@@ -548,14 +608,39 @@ impl AppRig {
     /// SponsorBlock: act on the segment playback just entered, per the category's setting.
     fn sponsorblock(&mut self, now_ms: u32) {
         use crate::settings::SbAction;
+        use yt_core::ext::sponsorblock::Category;
         if self.player_view.phase != Phase::Playing || !self.store.settings.sponsorblock {
             return;
         }
-        let ex = self.player_view.extras.clone();
+        if self.sb_excluded() {
+            self.sb_offer = None;
+            return;
+        }
+        let ex = self.raw_extras.clone();
         let pos = self.player_view.position_ms;
-        if let Some((end, _)) = &self.sb_offer {
-            if pos >= *end {
+        if let Some((_, _, until)) = &self.sb_offer {
+            if pos >= *until {
                 self.sb_offer = None;
+            }
+        }
+        // The highlight, once per video when it starts: jump there, or offer the jump.
+        if self.highlight_for != self.player_view.video_id {
+            if let Some(h) = ex.segments.iter().find(|s| s.category == Category::PoiHighlight).cloned() {
+                self.highlight_for = self.player_view.video_id.clone();
+                if pos + 1000 < h.start_ms {
+                    match sb_action(&self.store.settings, &h.category) {
+                        SbAction::Off => {}
+                        SbAction::Skip => self.player.seek_to(h.start_ms),
+                        SbAction::SkipWithToast => {
+                            self.player.seek_to(h.start_ms);
+                            self.store.toast(crate::i18n::tr("Jumped to the highlight"), now_ms);
+                        }
+                        SbAction::Ask => {
+                            self.store.toast(crate::i18n::tr("Highlight: press OK to jump there"), now_ms);
+                            self.sb_offer = Some((h.start_ms, "Highlight".into(), (pos + 15_000).min(h.start_ms)));
+                        }
+                    }
+                }
             }
         }
         let Some(seg) = self.sb.check(&ex.segments, pos).cloned() else { return };
@@ -569,7 +654,7 @@ impl AppRig {
             }
             SbAction::Ask => {
                 self.store.toast(format!("{label} \u{2014} press OK to skip"), now_ms);
-                self.sb_offer = Some((seg.end_ms, label));
+                self.sb_offer = Some((seg.end_ms, label, seg.end_ms));
             }
         }
         self.sb.mark_done(&seg);
@@ -577,8 +662,10 @@ impl AppRig {
 
     /// DeArrow: replace clickbait titles / thumbnails of newly loaded cards (when enabled).
     fn dearrow(&mut self, addr: Addr, key: &FeedKey, range: std::ops::Range<usize>) {
+        use yt_core::ext::dearrow::FallbackFrame;
         let s = &self.store.settings;
         let (titles, thumbs) = (s.dearrow_titles, s.dearrow_thumbnails);
+        let fallback = crate::settings::thumbnail_frame(&s.dearrow_fallback);
         if !titles && !thumbs {
             return;
         }
@@ -594,9 +681,10 @@ impl AppRig {
         let _ = plx_base::task::spawn("dearrow", move || {
             let mut out = Vec::new();
             for id in ids {
-                let Ok(Some(b)) = crate::player::ext().branding(&id) else { continue };
-                let title = if titles { b.title() } else { None };
-                let thumb = if thumbs { b.thumbnail_url(&id) } else { None };
+                let b = crate::player::ext().branding(&id).ok().flatten();
+                let title = if titles { b.as_ref().and_then(|b| b.title()) } else { None };
+                // No crowd thumbnail: YouTube's frame, if one is chosen.
+                let thumb = if thumbs { b.as_ref().and_then(|b| b.thumbnail_url(&id)).or_else(|| (fallback != FallbackFrame::Default).then(|| fallback.url(&id))) } else { None };
                 if title.is_some() || thumb.is_some() {
                     out.push((id, title, thumb));
                 }
@@ -608,11 +696,123 @@ impl AppRig {
         });
     }
 
+    /// SponsorBlock is off for the playing video's channel.
+    fn sb_excluded(&self) -> bool {
+        let a = &self.player_view.author;
+        !a.is_empty() && self.store.settings.sb_excluded_channels.iter().any(|c| c == a)
+    }
+
+    /// The extras the screens see: SponsorBlock segments only of the categories whose markers
+    /// are shown (none for an excluded channel), the highlight point as a short mark.
+    fn shown_extras(&mut self) -> Arc<crate::player::Extras> {
+        let s = &self.store.settings;
+        let dur = self.player_view.duration_ms;
+        let key = (s.sb_marker_hidden.clone(), self.sb_excluded(), s.sponsorblock, dur / 1000);
+        if let Some((src, k, out)) = &self.shown_extras {
+            if Arc::ptr_eq(src, &self.raw_extras) && *k == key {
+                return out.clone();
+            }
+        }
+        let mut ex = (*self.raw_extras).clone();
+        if key.1 || !key.2 {
+            ex.segments.clear();
+        } else {
+            use yt_core::ext::sponsorblock::{ActionType, Category};
+            ex.segments.retain(|seg| !key.0.iter().any(|c| c == seg.category.as_str()));
+            for seg in ex.segments.iter_mut().filter(|seg| seg.category == Category::PoiHighlight && !seg.is_ranged()) {
+                seg.action_type = ActionType::Skip;
+                seg.end_ms = seg.start_ms + (dur / 300).max(1000);
+            }
+        }
+        let out = Arc::new(ex);
+        self.shown_extras = Some((self.raw_extras.clone(), key, out.clone()));
+        out
+    }
+
+    /// Whether the playback of `video_id` goes to the watch history (and saves its position).
+    fn history_for(&self, video_id: &str) -> bool {
+        let s = &self.store.settings;
+        let from_phone = self.phone_video.as_deref() == Some(video_id);
+        let private = self.private_video.as_deref() == Some(video_id);
+        s.watch_history != "off" && !(s.lounge_no_history && from_phone) && !private
+    }
+
+    /// "Subtitles per channel": applies the channel's remembered subtitles when its video starts,
+    /// and remembers a change made while watching it.
+    fn channel_subtitles(&mut self) {
+        let (v, ch) = (&self.player_view.video_id, &self.player_view.channel_id);
+        let watching = matches!(self.player_view.phase, Phase::Loading | Phase::Playing | Phase::Paused | Phase::Ended);
+        if !self.store.settings.subtitles_per_channel || !watching || v.is_empty() || ch.is_empty() {
+            return;
+        }
+        let s = &mut self.store.settings;
+        let now = (s.subtitles, s.subtitle_language.clone());
+        if self.subs_applied_for != *v {
+            self.subs_applied_for = v.clone();
+            match yt_core::memory::PlayerMemory::load().channel_subtitle.peek(ch).cloned() {
+                Some(l) => {
+                    self.subs_global.get_or_insert(now);
+                    s.subtitles = !l.is_empty();
+                    if !l.is_empty() {
+                        s.subtitle_language = l;
+                    }
+                }
+                None => {
+                    if let Some((on, lang)) = self.subs_global.take() {
+                        s.subtitles = on;
+                        s.subtitle_language = lang;
+                    }
+                }
+            }
+            self.subs_seen = (s.subtitles, s.subtitle_language.clone());
+        } else if now != self.subs_seen {
+            // Changed while watching: this channel's from now on; the global one stays.
+            self.subs_global.get_or_insert(self.subs_seen.clone());
+            let mut m = yt_core::memory::PlayerMemory::load();
+            m.set_channel_subtitle(ch, Some(if now.0 { now.1.as_str() } else { "" }));
+            let _ = m.save();
+            self.subs_seen = now;
+        }
+    }
+
+    /// Leaving the player: the global subtitle state comes back.
+    fn restore_global_subtitles(&mut self) {
+        self.subs_applied_for.clear();
+        if let Some((on, lang)) = self.subs_global.take() {
+            self.store.settings.subtitles = on;
+            self.store.settings.subtitle_language = lang;
+            self.store.settings.save();
+        }
+    }
+
+    /// A speed chosen by the user: the speed OK toggles to, and remembered per the setting.
+    fn remember_speed(&mut self, r: f32) {
+        use crate::settings::RememberSpeed;
+        let s = &mut self.store.settings;
+        if (r - 1.0).abs() > 0.01 {
+            s.toggle_speed = r;
+        }
+        match s.remember_speed {
+            RememberSpeed::Off => {}
+            RememberSpeed::All => s.speed = r,
+            RememberSpeed::PerVideo if !self.player_view.video_id.is_empty() => {
+                let mut m = yt_core::memory::PlayerMemory::load();
+                m.set_video_speed(&self.player_view.video_id, Some(r));
+                let _ = m.save();
+            }
+            RememberSpeed::PerChannel if !self.player_view.author.is_empty() => {
+                s.speed_by_channel.insert(self.player_view.author.clone(), r);
+            }
+            _ => {}
+        }
+        s.save();
+    }
+
     /// OK during an "Ask" segment skips it. Returns true when it did.
     pub fn take_sb_offer(&mut self) -> bool {
         match self.sb_offer.take() {
-            Some((end, _)) => {
-                self.player.seek_to(end);
+            Some((to, _, _)) => {
+                self.player.seek_to(to);
                 true
             }
             None => false,
@@ -641,6 +841,7 @@ pub fn sb_action(s: &Settings, c: &yt_core::ext::sponsorblock::Category) -> crat
         C::MusicOfftopic => s.sb_music_offtopic,
         C::Preview => s.sb_preview,
         C::Filler => s.sb_filler,
+        C::PoiHighlight => s.sb_highlight,
         _ => SbAction::Off,
     }
 }
@@ -827,30 +1028,60 @@ impl Rig<YtHost> for AppRig {
                 self.store.mark_loading(&key);
                 self.spawn(from, "more", move |s| load_page(s, &key, Some(c)));
             }
+            YtFx::PlayOptions { video_id, from_start, no_history } => {
+                if from_start {
+                    self.pending_start = Some((video_id.clone(), 0));
+                }
+                if no_history {
+                    self.pending_private = Some(video_id);
+                }
+            }
             YtFx::Play { video_id, playlist } => {
                 crate::log(&format!("play {video_id} (playlist {playlist:?})"));
+                // Without history: asked for this video, or the same playback starting again
+                // (repeat, another audio track).
+                let again = self.player_view.video_id == video_id && self.player_view.phase != Phase::Idle;
+                if self.pending_private.take().as_deref() == Some(video_id.as_str()) {
+                    self.private_video = Some(video_id.clone());
+                } else if !again {
+                    self.private_video = None;
+                }
                 let s = &self.store.settings;
                 let audio_track = self.audio_choice.as_ref().filter(|(v, _)| *v == video_id).map(|(_, t)| t.clone());
-                let prefs = yt_core::streams::Prefs { min_height: s.min_height as u64, max_height: s.max_height as u64, codec: "avc1", audio_track };
+                let audio_language = (!s.audio_language.is_empty()).then(|| s.audio_language.clone());
+                let prefs = yt_core::streams::Prefs { min_height: s.min_height as u64, max_height: s.max_height as u64, codec: "avc1", audio_track, audio_language };
                 let extras = crate::player::ExtrasPrefs {
                     subtitles: s.subtitles,
                     language: s.subtitle_language.clone(),
                     auto_translate: s.subtitle_auto_translate,
                     sponsorblock: s.sponsorblock,
+                    // Categories acted on, and those whose markers are shown.
                     categories: yt_core::ext::sponsorblock::Category::ALL
                         .iter()
-                        .filter(|c| sb_action(s, c) != crate::settings::SbAction::Off)
+                        .filter(|c| sb_action(s, c) != crate::settings::SbAction::Off || (s.sb_markers && !s.sb_marker_hidden.iter().any(|h| h == c.as_str())))
                         .cloned()
                         .collect(),
                     dislikes: s.return_dislikes,
+                    channel_subtitles: s.subtitles_per_channel,
+                    history: self.history_for(&video_id),
                 };
                 self.sb = yt_core::ext::sponsorblock::SkipTracker::new(!s.sb_skip_once);
+                self.sb.min_duration_ms = s.sb_min_segment_ms as u64;
                 self.sb_offer = None;
-                let speed = (s.remember_speed_per_channel)
-                    .then(|| self.store.card_channel(&video_id).and_then(|ch| s.speed_by_channel.get(&ch).copied()))
-                    .flatten()
-                    .unwrap_or(s.speed);
+                self.highlight_for.clear();
+                let memory = yt_core::memory::PlayerMemory::load();
+                let speed = match s.remember_speed {
+                    crate::settings::RememberSpeed::PerChannel => self.store.card_channel(&video_id).and_then(|ch| s.speed_by_channel.get(&ch).copied()),
+                    crate::settings::RememberSpeed::PerVideo => memory.video_speed.peek(&video_id).copied(),
+                    _ => None,
+                }
+                .unwrap_or(s.speed);
                 self.pending_rate = ((speed - 1.0).abs() > 0.01).then_some(speed);
+                // Resume: not for short videos (under 5 minutes) or live streams unless allowed.
+                let stored = memory.positions.peek(&video_id).copied();
+                let duration_secs = stored.map(|p| p.duration).filter(|d| *d > 0).or_else(|| self.store.card_duration_ms(&video_id).map(|ms| ms / 1000));
+                let short = duration_secs.is_some_and(|d| d < 300);
+                let resume = s.resume_playback && (s.resume_short_videos || !short) && (s.resume_live || !self.store.card_is_live(&video_id));
                 let start = self
                     .pending_start
                     .take()
@@ -858,14 +1089,8 @@ impl Rig<YtHost> for AppRig {
                     .map(|(_, ms)| ms)
                     // This app's own exact record first (0 = start over); YouTube's watched
                     // percentage on the card only for videos never played here.
-                    .or_else(|| {
-                        if s.resume_playback {
-                            yt_core::memory::PlayerMemory::load().position(&video_id).map(|secs| secs * 1000)
-                        } else {
-                            None
-                        }
-                    })
-                    .or_else(|| if s.resume_playback { self.store.resume_point(&video_id) } else { None });
+                    .or_else(|| if resume { stored.map(|p| p.secs * 1000) } else { None })
+                    .or_else(|| if resume { self.store.resume_point(&video_id) } else { None });
                 #[cfg(not(windows))]
                 {
                     let codec = match s.codec {
@@ -889,12 +1114,14 @@ impl Rig<YtHost> for AppRig {
                 // Only a video that really played reports where it is (a BACK while resolving would
                 // otherwise store 0 over the resume point).
                 let played = matches!(v.phase, crate::player::Phase::Playing | crate::player::Phase::Paused | crate::player::Phase::Ended);
-                if !v.video_id.is_empty() && v.duration_ms > 0 && played {
+                let keep = (!v.live || self.store.settings.resume_live) && self.history_for(&v.video_id);
+                if !v.video_id.is_empty() && v.duration_ms > 0 && played && keep {
                     let mut m = yt_core::memory::PlayerMemory::load();
                     m.set_position(&v.video_id, v.position_ms / 1000, v.duration_ms / 1000);
                     let _ = m.save();
                 }
                 self.player.stop();
+                self.restore_global_subtitles();
             }
             YtFx::TogglePause => self.player.toggle_pause(),
             YtFx::OkInPlayer => {
@@ -906,13 +1133,21 @@ impl Rig<YtHost> for AppRig {
             YtFx::SeekTo(ms) => self.player.seek_to(ms),
             YtFx::SetSpeed(r) => {
                 self.player.set_rate(r);
-                if self.store.settings.remember_speed_per_channel && !self.player_view.author.is_empty() {
-                    self.store.settings.speed_by_channel.insert(self.player_view.author.clone(), r);
-                    self.store.settings.save();
-                }
+                self.remember_speed(r);
+            }
+            YtFx::ToggleSpeed => {
+                let cur = if self.player_view.rate > 0.0 { self.player_view.rate } else { 1.0 };
+                let other = self.store.settings.toggle_speed;
+                let r = if (cur - 1.0).abs() > 0.01 || (other - 1.0).abs() < 0.01 { 1.0 } else { other };
+                self.player.set_rate(r);
+                self.store.toast(format!("{}: {r}x", crate::i18n::tr("Playback speed")), self.now_ms);
             }
             YtFx::SetAudioTrack(t) => {
                 let v = self.player_view.video_id.clone();
+                // The chosen language becomes the preferred one (the original track: no preference).
+                let original = self.player_view.audio_tracks.iter().any(|x| x.0 == t && x.2);
+                self.store.settings.audio_language = if original { String::new() } else { t.split('.').next().unwrap_or("").to_string() };
+                self.store.settings.save();
                 if !v.is_empty() {
                     self.audio_choice = Some((v.clone(), t));
                     self.pending_start = Some((v.clone(), self.player_view.position_ms));
@@ -922,11 +1157,6 @@ impl Rig<YtHost> for AppRig {
             }
             YtFx::SetZoom(z) => self.player.set_zoom(z),
             YtFx::VideoRect(r) => self.video_target = r.map_or([0.0, 0.0, 1920.0, 1080.0], |r| r.map(|v| v as f32)),
-            YtFx::SleepTimer(min) => {
-                self.sleep_at = (min > 0).then(|| self.now_ms + min * 60_000);
-                self.store.sleep_minutes = min;
-                self.store.toast(if min > 0 { format!("Sleep timer: {min} min") } else { "Sleep timer off".into() }, self.now_ms);
-            }
             YtFx::Suggest(prefix) => {
                 self.spawn(from, "suggest", move |s| Work::Suggestions(with_session(s, |s| s.suggestions(&prefix)).unwrap_or_default()));
             }
