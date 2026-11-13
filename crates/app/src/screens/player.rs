@@ -1,4 +1,4 @@
-﻿//! Full-screen playback with an auto-hiding overlay (HUD).
+//! Full-screen playback with an auto-hiding overlay (HUD).
 //!
 //! Keys: OK shows the HUD, or toggles pause when it is up; Left/Right seek (HUD shows the target);
 //! Up opens the player options; Play/Pause/FF/RW remote keys work directly; BACK hides the HUD
@@ -7,7 +7,7 @@
 use super::common;
 use crate::host::{YtArg, YtFx, YtHost};
 use crate::player::Phase;
-use crate::settings::{OkAction, PlaybackMode};
+use crate::settings::{OkAction, PlaybackMode, PlayerStyle};
 use crate::ui;
 use plx_machine::machine::{
     Canon, Cx, Edge, Effects, EntryId, FocusKey, Fx, GroupId, Handled, InputEvent, InputKind, Key, LogicalState, Machine, NavOp, ScreenEvent,
@@ -66,6 +66,9 @@ pub struct PlayerScreen {
     back_armed: Option<u32>,
     /// The release of that first BACK is swallowed too.
     back_swallow_up: bool,
+    /// YouTube style: where each control was drawn last frame (pointer hits), and the seek bar.
+    yt_rects: Vec<(usize, Rect)>,
+    yt_bar: Rect,
     state: State,
 }
 
@@ -89,6 +92,8 @@ impl PlayerScreen {
             ptr_anchor: None,
             back_armed: None,
             back_swallow_up: false,
+            yt_rects: Vec::new(),
+            yt_bar: Rect::new(0.0, 0.0, 0.0, 0.0),
         }
     }
 
@@ -163,6 +168,20 @@ const BTN_PITCH: f32 = 84.0;
 fn osd_button(i: usize) -> Rect {
     let (col, y) = if i < OSD_ROW_B { (i, ROW_A_Y) } else { (i - OSD_ROW_B, ROW_B_Y) };
     Rect::new(96.0 + col as f32 * BTN_PITCH, y, BTN, BTN)
+}
+
+/// The YouTube player style is chosen.
+fn yt_style(cx: &Cx<'_, YtHost>) -> bool {
+    cx.views.store.settings.player_style == PlayerStyle::YouTube
+}
+
+/// YouTube style: its one row of controls, left to right (the OSD ids they act as).
+fn yt_order(cx: &Cx<'_, YtHost>) -> Vec<usize> {
+    let child = cx.views.store.settings.child_mode;
+    [OSD_CHANNEL, OSD_INFO, OSD_SUBSCRIBE, OSD_PREV, OSD_PLAY, OSD_NEXT, OSD_LIKE, OSD_DISLIKE, OSD_COMMENTS, OSD_SAVE, OSD_CC, OSD_OPTIONS]
+        .into_iter()
+        .filter(|&i| !(child && i == OSD_COMMENTS))
+        .collect()
 }
 
 /// The button in the other row nearest to button `i` (Up / Down between the rows).
@@ -412,6 +431,9 @@ impl Machine<YtHost> for PlayerScreen {
                 });
                 fx.push(Fx::App(YtFx::Play { video_id: self.video_id.clone(), playlist: self.playlist.clone() }));
                 self.show_hud(cx, fx);
+                if yt_style(cx) {
+                    self.osd_sel = Some(OSD_PLAY);
+                }
                 self.last_key_ms = cx.views.now_ms;
                 let s = &cx.views.store.settings;
                 self.dimmed = s.screen_off_armed && s.screen_off_timeout_secs == 0 && s.screen_off_dimming < 100;
@@ -498,11 +520,19 @@ impl Machine<YtHost> for PlayerScreen {
             ScreenEvent::Input(InputEvent { kind: InputKind::Click { x, y, .. }, .. }) => {
                 let st = cx.views.player;
                 let (x, y) = (*x, *y);
-                if let Some(i) = (0..OSD_N).find(|i| self.hud && osd_button(*i).contains(x, y)) {
+                let yt = yt_style(cx);
+                let hit = if yt {
+                    self.yt_rects.iter().find(|(_, r)| r.contains(x, y)).map(|(i, _)| *i)
+                } else {
+                    (0..OSD_N).find(|i| osd_button(*i).contains(x, y))
+                };
+                let bar = if yt { self.yt_bar } else { Rect::new(96.0, 900.0, 1728.0, 8.0) };
+                let on_bar = (bar.y - 24.0..=bar.y + 40.0).contains(&y) && (bar.x..=bar.x + bar.w).contains(&x);
+                if let Some(i) = hit.filter(|_| self.hud) {
                     self.press_osd(i, cx, fx);
                     self.show_hud(cx, fx);
-                } else if self.hud && (890.0..=960.0).contains(&y) && (96.0..=1824.0).contains(&x) && st.duration_ms > 0 && !st.live {
-                    let to = ((x - 96.0) / 1728.0).clamp(0.0, 1.0) as f64 * st.duration_ms as f64;
+                } else if self.hud && on_bar && st.duration_ms > 0 && !st.live {
+                    let to = ((x - bar.x) / bar.w).clamp(0.0, 1.0) as f64 * st.duration_ms as f64;
                     fx.push(Fx::App(YtFx::SeekTo(to as u64)));
                     self.preview_until = cx.views.now_ms + 1500;
                     self.show_hud(cx, fx);
@@ -562,7 +592,34 @@ impl Machine<YtHost> for PlayerScreen {
                         }
                         Key::Up | Key::Back => {
                             self.sugg_sel = None;
-                            self.osd_sel = Some(OSD_ROW_B);
+                            self.osd_sel = Some(if yt_style(cx) { OSD_PLAY } else { OSD_ROW_B });
+                        }
+                        _ => {}
+                    }
+                    self.show_hud(cx, fx);
+                    return Handled::Yes;
+                }
+                if let Some(sel) = self.osd_sel.filter(|_| !transport && self.hud && yt_style(cx)) {
+                    // YouTube style: one row; Up to the seek bar, Down to the suggestions, BACK hides.
+                    let order = yt_order(cx);
+                    let at = order.iter().position(|&o| o == sel).unwrap_or(0);
+                    match key {
+                        Key::Left => self.osd_sel = Some(order[at.saturating_sub(1)]),
+                        Key::Right => self.osd_sel = Some(order[(at + 1).min(order.len() - 1)]),
+                        Key::Up => self.osd_sel = None,
+                        Key::Down => {
+                            if !suggestions(cx).is_empty() {
+                                self.osd_sel = None;
+                                self.sugg_sel = Some(0);
+                            }
+                        }
+                        Key::Ok => self.press_osd(sel, cx, fx),
+                        Key::Back => {
+                            self.hud = false;
+                            self.osd_sel = None;
+                            fx.push(Fx::CancelTimer(T_HIDE));
+                            fx.invalidate(plx_machine::present::Provenance::Input);
+                            return Handled::Yes;
                         }
                         _ => {}
                     }
@@ -627,12 +684,20 @@ impl Machine<YtHost> for PlayerScreen {
                             return Handled::Yes;
                         }
                         match cx.views.store.settings.ok_action {
-                            OkAction::Controls => self.show_hud(cx, fx),
+                            OkAction::Controls => {
+                                self.show_hud(cx, fx);
+                                if yt_style(cx) {
+                                    self.osd_sel = Some(OSD_PLAY);
+                                }
+                            }
                             OkAction::ControlsAndPause => {
                                 if cx.views.player.phase == Phase::Playing {
                                     fx.push(Fx::App(YtFx::TogglePause));
                                 }
                                 self.show_hud(cx, fx);
+                                if yt_style(cx) {
+                                    self.osd_sel = Some(OSD_PLAY);
+                                }
                             }
                             OkAction::Pause => {
                                 fx.push(Fx::App(YtFx::TogglePause));
@@ -797,9 +862,15 @@ impl Screen<YtHost> for PlayerScreen {
             ui::fill(p, Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, [0.0, 0.0, 0.0, 1.0]);
             return; // a switched-off screen shows nothing, not even subtitles
         }
-        if cx.views.store.settings.subtitles {
+        // (Not under the YouTube style's suggestions, which come up over the middle of the picture.)
+        if cx.views.store.settings.subtitles && !(self.sugg_sel.is_some() && yt_style(cx)) {
             if let Some(cue) = yt_core::captions::cue_at(&ex.cues, st.position_ms) {
-                let lift = if self.hud { 480.0 } else { 0.0 }; // above the title and both button rows
+                // Above the title and both button rows (the YouTube style's single row is lower).
+                let lift = match (self.hud, yt_style(cx)) {
+                    (false, _) => 0.0,
+                    (true, true) => 300.0,
+                    (true, false) => 480.0,
+                };
                 let s = &cx.views.store.settings;
                 SUB_STYLE.with(|c| c.set(match s.subtitle_style.as_str() { "shadow" => 1, "box" => 2, _ => 0 }));
                 let face = match s.subtitle_font.as_str() { "sans" => 1, "serif" => 2, "mono" => 3, "roboto" => 4, _ => 0 };
@@ -833,6 +904,10 @@ impl Screen<YtHost> for PlayerScreen {
         }
         if !self.hud && matches!(st.phase, Phase::Playing | Phase::Paused) {
             common::toast(p, cx);
+            return;
+        }
+        if yt_style(cx) {
+            self.draw_youtube(p, f.measure, cx);
             return;
         }
         let s = &cx.views.store.settings;
@@ -926,22 +1001,7 @@ impl Screen<YtHost> for PlayerScreen {
             }
             // Storyboard preview above the playhead while seeking.
             if cx.views.now_ms < self.preview_until {
-                if let Some(level) = yt_core::storyboard::best_level(&ex.levels, 320) {
-                    let fr = yt_core::storyboard::frame_at(level, st.position_ms, st.duration_ms);
-                    let (tex, tw, th) = plx_ui::tex::resolve_wh_on(1, &fr.sheet_url, 0, 0, false);
-                    let (pw, ph) = (384.0, 216.0);
-                    let px = (bar.x + bar.w * frac - pw / 2.0).clamp(bar.x, bar.x + bar.w - pw);
-                    let r = Rect::new(px, bar.y - ph - 40.0, pw, ph);
-                    ui::fill(p, Rect::new(r.x - 4.0, r.y - 4.0, r.w + 8.0, r.h + 8.0), 10.0, ui::WHITE);
-                    if tex != 0 && tw > 0.0 && th > 0.0 {
-                        // plx's uv is [u, v, width, height] (`Rect::cover_uv`), in the sheet's pixels.
-                        let uv = [fr.x as f32 / tw, fr.y as f32 / th, fr.w as f32 / tw, fr.h as f32 / th];
-                        p.tex_uv(tex, uv, r, 8.0, ui::dimmed(ui::WHITE));
-                    } else {
-                        ui::fill(p, r, 8.0, [0.1, 0.1, 0.12, 1.0]);
-                    }
-                    ui::text(p, &ui::fmt_time(st.position_ms), r.x + r.w / 2.0, r.y + r.h - 44.0, 28, ui::WHITE, ui::ALIGN_CENTER, true);
-                }
+                storyboard_preview(p, st, bar, frac);
             }
         }
         ui::fill(p, Rect::new(bar.x + bar.w * frac - 11.0, bar.y - 7.0, 22.0, 22.0), 11.0, ui::WHITE);
@@ -1079,6 +1139,297 @@ impl Screen<YtHost> for PlayerScreen {
     }
 }
 
+
+/// The storyboard frame at the playhead, above the seek bar (while seeking).
+fn storyboard_preview(p: plx_ui::Painter, st: &crate::host::PlayerView, bar: Rect, frac: f32) {
+    let ex = &st.extras;
+    if let Some(level) = yt_core::storyboard::best_level(&ex.levels, 320) {
+        let fr = yt_core::storyboard::frame_at(level, st.position_ms, st.duration_ms);
+        let (tex, tw, th) = plx_ui::tex::resolve_wh_on(1, &fr.sheet_url, 0, 0, false);
+        let (pw, ph) = (384.0, 216.0);
+        let px = (bar.x + bar.w * frac - pw / 2.0).clamp(bar.x, bar.x + bar.w - pw);
+        let r = Rect::new(px, bar.y - ph - 40.0, pw, ph);
+        ui::fill(p, Rect::new(r.x - 4.0, r.y - 4.0, r.w + 8.0, r.h + 8.0), 10.0, ui::WHITE);
+        if tex != 0 && tw > 0.0 && th > 0.0 {
+            // plx's uv is [u, v, width, height] (`Rect::cover_uv`), in the sheet's pixels.
+            let uv = [fr.x as f32 / tw, fr.y as f32 / th, fr.w as f32 / tw, fr.h as f32 / th];
+            p.tex_uv(tex, uv, r, 8.0, ui::dimmed(ui::WHITE));
+        } else {
+            ui::fill(p, r, 8.0, [0.1, 0.1, 0.12, 1.0]);
+        }
+        ui::text(p, &ui::fmt_time(st.position_ms), r.x + r.w / 2.0, r.y + r.h - 44.0, 28, ui::WHITE, ui::ALIGN_CENTER, true);
+    }
+}
+
+// ---- The YouTube player style -------------------------------------------------------------------
+// The official YouTube TV app's player (its 2025 design): the title and its line at the top left,
+// the time and chapter over a thin white seek bar, one row of controls under it (channel,
+// Description, Subscribe | previous, play, next | like, dislike, comments, save | captions,
+// settings) and the suggestions peeking in at the bottom; Down brings them up.
+
+/// Colours of the YouTube style: a control at rest and focused.
+const YT_REST: [f32; 4] = [0.22, 0.22, 0.24, 0.62];
+const YT_FOCUS: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+const YT_FOCUS_INK: [f32; 4] = [0.06, 0.06, 0.07, 1.0];
+
+/// `s` word-wrapped into at most `max` lines of `w` px (the last one ellipsised).
+fn wrap_lines(m: &dyn plx_machine::machine::Measure, s: &str, w: f32, size: i32, bold: bool, max: usize) -> Vec<String> {
+    let width = |t: &str| std::ffi::CString::new(t).map_or(0.0, |c| m.width(&c, size, bold));
+    let mut lines: Vec<String> = Vec::new();
+    let mut rest = s.trim();
+    while !rest.is_empty() && lines.len() < max {
+        if lines.len() + 1 == max || width(rest) <= w {
+            lines.push(m.fit_line(rest, w, size, bold).to_string_lossy().into_owned());
+            break;
+        }
+        let mut line = String::new();
+        let mut used = 0;
+        for word in rest.split_inclusive(' ') {
+            let trial = format!("{line}{word}");
+            if !line.is_empty() && width(trial.trim_end()) > w {
+                break;
+            }
+            line = trial;
+            used += word.len();
+        }
+        if line.trim().is_empty() || width(line.trim_end()) > w {
+            // One word wider than the line: cut it.
+            lines.push(m.fit_line(rest, w, size, bold).to_string_lossy().into_owned());
+            break;
+        }
+        lines.push(line.trim_end().to_string());
+        rest = rest[used..].trim_start();
+    }
+    lines
+}
+
+impl PlayerScreen {
+    fn draw_youtube(&mut self, p: plx_ui::Painter, m: &dyn plx_machine::machine::Measure, cx: &Cx<'_, YtHost>) {
+        use ui::icon::Kind;
+        let st = cx.views.player;
+        let s = &cx.views.store.settings;
+        let ex = &st.extras;
+        let w = ex.watch.as_ref();
+        let items = suggestions(cx);
+        // Browsing the suggestions lifts the controls; the shelf comes up under them.
+        let dy = if self.sugg_sel.is_some() { -330.0 } else { 0.0 };
+        self.yt_rects.clear();
+
+        // Shades: from the top into the picture, and from the picture into the controls.
+        p.rect(Rect::new(0.0, 0.0, 1920.0, 360.0), 0.0, ui::dimmed([0.0, 0.0, 0.0, 0.72]), [0.0, 0.0, 0.0, 0.0], 0.0);
+        if self.sugg_sel.is_some() {
+            ui::fill(p, Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, [0.0, 0.0, 0.0, 0.78]);
+        } else {
+            p.rect(Rect::new(0.0, 560.0, 1920.0, 300.0), 0.0, [0.0, 0.0, 0.0, 0.0], ui::dimmed([0.0, 0.0, 0.0, 0.8]), 0.0);
+            ui::fill(p, Rect::new(0.0, 860.0, 1920.0, 220.0), 0.0, [0.0, 0.0, 0.0, 0.8]);
+        }
+
+        // Title (up to two lines) and channel, views, age under it.
+        let mut y = 64.0;
+        for line in wrap_lines(m, &st.title, 1300.0, 46, true, 2) {
+            ui::text(p, &line, 96.0, y, 46, ui::WHITE, ui::ALIGN_LEFT, true);
+            y += 58.0;
+        }
+        let mut byline = st.author.clone();
+        if let Some(w) = w {
+            if let Some(v) = &w.short_view_count_text {
+                byline.push_str(&format!(" \u{2022} {v}"));
+            }
+            if let Some(d) = w.published_text.as_deref().filter(|d| !d.is_empty()) {
+                byline.push_str(&format!(" \u{2022} {d}"));
+            }
+        }
+        ui::text(p, &byline, 96.0, y + 8.0, 26, ui::DIM, ui::ALIGN_LEFT, false);
+        if s.show_clock {
+            ui::text(p, &common::clock(&cx.views), 1824.0, 64.0, 40, ui::WHITE, ui::ALIGN_RIGHT, true);
+        }
+
+        // Time and chapter over the bar, the length at its right end.
+        let time_y = 788.0 + dy;
+        let mut left = ui::fmt_time(st.position_ms);
+        if let Some(w) = w {
+            if let Some(i) = yt_core::watch::chapter_at(&w.chapters, st.position_ms) {
+                left.push_str(&format!(" \u{2022} {}", ui::ellipsize(&w.chapters[i].title, 60)));
+            }
+        }
+        if st.live {
+            let behind = st.live_edge_ms.saturating_sub(st.position_ms);
+            let r = Rect::new(1824.0 - 92.0, time_y - 2.0, 92.0, 36.0);
+            ui::fill(p, r, 6.0, if behind < 20_000 { [0.8, 0.0, 0.0, 1.0] } else { YT_REST });
+            ui::text(p, "LIVE", r.x + r.w / 2.0, r.y + 5.0, 22, ui::WHITE, ui::ALIGN_CENTER, true);
+        } else {
+            ui::text(p, &left, 96.0, time_y, 26, ui::WHITE, ui::ALIGN_LEFT, false);
+            ui::text(p, &ui::fmt_time(st.duration_ms), 1824.0, time_y, 26, ui::WHITE, ui::ALIGN_RIGHT, false);
+        }
+
+        // The seek bar: white, one piece per chapter; thicker with a knob while it has the focus.
+        let bar_focus = self.osd_sel.is_none() && self.sugg_sel.is_none();
+        let bh = if bar_focus { 8.0 } else { 5.0 };
+        let bar = Rect::new(96.0, 836.0 + dy - bh / 2.0, 1728.0, bh);
+        self.yt_bar = bar;
+        let frac = if st.duration_ms > 0 { (st.position_ms as f32 / st.duration_ms as f32).clamp(0.0, 1.0) } else { 0.0 };
+        let mut cuts: Vec<f32> = vec![0.0];
+        if st.duration_ms > 0 {
+            if let Some(w) = w {
+                cuts.extend(w.chapters.iter().skip(1).map(|c| (c.start_ms as f32 / st.duration_ms as f32).clamp(0.0, 1.0)));
+            }
+        }
+        cuts.push(1.0);
+        let px = bar.x + bar.w * frac;
+        for c in cuts.windows(2) {
+            let gap = if c[1] < 1.0 { 4.0 } else { 0.0 };
+            let (x0, x1) = (bar.x + bar.w * c[0], bar.x + bar.w * c[1] - gap);
+            if x1 <= x0 {
+                continue;
+            }
+            ui::fill(p, Rect::new(x0, bar.y, x1 - x0, bar.h), bar.h / 2.0, [1.0, 1.0, 1.0, 0.32]);
+            let f1 = x1.min(px);
+            if f1 > x0 {
+                ui::fill(p, Rect::new(x0, bar.y, f1 - x0, bar.h), bar.h / 2.0, [1.0, 1.0, 1.0, 0.95]);
+            }
+        }
+        if st.duration_ms > 0 {
+            if s.sb_markers {
+                let x_of = |ms: u64| bar.x + bar.w * (ms as f32 / st.duration_ms as f32).clamp(0.0, 1.0);
+                for seg in ex.segments.iter().filter(|s| s.is_ranged()) {
+                    let c = yt_core::ext::sponsorblock::colour(&seg.category);
+                    let col = [((c >> 16) & 0xff) as f32 / 255.0, ((c >> 8) & 0xff) as f32 / 255.0, (c & 0xff) as f32 / 255.0, 0.95];
+                    let (x0, x1) = (x_of(seg.start_ms), x_of(seg.end_ms));
+                    ui::fill(p, Rect::new(x0, bar.y, (x1 - x0).max(3.0), bar.h), 2.0, col);
+                }
+            }
+            if cx.views.now_ms < self.preview_until {
+                storyboard_preview(p, st, bar, frac);
+            }
+        }
+        if bar_focus {
+            ui::fill(p, Rect::new(px - 12.0, bar.y + bar.h / 2.0 - 12.0, 24.0, 24.0), 12.0, ui::WHITE);
+        }
+
+        // The row of controls.
+        let cy = 906.0 + dy; // its middle
+        const B: f32 = 60.0;
+        let hot = |i: usize, r: Rect, sel: Option<usize>, ptr: Option<(f32, f32)>| sel == Some(i) || ptr.is_some_and(|(x, y)| r.contains(x, y));
+        let (sel, ptr) = (if self.sugg_sel.is_some() { None } else { self.osd_sel }, self.pointer);
+        let rating = w.map(|w| w.like_status);
+        let liked = matches!(rating, Some(yt_core::watch::LikeStatus::Like));
+        let disliked = matches!(rating, Some(yt_core::watch::LikeStatus::Dislike));
+        let subscribed = w.and_then(|w| w.subscribed).unwrap_or(false);
+        let mut label: Option<(usize, Rect)> = None;
+
+        // A round button on its own: grey at rest, white with a dark icon when focused.
+        let mut round = |me: &mut Self, i: usize, r: Rect, kind: Kind, filled: bool, standalone: bool| {
+            let h = hot(i, r, sel, ptr);
+            if h {
+                ui::fill(p, r, r.h / 2.0, YT_FOCUS);
+                label = Some((i, r));
+            } else if standalone {
+                ui::fill(p, r, r.h / 2.0, YT_REST);
+            }
+            let sz = (r.h * 0.48).round();
+            let ink = if h { YT_FOCUS_INK } else { ui::WHITE };
+            ui::icon::draw(p, kind, Rect::new(r.x + (r.w - sz) / 2.0, r.y + (r.h - sz) / 2.0, sz, sz), ink, filled);
+            me.yt_rects.push((i, r));
+            h
+        };
+
+        // Left: the channel's picture, Description, Subscribe (a bell once subscribed).
+        let mut x = 96.0;
+        {
+            let r = Rect::new(x, cy - B / 2.0, B, B);
+            let h = hot(OSD_CHANNEL, r, sel, ptr);
+            if h {
+                ui::fill(p, Rect::new(r.x - 5.0, r.y - 5.0, r.w + 10.0, r.h + 10.0), (r.h + 10.0) / 2.0, YT_FOCUS);
+            }
+            let avatar = w.and_then(|w| w.channel_avatar.clone());
+            let tex = avatar.map_or(0, |url| plx_ui::tex::resolve_wh_on(0, &url, 0, 0, false).0);
+            if tex != 0 {
+                p.tex_uv(tex, [0.0, 0.0, 1.0, 1.0], r, r.w / 2.0, ui::dimmed(ui::WHITE));
+            } else {
+                ui::fill(p, r, r.h / 2.0, YT_REST);
+                let sz = 30.0;
+                ui::icon::draw(p, Kind::User, Rect::new(r.x + (r.w - sz) / 2.0, r.y + (r.h - sz) / 2.0, sz, sz), ui::WHITE, false);
+            }
+            self.yt_rects.push((OSD_CHANNEL, r));
+            x += B + 18.0;
+        }
+        let mut pill = |me: &mut Self, i: usize, x: f32, text: &str| -> f32 {
+            let tw = std::ffi::CString::new(text).map_or(0.0, |c| m.width(&c, 24, true));
+            let r = Rect::new(x, cy - B / 2.0, tw + 56.0, B);
+            let h = hot(i, r, sel, ptr);
+            ui::fill(p, r, r.h / 2.0, if h { YT_FOCUS } else { YT_REST });
+            ui::text(p, text, r.x + r.w / 2.0, cy - 16.0, 24, if h { YT_FOCUS_INK } else { ui::WHITE }, ui::ALIGN_CENTER, true);
+            me.yt_rects.push((i, r));
+            r.w
+        };
+        x += pill(self, OSD_INFO, x, crate::i18n::tr("Description")) + 14.0;
+        if subscribed {
+            round(self, OSD_SUBSCRIBE, Rect::new(x, cy - B / 2.0, B, B), Kind::Bell, false, true);
+        } else {
+            pill(self, OSD_SUBSCRIBE, x, crate::i18n::tr("Subscribe"));
+        }
+
+        // Middle: previous, play / pause (large), next.
+        const PLAY: f32 = 80.0;
+        let play_kind = if matches!(st.phase, Phase::Paused | Phase::Ended) { Kind::Play } else { Kind::Pause };
+        round(self, OSD_PREV, Rect::new(960.0 - PLAY / 2.0 - 18.0 - B, cy - B / 2.0, B, B), Kind::Prev, true, true);
+        round(self, OSD_PLAY, Rect::new(960.0 - PLAY / 2.0, cy - PLAY / 2.0, PLAY, PLAY), play_kind, true, true);
+        round(self, OSD_NEXT, Rect::new(960.0 + PLAY / 2.0 + 18.0, cy - B / 2.0, B, B), Kind::Next, true, true);
+
+        // Right: two grouped pills, rating / comments / save and captions / settings.
+        let child = s.child_mode;
+        let group_a: Vec<(usize, Kind, bool)> = [
+            (OSD_LIKE, Kind::ThumbUp, liked),
+            (OSD_DISLIKE, Kind::ThumbDown, disliked),
+            (OSD_COMMENTS, Kind::Chat, false),
+            (OSD_SAVE, Kind::ListPlus, false),
+        ]
+        .into_iter()
+        .filter(|(i, _, _)| !(child && *i == OSD_COMMENTS))
+        .collect();
+        let group_b = [(OSD_CC, Kind::Cc, false), (OSD_OPTIONS, Kind::Gear, false)];
+        const PAD: f32 = 4.0;
+        let gw = |n: usize| n as f32 * B + 2.0 * PAD;
+        let bx = 1824.0 - gw(group_b.len());
+        let ax = bx - 16.0 - gw(group_a.len());
+        for (gx, group) in [(ax, &group_a[..]), (bx, &group_b[..])] {
+            ui::fill(p, Rect::new(gx, cy - B / 2.0 - PAD, gw(group.len()), B + 2.0 * PAD), (B + 2.0 * PAD) / 2.0, YT_REST);
+            for (k, (i, kind, on)) in group.iter().enumerate() {
+                let r = Rect::new(gx + PAD + k as f32 * B, cy - B / 2.0, B, B);
+                let h = round(self, *i, r, *kind, *on, false);
+                // Captions on: a short red line under the icon, as YouTube marks it.
+                if *i == OSD_CC && s.subtitles {
+                    ui::fill(p, Rect::new(r.x + 18.0, r.y + r.h - 14.0, r.w - 36.0, 4.0), 2.0, if h { [0.8, 0.0, 0.0, 1.0] } else { [1.0, 0.2, 0.2, 1.0] });
+                }
+            }
+        }
+        // The focused icon button's name under it (the play button and the worded pills need none).
+        if let Some((i, r)) = label.filter(|(i, _)| *i != OSD_PLAY && (![OSD_INFO, OSD_SUBSCRIBE].contains(i) || subscribed)) {
+            ui::text(p, crate::i18n::tr(osd_name(i)), r.x + r.w / 2.0, cy + B / 2.0 + 12.0, 22, ui::WHITE, ui::ALIGN_CENTER, false);
+        }
+
+        // The suggestions: peeking in at the bottom, or brought up to browse.
+        if !items.is_empty() {
+            if let Some(sel) = self.sugg_sel {
+                draw_suggestions_at(p, m, &items, sel, 1000.0 + dy, false);
+            } else {
+                const TW: f32 = 400.0;
+                for (k, it) in items.iter().take(5).enumerate() {
+                    let r = Rect::new(96.0 + k as f32 * (TW + 32.0), 1000.0, TW, TW * 9.0 / 16.0);
+                    let url = it.thumbnail.clone().unwrap_or_default();
+                    let (tex, _, _) = plx_ui::tex::resolve_wh_on(0, &url, 0, 0, false);
+                    if tex != 0 {
+                        p.tex_uv(tex, [0.0, 0.0, 1.0, 1.0], r, 14.0, ui::dimmed([1.0, 1.0, 1.0, 0.85]));
+                    } else {
+                        ui::fill(p, r, 14.0, [1.0, 1.0, 1.0, 0.08]);
+                    }
+                }
+            }
+        }
+        common::toast_at(p, cx, 560.0 + dy);
+    }
+}
+
 /// The remote's number keys: 0..9 (SDL symbols / LG key codes 48..57).
 fn digit_key(sym: u32, wcode: u32) -> Option<u64> {
     [sym, wcode].into_iter().find(|k| (48..=57).contains(k)).map(|k| (k - 48) as u64)
@@ -1195,10 +1546,17 @@ fn osd_name(i: usize) -> &'static str {
 
 /// The suggestions as a row of cards at `y`, the selected one lifted and lit.
 fn draw_suggestions(p: plx_ui::Painter, m: &dyn plx_machine::machine::Measure, items: &[yt_core::model::Item], sel: usize, y: f32) {
+    draw_suggestions_at(p, m, items, sel, y, true);
+}
+
+/// The suggestions row at `y`, with its heading above it when `heading`.
+fn draw_suggestions_at(p: plx_ui::Painter, m: &dyn plx_machine::machine::Measure, items: &[yt_core::model::Item], sel: usize, y: f32, heading: bool) {
     const W: f32 = 400.0;
     const H: f32 = 225.0;
     const GAP: f32 = 32.0;
-    ui::text(p, "Suggestions", 96.0, y - 70.0, 36, ui::WHITE, ui::ALIGN_LEFT, true);
+    if heading {
+        ui::text(p, "Suggestions", 96.0, y - 70.0, 36, ui::WHITE, ui::ALIGN_LEFT, true);
+    }
     let first = sel.saturating_sub(1);
     for (k, it) in items.iter().enumerate().skip(first).take(5) {
         let x = 96.0 + (k - first) as f32 * (W + GAP);

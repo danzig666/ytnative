@@ -81,6 +81,26 @@ impl RememberSpeed {
     }
 }
 
+/// How the player's controls look.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlayerStyle {
+    /// Two rows of round buttons around the seek bar, with every option at hand.
+    SmartTube,
+    /// The official YouTube TV app's player: the title at the top, one row of controls.
+    YouTube,
+}
+
+impl PlayerStyle {
+    pub const ALL: &'static [PlayerStyle] = &[PlayerStyle::SmartTube, PlayerStyle::YouTube];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PlayerStyle::SmartTube => "SmartTube",
+            PlayerStyle::YouTube => "YouTube",
+        }
+    }
+}
+
 /// What OK does while a video plays with the controls hidden.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OkAction {
@@ -315,6 +335,8 @@ pub struct Settings {
     pub left_opens_sidebar: bool,
     pub controls_time: ControlsTime,
     pub ok_action: OkAction,
+    /// The look of the player's controls.
+    pub player_style: PlayerStyle,
     /// Pause after this many minutes without a key press (0 = off).
     pub sleep_timer_mins: u32,
     /// Screen dimming in the player (SmartTube's "Screen off"): how dark, in percent (100 = black).
@@ -477,6 +499,7 @@ impl Default for Settings {
             left_opens_sidebar: true,
             controls_time: ControlsTime::Remaining,
             ok_action: OkAction::Controls,
+            player_style: PlayerStyle::SmartTube,
             sleep_timer_mins: 0,
             screen_off_dimming: 100,
             screen_off_timeout_secs: 0,

@@ -2,7 +2,7 @@
 //! value; OK or Right steps forward, Left steps back. Changes are saved immediately.
 
 use crate::host::{SettingsPage, YtArg, YtFx, YtHost};
-use crate::settings::{secs_label, Codec, ControlsTime, OkAction, PlaybackMode, RememberSpeed, SbAction, Settings, SLEEP_MINS, SPEEDS};
+use crate::settings::{secs_label, Codec, ControlsTime, OkAction, PlaybackMode, PlayerStyle, RememberSpeed, SbAction, Settings, SLEEP_MINS, SPEEDS};
 use crate::store::Section;
 use crate::ui::{self, Row, VList};
 use plx_machine::machine::{
@@ -153,6 +153,7 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
             Opt("Playback engine", |s| if s.engine == "auto" { "4K / VP9 / AV1 (engine B)".into() } else { "System player".into() }, |s, _| {
                 s.engine = if s.engine == "auto" { "system".into() } else { "auto".into() }
             }),
+            Opt("Player style", |s| s.player_style.label().into(), |s, d| s.player_style = cycle(PlayerStyle::ALL, s.player_style, d)),
             Opt("When a video ends", |s| s.playback_mode.label().into(), |s, d| s.playback_mode = cycle(PlaybackMode::ALL, s.playback_mode, d)),
             Opt("Default speed", |s| format!("{}x", s.speed), |s, d| {
                 let i = crate::settings::speed_index(s.speed) as i32;

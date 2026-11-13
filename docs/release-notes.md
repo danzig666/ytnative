@@ -1,2 +1,1 @@
-- New: proper text shaping for Arabic, Hebrew, Hindi and the other Indian scripts, Thai, Khmer, Lao and Myanmar: letters join and vowel signs sit in the right place (uses the TV's own HarfBuzz, FreeType and FriBidi)
-- Fixed: Arabic and Hebrew titles showed as boxes on the TV
+- New: Settings, Player, "Player style": choose between the SmartTube controls and controls that look like the official YouTube TV app (title at the top, one row of buttons under a thin seek bar, suggestions peeking in at the bottom)
