@@ -44,3 +44,5 @@ The ytnative simulator (`cargo xtask sim`, `crates/app/src/sim/`) builds these c
 - gfx/src/gfx/tokens.rs: `set_clear_black` / `clear_rgb()` — runtime ground colour (OLED black);
   gfx.rs, ui/popover.rs and ui/widgets.rs read `clear_rgb()` instead of the `CLEAR_RGB` constant,
   so page-transition snapshots clear to black too.
+- gfx/src/gfx.rs `try_compile`: a fragment shader the driver rejects is retried once with `highp`
+  replaced by `mediump` (fragment highp is optional in GLES2), for GPUs without it.

@@ -1039,6 +1039,22 @@ fn try_compile(ty: c_uint, src: *const c_char) -> Option<c_uint> {
         glCompileShader(s);
         let mut ok: c_int = 0;
         glGetShaderiv(s, GL_COMPILE_STATUS, &mut ok);
+        // ytnative: `highp` in a fragment shader is optional in GLES2 (GL_FRAGMENT_PRECISION_HIGH);
+        // a GPU without it (non-Mali-Midgard parts, Mali-400 class) rejects the shader. Retry once
+        // with mediump: slightly coarser gradients there instead of an app that cannot start.
+        if ok == 0 && ty == GL_FRAGMENT_SHADER {
+            let pre = glsl_preamble(ty).to_string_lossy().replace("highp", "mediump");
+            let body = CStr::from_ptr(src).to_string_lossy().replace("highp", "mediump");
+            if let (Ok(pre), Ok(body)) = (std::ffi::CString::new(pre), std::ffi::CString::new(body)) {
+                let retry: [*const c_char; 2] = [pre.as_ptr(), body.as_ptr()];
+                glShaderSource(s, 2, retry.as_ptr(), std::ptr::null());
+                glCompileShader(s);
+                glGetShaderiv(s, GL_COMPILE_STATUS, &mut ok);
+                if ok != 0 {
+                    log("shader: compiled with mediump (no fragment highp on this GPU)");
+                }
+            }
+        }
         if ok == 0 {
             let mut buf = [0u8; 1024];
             glGetShaderInfoLog(
