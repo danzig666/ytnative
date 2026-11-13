@@ -78,14 +78,21 @@ pub fn choose(adaptive: &[Value], r: Request) -> Option<Choice> {
             order.push(*c);
         }
     }
-    // Highest resolution wins; at equal height the earlier codec in `order` (the requested one
-    // first). Frame rate only ranks formats within one codec.
-    let mut best: Option<(u64, Value, VideoCodec)> = None;
+    // Highest resolution wins; at equal height an HDR format (when allowed) beats SDR, AV1 HDR
+    // beating VP9 HDR (AV1 carries its colour description in the bitstream, so the TV can switch
+    // to HDR from the stream alone; VP9 keeps it in the container), then the earlier codec in
+    // `order` (the requested one first). Frame rate only ranks formats within one codec.
+    let hdr_rank = |f: &Value, c: VideoCodec| match (r.allow_hdr && is_hdr(f), c) {
+        (true, VideoCodec::Av1) => 2,
+        (true, _) => 1,
+        _ => 0,
+    };
+    let mut best: Option<((u64, u8), Value, VideoCodec)> = None;
     for c in &order {
         if let Some(f) = best_of(adaptive, *c, &r) {
-            let h = n(&f, "height");
-            if best.as_ref().map_or(true, |(bh, _, _)| h > *bh) {
-                best = Some((h, f, *c));
+            let rank = (n(&f, "height"), hdr_rank(&f, *c));
+            if best.as_ref().map_or(true, |(br, _, _)| rank > *br) {
+                best = Some((rank, f, *c));
             }
         }
     }
@@ -152,6 +159,12 @@ mod tests {
         assert_eq!(choose(&fmts(), r).unwrap().video_itag(), 315);
         r.allow_hdr = true;
         assert_eq!(choose(&fmts(), r).unwrap().video_itag(), 337);
+        // AV1 HDR at the same height wins over VP9 HDR.
+        let mut f = fmts();
+        f.push(json!({"itag":701,"url":"u","mimeType":"video/mp4; codecs=\"av01.0.13M.10.0.110.09.16.09.0\"","height":2160,"fps":60,"bitrate":20000000,"colorInfo":{"transferCharacteristics":"COLOR_TRANSFER_CHARACTERISTICS_SMPTEST2084"}}));
+        assert_eq!(choose(&f, r).unwrap().video_itag(), 701);
+        r.allow_hdr = false;
+        assert_eq!(choose(&f, r).unwrap().video_itag(), 315);
     }
 
     #[test]

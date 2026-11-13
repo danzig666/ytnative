@@ -166,16 +166,14 @@ impl PlayerMemory {
         self.positions.get(video_id).map(|p| p.secs)
     }
 
-    /// Stores the playback position. Positions near the start are ignored and positions near the
-    /// end (finished) remove the entry, so a finished video starts over next time.
+    /// Stores the playback position. A position near the start or the end (finished) is stored
+    /// as 0, so the video starts over next time; keeping the entry (rather than removing it) means
+    /// this app's own record still wins over YouTube's coarse watched-percentage.
     pub fn set_position(&mut self, video_id: &str, secs: u64, duration: u64) {
         let finished = duration > 0 && secs + END_MARGIN_SECS.min(duration / 10).max(1) >= duration;
-        if secs < MIN_RESUME_SECS || finished {
-            self.positions.remove(video_id);
-        } else {
-            let at = crate::fsutil::now_secs();
-            self.positions.insert(video_id, Position { secs, duration, at }, MAX_POSITIONS);
-        }
+        let secs = if secs < MIN_RESUME_SECS || finished { 0 } else { secs };
+        let at = crate::fsutil::now_secs();
+        self.positions.insert(video_id, Position { secs, duration, at }, MAX_POSITIONS);
     }
 
     pub fn forget_position(&mut self, video_id: &str) {
@@ -241,11 +239,11 @@ mod tests {
 
         m.set_position("v1", 120, 600);
         assert_eq!(m.position("v1"), Some(120));
-        m.set_position("v1", 5, 600); // too early -> forgotten
-        assert_eq!(m.position("v1"), None);
+        m.set_position("v1", 5, 600); // too early -> start over
+        assert_eq!(m.position("v1"), Some(0));
         m.set_position("v1", 300, 600);
-        m.set_position("v1", 590, 600); // finished -> forgotten
-        assert_eq!(m.position("v1"), None);
+        m.set_position("v1", 590, 600); // finished -> start over
+        assert_eq!(m.position("v1"), Some(0));
         m.set_position("live", 4000, 0); // unknown duration is kept
         assert_eq!(m.position("live"), Some(4000));
         for i in 0..(MAX_POSITIONS + 10) {

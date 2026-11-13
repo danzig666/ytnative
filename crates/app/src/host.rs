@@ -825,14 +825,16 @@ impl Rig<YtHost> for AppRig {
                     .take()
                     .filter(|(v, _)| *v == video_id)
                     .map(|(_, ms)| ms)
-                    .or_else(|| if s.resume_playback { self.store.resume_point(&video_id) } else { None })
+                    // This app's own exact record first (0 = start over); YouTube's watched
+                    // percentage on the card only for videos never played here.
                     .or_else(|| {
                         if s.resume_playback {
                             yt_core::memory::PlayerMemory::load().position(&video_id).map(|secs| secs * 1000)
                         } else {
                             None
                         }
-                    });
+                    })
+                    .or_else(|| if s.resume_playback { self.store.resume_point(&video_id) } else { None });
                 #[cfg(not(windows))]
                 {
                     let codec = match s.codec {

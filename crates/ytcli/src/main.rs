@@ -63,6 +63,17 @@ fn run() -> Result<()> {
                 r.title, r.author, r.length_secs, r.client, r.is_live, r.adaptive.len(), r.hls.is_some(), r.sabr.is_some(), r.expires_secs / 3600);
             println!("captions: {}", r.captions.iter().map(|c| format!("{}{}", c.language, if c.auto { "(auto)" } else { "" })).collect::<Vec<_>>().join(", "));
             println!("translations: {} languages; storyboard: {}", r.translations.len(), r.storyboard_spec.as_deref().map(|s| &s[..s.len().min(60)]).unwrap_or("none"));
+            for f in &r.adaptive {
+                println!(
+                    "  itag {:>3} {:>5}p{:<3} {:<40} {}{}",
+                    f["itag"],
+                    f["height"].as_u64().unwrap_or(0),
+                    f["fps"].as_u64().map(|x| x.to_string()).unwrap_or_default(),
+                    f["mimeType"].as_str().unwrap_or(""),
+                    if yt_core::demux::select::is_hdr(f) { "HDR " } else { "" },
+                    if f["url"].is_string() { "url" } else { "no-url" }
+                );
+            }
             if let Some(m) = r.mpd(Default::default()) { std::fs::write("last.mpd", m)?; println!("wrote last.mpd"); }
             Ok(())
         }
