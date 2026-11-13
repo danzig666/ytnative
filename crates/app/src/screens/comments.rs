@@ -1,9 +1,12 @@
 //! Comments for a video: a scrolling list; more pages load as you approach the end.
+//!
+//! Every comment is as tall as its text: header, all of its wrapped lines (nothing is cut off),
+//! and a likes/replies footer when there is one. The list scrolls in pixels.
 
 use crate::host::{YtArg, YtFx, YtHost, YtMsg};
-use plx_machine::machine::NavOp;
 use crate::ui::{self, VList};
-use plx_machine::machine::{Canon, Cx, Effects, EntryId, FocusKey, Fx, GroupId, Handled, InputEvent, InputKind, LogicalState, Machine, ScreenEvent};
+use plx_machine::machine::NavOp;
+use plx_machine::machine::{Canon, Cx, Edge, Effects, EntryId, FocusKey, Fx, GroupId, Handled, InputEvent, InputKind, Key, LogicalState, Machine, ScreenEvent};
 use plx_ui::frame::Budget;
 use plx_ui::screen::{At, Dir, DrawFrame, Focusable, GroupSpec, Placed, RenderStrategy, Screen, Step};
 use plx_ui::Rect;
@@ -12,37 +15,93 @@ use std::borrow::Cow;
 const G: GroupId = GroupId(1);
 const BASE: u32 = 0x7000_0000;
 const TEXT: i32 = 26;
-const CHARS_PER_LINE: usize = 46;
 /// The panel on the right; the video shrinks into the space on the left.
 const PANEL: Rect = Rect::new(1236.0, 0.0, 684.0, 1080.0);
 /// The video beside the panel: 16:9 in the left 1216 px, centred vertically.
 const VIDEO: [i32; 4] = [10, 198, 1216, 684];
+/// Gap between two comments.
+const GAP: f32 = 8.0;
+/// Line pitch of the comment text.
+const LINE: f32 = 31.0;
+/// Wheel travel per unit (px).
+const WHEEL_PX: f32 = 150.0;
 
-/// Greedy word wrap by character count (good enough for a TV font at a fixed size).
-fn wrap(s: &str, width: usize, max_lines: usize) -> Vec<String> {
+/// Word wrap to `w` px; a word wider than a line is broken by characters. Every line is kept.
+fn wrap_px(m: &dyn plx_machine::machine::Measure, s: &str, w: f32, size: i32) -> Vec<String> {
+    let width = |t: &str| std::ffi::CString::new(t).map_or(0.0, |c| m.width(&c, size, false));
     let mut lines = Vec::new();
     for para in s.lines() {
         let mut cur = String::new();
         for word in para.split_whitespace() {
-            if !cur.is_empty() && cur.chars().count() + 1 + word.chars().count() > width {
-                lines.push(std::mem::take(&mut cur));
+            let trial = if cur.is_empty() { word.to_string() } else { format!("{cur} {word}") };
+            if width(&trial) <= w {
+                cur = trial;
+                continue;
             }
             if !cur.is_empty() {
-                cur.push(' ');
+                lines.push(std::mem::take(&mut cur));
             }
-            cur.push_str(word);
+            if width(word) <= w {
+                cur = word.to_string();
+            } else {
+                for ch in word.chars() {
+                    let mut t = cur.clone();
+                    t.push(ch);
+                    if !cur.is_empty() && width(&t) > w {
+                        lines.push(std::mem::take(&mut cur));
+                        cur.push(ch);
+                    } else {
+                        cur = t;
+                    }
+                }
+            }
         }
         if !cur.is_empty() {
             lines.push(cur);
         }
     }
-    if lines.len() > max_lines {
-        lines.truncate(max_lines);
-        if let Some(l) = lines.last_mut() {
-            l.push('\u{2026}');
+    lines
+}
+
+/// Height of one comment: header, every text line, the likes/replies footer when there is one.
+fn comment_h(lines: usize, foot: bool) -> f32 {
+    10.0 + 30.0 + lines as f32 * LINE + if foot { 30.0 } else { 0.0 } + 10.0
+}
+
+fn footer(cm: &yt_core::comments::Comment) -> String {
+    let mut foot = String::new();
+    if let Some(l) = &cm.like_count_text {
+        foot.push_str(&format!("\u{1F44D} {l}"));
+    }
+    if cm.reply_count > 0 {
+        if !foot.is_empty() {
+            foot.push_str("      ");
+        }
+        foot.push_str(&format!("\u{1F4AC} {}", cm.reply_count));
+    }
+    foot
+}
+
+/// Wrapped lines and positions of the loaded comments (built in `draw`, where text can be
+/// measured; comments are only ever appended, so only new ones are laid out).
+#[derive(Default)]
+struct Layout {
+    key: String,
+    lines: Vec<Vec<String>>,
+    top: Vec<f32>,
+    h: Vec<f32>,
+}
+
+impl Layout {
+    fn total(&self) -> f32 {
+        match (self.top.last(), self.h.last()) {
+            (Some(t), Some(h)) => t + h,
+            _ => 0.0,
         }
     }
-    lines
+    fn span(&self, i: usize) -> Option<(f32, f32)> {
+        Some((*self.top.get(i)?, *self.h.get(i)?))
+    }
 }
 
 struct State(String);
@@ -61,20 +120,16 @@ pub struct CommentsScreen {
     /// Some(parent author) when showing replies.
     replies_to: Option<String>,
     list: VList,
-    /// First visible comment while the wheel has scrolled the list (focus stays where it was);
-    /// `None`: the list follows the focus.
-    scroll: Option<usize>,
-    /// Smooth scroll position in rows: where the list is drawn (`scroll_at`) and is going.
+    /// Scroll position in px: where the list is drawn (`scroll_at`, eased) and where it is going.
     scroll_at: std::cell::Cell<f32>,
     scroll_to: f32,
+    layout: std::cell::RefCell<Layout>,
     /// When the panel opened (it slides in from the right).
     opened_ms: u32,
     /// Already gave the video back (BACK, then Unmount).
     released: bool,
-    /// BACK pressed at: the panel slides out over `CLOSE_MS` (ahead of the overlay's own fade).
+    /// BACK pressed at: the panel slides out quickly (ahead of the overlay's own fade).
     closing_at: Option<u32>,
-    /// Wheel travel not yet turned into whole rows (the pointer's edge scroll is fractional).
-    wheel: f32,
     state: State,
 }
 
@@ -85,13 +140,12 @@ impl CommentsScreen {
             replies_to,
             video_id,
             list: VList { entry, group: G, base: BASE, rect: Rect::new(PANEL.x + 20.0, 100.0, PANEL.w - 40.0, 970.0), row_h: 192.0, text_size: TEXT },
-            scroll: None,
             scroll_at: std::cell::Cell::new(0.0),
             scroll_to: 0.0,
+            layout: Default::default(),
             opened_ms: 0,
             released: false,
             closing_at: None,
-            wheel: 0.0,
         }
     }
     fn len(&self, cx: &Cx<'_, YtHost>) -> usize {
@@ -107,14 +161,22 @@ impl CommentsScreen {
             fx.push(Fx::App(YtFx::VideoRect(None)));
         }
     }
-    /// First visible comment.
-    fn top(&self, cx: &Cx<'_, YtHost>) -> usize {
-        let n = self.len(cx);
-        let max = n.saturating_sub(self.list.rows_visible());
-        match self.scroll {
-            Some(t) => t.min(max),
-            None => self.list.top_for(self.list.focused(cx, n), n),
-        }
+    fn max_scroll(&self) -> f32 {
+        (self.layout.borrow().total() - self.list.rect.h).max(0.0)
+    }
+    /// Scrolls (the target) so comment `i` is on screen: its top when it is taller than the list.
+    fn reveal(&mut self, i: usize) {
+        let Some((t, h)) = self.layout.borrow().span(i) else { return };
+        let view = self.list.rect.h;
+        let s = self.scroll_to;
+        let to = if h > view || t < s {
+            t
+        } else if t + h > s + view {
+            t + h - view
+        } else {
+            s
+        };
+        self.scroll_to = to.clamp(0.0, self.max_scroll());
     }
     fn more_if_near_end(&self, last_seen: usize, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
         let n = self.len(cx);
@@ -147,7 +209,7 @@ impl Machine<YtHost> for CommentsScreen {
                 fx.invalidate(plx_machine::present::Provenance::Nav);
             }
             ScreenEvent::Unmount => self.release(fx),
-            ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: plx_machine::machine::Key::Back, edge: plx_machine::machine::Edge::Down, .. }, .. }) => {
+            ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: Key::Back, edge: Edge::Down, .. }, .. }) => {
                 // Grow the video back and bring the player's captions at once; the panel's close
                 // fade runs alongside instead of before.
                 self.release(fx);
@@ -157,17 +219,33 @@ impl Machine<YtHost> for CommentsScreen {
             }
             // The wheel scrolls the list; focus stays on its comment.
             ScreenEvent::Input(InputEvent { kind: InputKind::Wheel { dy }, .. }) => {
-                let n = self.len(cx);
-                let max = n.saturating_sub(self.list.rows_visible()) as f32;
-                if self.scroll.is_none() {
-                    self.scroll_to = self.top(cx) as f32;
-                    self.scroll_at.set(self.scroll_to);
+                self.scroll_to = (self.scroll_to - *dy * WHEEL_PX).clamp(0.0, self.max_scroll());
+                if self.scroll_to + self.list.rect.h > self.layout.borrow().total() - 600.0 {
+                    self.more_if_near_end(self.len(cx), cx, fx);
                 }
-                self.scroll_to = (self.scroll_to - *dy).clamp(0.0, max.max(0.0));
-                self.scroll = Some(self.scroll_to.floor() as usize);
-                self.more_if_near_end(self.scroll_to as usize + self.list.rows_visible(), cx, fx);
                 fx.invalidate(plx_machine::present::Provenance::Input);
                 return Handled::Yes;
+            }
+            // Up/Down inside a comment taller than the list: scroll through it before moving on.
+            ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: k @ (Key::Up | Key::Down), edge: Edge::Down | Edge::Repeat, .. }, .. }) => {
+                let n = self.len(cx);
+                let span = self.list.focused(cx, n).and_then(|i| self.layout.borrow().span(i));
+                if let Some((t, h)) = span {
+                    let view = self.list.rect.h;
+                    let s = self.scroll_to;
+                    let step = view * 0.6;
+                    let to = match k {
+                        Key::Down if t + h > s + view + 1.0 => Some((s + step).min(t + h - view)),
+                        Key::Up if t < s - 1.0 => Some((s - step).max(t)),
+                        _ => None,
+                    };
+                    if let Some(to) = to {
+                        self.scroll_to = to.clamp(0.0, self.max_scroll());
+                        fx.invalidate(plx_machine::present::Provenance::Input);
+                        return Handled::Yes;
+                    }
+                }
+                return Handled::No;
             }
             ScreenEvent::Activate(e) => {
                 let n = self.len(cx);
@@ -181,11 +259,11 @@ impl Machine<YtHost> for CommentsScreen {
             }
             ScreenEvent::Async(_, YtMsg::Comments) => fx.invalidate(plx_machine::present::Provenance::Lifecycle),
             ScreenEvent::FocusMoved { to, by, .. } => {
-                if *by != plx_machine::machine::By::Pointer {
-                    self.scroll = None; // keys: the list follows the focus again
-                }
                 let n = self.len(cx);
                 if let Some(i) = self.list.index(to.elem, n) {
+                    if *by != plx_machine::machine::By::Pointer {
+                        self.reveal(i); // keys: the list follows the focus
+                    }
                     self.more_if_near_end(i, cx, fx);
                 }
             }
@@ -209,8 +287,10 @@ impl Focusable<YtHost> for CommentsScreen {
         self.list.neighbour(key, dir, self.len(cx))
     }
     fn place(&self, key: &u32, cx: &Cx<'_, YtHost>, _at: At) -> Option<Placed> {
-        let n = self.len(cx).max(1);
-        self.list.place_top(*key, n, self.top(cx))
+        let i = self.list.index(*key, self.len(cx).max(1))?;
+        let (t, h) = self.layout.borrow().span(i).unwrap_or((0.0, 120.0));
+        let r = Rect::new(self.list.rect.x, self.list.rect.y + t - self.scroll_to, self.list.rect.w, h);
+        Some(Placed { rect: r, rest_rect: r, clip: self.list.rect, index: Some(i as u32) })
     }
     fn reconcile(&self, want: FocusKey<u32>, cx: &Cx<'_, YtHost>) -> FocusKey<u32> {
         if self.list.index(want.elem, self.len(cx).max(1)).is_some() { want } else { self.list.key(0) }
@@ -256,13 +336,6 @@ impl Screen<YtHost> for CommentsScreen {
         };
         let p = p.translate(PANEL.w * (1.0 - ease + out), 0.0);
         ui::fill(p, PANEL, 0.0, [0.06, 0.06, 0.08, 1.0]);
-        {
-            let n = self.len(cx);
-            let top = self.top(cx);
-            for i in (top..n).take(self.list.rows_visible()) {
-                ui::stop(f, self.list.key(i), self.list.row_rect(i, top), self.list.rect);
-            }
-        }
         let title = match &self.replies_to {
             Some(a) => format!("Replies to {a}"),
             None => "Comments".into(),
@@ -277,23 +350,48 @@ impl Screen<YtHost> for CommentsScreen {
             ui::text(p, &msg, PANEL.x + PANEL.w / 2.0, 500.0, 30, ui::DIM, ui::ALIGN_CENTER, false);
             return;
         }
-        let focus = self.list.focused(cx, c.items.len());
-        // Wheel / edge scrolling: ease toward the target, drawn with a sub-row offset.
-        let (top, frac) = if self.scroll.is_some() {
-            let at = self.scroll_at.get();
-            let next = at + (self.scroll_to - at) * 0.25;
-            let next = if (self.scroll_to - next).abs() < 0.01 { self.scroll_to } else { ui::animating(); next };
-            self.scroll_at.set(next);
-            (next.floor() as usize, next.fract())
+        // Lay out what arrived since the last frame.
+        {
+            let mut l = self.layout.borrow_mut();
+            if l.key != self.video_id || l.lines.len() > c.items.len() {
+                *l = Layout { key: self.video_id.clone(), ..Default::default() };
+            }
+            let w = self.list.rect.w - 40.0;
+            let from = l.lines.len();
+            for cm in &c.items[from..] {
+                let lines = wrap_px(f.measure, &cm.text, w, TEXT);
+                let h = comment_h(lines.len(), !footer(cm).is_empty());
+                let t = if l.top.is_empty() { 0.0 } else { l.total() + GAP };
+                l.lines.push(lines);
+                l.top.push(t);
+                l.h.push(h);
+            }
+        }
+        let max = self.max_scroll();
+        self.scroll_to = self.scroll_to.min(max);
+        // Ease toward the target.
+        let at = self.scroll_at.get().min(max);
+        let next = at + (self.scroll_to - at) * 0.3;
+        let s = if (self.scroll_to - next).abs() < 0.5 {
+            self.scroll_to
         } else {
-            (self.top(cx), 0.0)
+            ui::animating();
+            next
         };
-        let p = p.translate(0.0, -frac * self.list.row_h);
-        let _clip = plx_ui::screen::ClipScope::open_in(f.painter, Rect::new(PANEL.x, self.list.rect.y - 8.0, PANEL.w, self.list.rect.h + 8.0));
-        let vis = self.list.rows_visible();
-        for (i, cm) in c.items.iter().enumerate().skip(top).take(vis + 1) {
-            let y = self.list.rect.y + (i - top) as f32 * self.list.row_h;
-            let r = Rect::new(self.list.rect.x, y, self.list.rect.w, self.list.row_h - 12.0);
+        self.scroll_at.set(s);
+        let l = self.layout.borrow();
+        let (y0, view) = (self.list.rect.y, self.list.rect.h);
+        let visible = |i: usize| l.span(i).filter(|(t, h)| t + h > s && *t < s + view);
+        for i in 0..c.items.len() {
+            if let Some((t, h)) = visible(i) {
+                ui::stop(f, self.list.key(i), Rect::new(self.list.rect.x, y0 + t - s, self.list.rect.w, h), self.list.rect);
+            }
+        }
+        let focus = self.list.focused(cx, c.items.len());
+        let _clip = plx_ui::screen::ClipScope::open_in(f.painter, Rect::new(PANEL.x, y0 - 8.0, PANEL.w, view + 8.0));
+        for (i, cm) in c.items.iter().enumerate() {
+            let Some((t, h)) = visible(i) else { continue };
+            let r = Rect::new(self.list.rect.x, y0 + t - s, self.list.rect.w, h);
             if focus == Some(i) {
                 ui::fill(p, r, 14.0, ui::ROW_FOCUS);
             }
@@ -304,18 +402,18 @@ impl Screen<YtHost> for CommentsScreen {
             if cm.is_pinned {
                 head.push_str("  \u{2022}  Pinned");
             }
-            ui::text(p, &ui::ellipsize(&head, 52), r.x + 20.0, r.y + 12.0, 22, ui::DIM, ui::ALIGN_LEFT, true);
-            for (j, line) in wrap(&cm.text, CHARS_PER_LINE, 3).iter().enumerate() {
-                ui::text(p, line, r.x + 20.0, r.y + 44.0 + j as f32 * 31.0, TEXT, ui::WHITE, ui::ALIGN_LEFT, false);
+            ui::text(p, &ui::ellipsize(&head, 52), r.x + 20.0, r.y + 10.0, 22, ui::DIM, ui::ALIGN_LEFT, true);
+            for (j, line) in l.lines[i].iter().enumerate() {
+                let ly = r.y + 40.0 + j as f32 * LINE;
+                if ly + LINE < y0 - 8.0 || ly > y0 + view {
+                    continue;
+                }
+                ui::text(p, line, r.x + 20.0, ly, TEXT, ui::WHITE, ui::ALIGN_LEFT, false);
             }
-            let mut foot = String::new();
-            if let Some(l) = &cm.like_count_text {
-                foot.push_str(&format!("\u{1F44D} {l}"));
+            let foot = footer(cm);
+            if !foot.is_empty() {
+                ui::text(p, &foot, r.x + 20.0, r.y + 40.0 + l.lines[i].len() as f32 * LINE + 2.0, 22, ui::FAINT, ui::ALIGN_LEFT, false);
             }
-            if cm.reply_count > 0 {
-                foot.push_str(&format!("      \u{1F4AC} {}", cm.reply_count));
-            }
-            ui::text(p, &foot, r.x + 20.0, r.y + r.h - 34.0, 22, ui::FAINT, ui::ALIGN_LEFT, false);
         }
         if c.loading {
             ui::text(p, "Loading more\u{2026}", PANEL.x + PANEL.w / 2.0, 1046.0, 22, ui::FAINT, ui::ALIGN_CENTER, false);
