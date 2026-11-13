@@ -33,7 +33,15 @@ impl Session {
     pub fn new() -> Result<Session> {
         let http = crate::net::builder().timeout(std::time::Duration::from_secs(30)).build()?;
         let cfg = bootstrap::fetch(&http)?;
-        let acct = crate::accounts::resolve(&http, None)?;
+        let mut acct = crate::accounts::resolve(&http, None)?;
+        // An account stored without its profile (a migrated token, or YouTube unreachable at
+        // sign-in) gets its name and handle filled in now.
+        if let Some(a) = acct.as_ref().filter(|a| a.name.trim().is_empty()) {
+            match crate::accounts::fill_profile(&http, &cfg, &a.id) {
+                Ok(filled) => acct = Some(filled),
+                Err(e) => eprintln!("[accounts] could not fill in the profile: {e:#}"),
+            }
+        }
         let page_id = acct.as_ref().and_then(|a| a.page_id.clone());
         Ok(Session { http, cfg, token: acct.map(|a| a.token), account: None, page_id })
     }

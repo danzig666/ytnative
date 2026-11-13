@@ -14,8 +14,18 @@ use plx_ui::Rect;
 use std::borrow::Cow;
 
 const STYLE: RowStyle = RowStyle { w: 380.0, h: 214.0, gap: 44.0, ..RowStyle::HOME };
-fn spec() -> GridSpec {
-    GridSpec::new(170.0, 96.0).columns(ui::card_cols(), ui::card_style(ui::card_cols(), 1652.0, 44.0), 112.0)
+/// Where the grid starts: lower on a channel page, whose Subscribe button has a line of its own
+/// under the title.
+fn grid_top(key: &FeedKey) -> f32 {
+    if is_channel(key) { 212.0 } else { 170.0 }
+}
+
+fn is_channel(key: &FeedKey) -> bool {
+    matches!(key, FeedKey::Browse { id, .. } if id.starts_with("UC"))
+}
+
+fn spec(top: f32) -> GridSpec {
+    GridSpec::new(top, 96.0).columns(ui::card_cols(), ui::card_style(ui::card_cols(), 1652.0, 44.0), 112.0)
 }
 const G: GroupId = GroupId(1);
 const G_BTN: GroupId = GroupId(2);
@@ -41,7 +51,8 @@ pub struct FeedScreen {
 
 impl FeedScreen {
     pub fn new(entry: EntryId, key: FeedKey) -> Self {
-        FeedScreen { entry, state: State(format!("{key:?}")), key, grid: Grid::new(entry, spec()) }
+        let top = grid_top(&key);
+        FeedScreen { entry, state: State(format!("{key:?}")), key, grid: Grid::new(entry, spec(top)) }
     }
     fn src<'a>(&self, cx: &Cx<'a, YtHost>) -> CardsSrc<'a> {
         let f = cx.views.store.feed(&self.key);
@@ -202,7 +213,7 @@ impl Screen<YtHost> for FeedScreen {
             ui::draw_focused_caption(p, f.measure, 20.0);
             self.grid.record_stops(f, p, &src);
         }
-        ui::header_band(p, Rect::new(0.0, 0.0, 1920.0, 150.0));
+        ui::header_band(p, Rect::new(0.0, 0.0, 1920.0, grid_top(&self.key) - 20.0));
         ui::text(p, &ui::ellipsize(&self.title(cx), 70), 112.0, 64.0, 46, ui::WHITE, ui::ALIGN_LEFT, true);
         if cx.views.store.settings.clock_on_pages {
             common::clock_block(p, cx, 1824.0, 40.0);

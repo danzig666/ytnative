@@ -21,7 +21,16 @@ pub fn page(resp: &Value) -> Page {
     }
     page.shelves.retain(|s| !s.items.is_empty());
     page.shelves = merge_grid_rows(std::mem::take(&mut page.shelves));
+    if page.title.is_none() {
+        page.title = header_title(resp);
+    }
     page
+}
+
+/// A channel page's name, from its header (`tvSurfaceContentRenderer.header.channelHeaderRenderer`).
+fn header_title(resp: &Value) -> Option<String> {
+    let surface = &resp["contents"]["tvBrowseRenderer"]["content"]["tvSurfaceContentRenderer"];
+    text(&surface["header"]["channelHeaderRenderer"]["title"]).filter(|t| !t.trim().is_empty())
 }
 
 /// TV grids arrive as a run of untitled shelves, one per row. Join each run into one shelf.

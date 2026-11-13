@@ -1,3 +1,3 @@
-- New: members-only videos show a star and "Members only" on their thumbnail
-- Changed: when a video cannot be played, the player says "Can't play this video" with YouTube's reason in full underneath, instead of a cut-off technical message
-- Changed: a members-only video you are not a member of just says that only the channel's members can watch it
+- Fixed: a channel page shows the channel's name as its title instead of "Channel"
+- Fixed: the Subscribe button on a channel page no longer overlaps the first row of videos
+- Fixed: an account whose name was blank (signed in before names were stored) gets its name filled in, on the Accounts page and in the sidebar

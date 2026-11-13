@@ -516,6 +516,11 @@ impl AppRig {
                         self.store.fail(&key, e.clone());
                         out.push((addr, YtMsg::Failed(key, e)));
                     } else {
+                        // The session may just have filled in the account's name (a placeholder
+                        // account): pick it up for the sidebar and the Accounts page.
+                        if self.store.signed_in && self.store.account.as_deref().is_none_or(|n| n.trim().is_empty()) {
+                            self.refresh_accounts();
+                        }
                         let before = if append { self.store.cards(&key).len() } else { 0 };
                         self.store.apply(&key, page, append);
                         crate::log(&format!("feed {key:?}: {} cards", self.store.cards(&key).len()));
