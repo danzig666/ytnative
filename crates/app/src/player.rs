@@ -85,6 +85,9 @@ pub struct ExtrasPrefs {
     pub dislikes: bool,
     /// Use the subtitle state remembered for the video's channel, if any.
     pub channel_subtitles: bool,
+    /// Report the playback to YouTube's watch history.
+    #[cfg_attr(windows, allow(dead_code))]
+    pub history: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -237,8 +240,10 @@ impl Player {
             }
             match run(luna, &video_id, &window_id, &session, &status, &media_id, prefs, start_ms, feed, &live, my_gen) {
                 Ok(true) => {
-                    let (v, s2, st2) = (video_id.clone(), session.clone(), status.clone());
-                    let _ = plx_base::task::spawn("track", move || track_history(&v, &s2, &st2));
+                    if extras.history {
+                        let (v, s2, st2) = (video_id.clone(), session.clone(), status.clone());
+                        let _ = plx_base::task::spawn("track", move || track_history(&v, &s2, &st2));
+                    }
                     load_extras(&video_id, &session, &status, &extras)
                 }
                 Ok(false) => crate::log(&format!("player: {video_id} was left while starting; dropped")),

@@ -415,30 +415,47 @@ impl Store {
 struct Filter<'a> {
     s: &'a Settings,
     hide_shorts: bool,
+    hide_watched: bool,
+    hide_upcoming: bool,
+    hide_streams: bool,
 }
 
 impl<'a> Filter<'a> {
     fn from(s: &'a Settings, k: &FeedKey) -> Self {
-        let hide_shorts = match k {
-            FeedKey::Section(Section::Home) => s.hide_shorts_home,
-            FeedKey::Section(Section::Subscriptions) => s.hide_shorts_subscriptions,
-            FeedKey::Search { .. } => s.hide_shorts_search,
-            _ => false,
-        };
-        Filter { s, hide_shorts }
+        let home = *k == FeedKey::Section(Section::Home);
+        let subs = *k == FeedKey::Section(Section::Subscriptions);
+        let channel = matches!(k, FeedKey::Browse { id, .. } if id.starts_with("UC"));
+        let hide_shorts = s.hide_shorts_everywhere
+            || match k {
+                FeedKey::Section(Section::Home) => s.hide_shorts_home,
+                FeedKey::Section(Section::Subscriptions) => s.hide_shorts_subscriptions,
+                FeedKey::Search { .. } => s.hide_shorts_search,
+                _ => false,
+            };
+        Filter {
+            s,
+            hide_shorts,
+            hide_watched: (home && s.hide_watched_home) || (subs && s.hide_watched_subscriptions),
+            hide_upcoming: (home && s.hide_upcoming_home) || (subs && s.hide_upcoming_subscriptions) || (channel && s.hide_upcoming_channels),
+            hide_streams: subs && s.hide_streams_subscriptions,
+        }
     }
 
     fn keep(&self, it: &Item) -> bool {
         if self.hide_shorts && it.kind == ItemKind::Short {
             return false;
         }
-        if self.s.hide_upcoming && it.kind == ItemKind::Upcoming {
+        if self.hide_upcoming && it.kind == ItemKind::Upcoming {
+            return false;
+        }
+        // Live now, or a past live stream ("Streamed 2 days ago"; requests are made in English).
+        if self.hide_streams && (it.kind == ItemKind::Live || it.lines.iter().any(|l| l.contains("Streamed "))) {
             return false;
         }
         if self.s.hide_mixes && it.kind == ItemKind::Mix {
             return false;
         }
-        if self.s.hide_watched && it.progress.is_some_and(|p| p >= 90) {
+        if self.hide_watched && it.progress.is_some_and(|p| p >= 90) {
             return false;
         }
         if let Some(ch) = &it.channel {

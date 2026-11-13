@@ -341,10 +341,22 @@ pub struct Settings {
     pub hide_shorts_home: bool,
     pub hide_shorts_subscriptions: bool,
     pub hide_shorts_search: bool,
-    pub hide_watched: bool,
-    pub hide_upcoming: bool,
+    /// Shorts hidden in every list (channel pages, history, trending too).
+    pub hide_shorts_everywhere: bool,
+    pub hide_watched_home: bool,
+    pub hide_watched_subscriptions: bool,
+    pub hide_upcoming_home: bool,
+    pub hide_upcoming_subscriptions: bool,
+    pub hide_upcoming_channels: bool,
+    /// Live and past live streams hidden in Subscriptions.
+    pub hide_streams_subscriptions: bool,
     pub hide_mixes: bool,
     pub blocked_channels: Vec<String>,
+    /// "auto" (YouTube's account setting decides), "on" or "off" (no history pings, no resume
+    /// positions saved).
+    pub watch_history: String,
+    /// Searches are recorded (off: the history is cleared and nothing is recorded).
+    pub search_history: bool,
     // Interface
     pub sections: Vec<String>,
     /// Channels / playlists pinned to the sidebar: (title, browse id, params).
@@ -446,10 +458,17 @@ impl Default for Settings {
             hide_shorts_home: false,
             hide_shorts_subscriptions: false,
             hide_shorts_search: false,
-            hide_watched: false,
-            hide_upcoming: false,
+            hide_shorts_everywhere: false,
+            hide_watched_home: false,
+            hide_watched_subscriptions: false,
+            hide_upcoming_home: false,
+            hide_upcoming_subscriptions: false,
+            hide_upcoming_channels: false,
+            hide_streams_subscriptions: false,
             hide_mixes: false,
             blocked_channels: Vec::new(),
+            watch_history: "auto".into(),
+            search_history: true,
             pinned: Vec::new(),
             // Trending is off by default: YouTube retired the page (browse answers HTTP 400).
             sections: crate::store::Section::ALL.iter().filter(|s| **s != crate::store::Section::Trending).map(|s| s.key().to_string()).collect(),
@@ -514,6 +533,15 @@ impl Settings {
         if !has("controls_time") && v["show_ending_time"].as_bool() == Some(false) {
             self.controls_time = ControlsTime::Off;
         }
+        if !has("hide_watched_home") && v["hide_watched"].as_bool() == Some(true) {
+            self.hide_watched_home = true;
+            self.hide_watched_subscriptions = true;
+        }
+        if !has("hide_upcoming_home") && v["hide_upcoming"].as_bool() == Some(true) {
+            self.hide_upcoming_home = true;
+            self.hide_upcoming_subscriptions = true;
+            self.hide_upcoming_channels = true;
+        }
     }
 
     pub fn save(&self) {
@@ -540,8 +568,9 @@ mod tests {
 
     #[test]
     fn old_options_migrate() {
-        let v = serde_json::json!({"repeat": "One", "remember_speed_per_channel": true, "show_ending_time": false});
+        let v = serde_json::json!({"repeat": "One", "remember_speed_per_channel": true, "show_ending_time": false, "hide_watched": true});
         let s = Settings::from_json(Some(v));
+        assert!(s.hide_watched_home && s.hide_watched_subscriptions && !s.hide_upcoming_home);
         assert_eq!(s.playback_mode, PlaybackMode::RepeatOne);
         assert_eq!(s.remember_speed, RememberSpeed::PerChannel);
         assert_eq!(s.controls_time, ControlsTime::Off);

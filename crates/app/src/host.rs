@@ -28,6 +28,8 @@ pub enum SettingsPage {
     Interface,
     Remote,
     About,
+    /// The blocked channels (OK unblocks one).
+    Blocked,
 }
 
 /// What a navigation entry shows.
@@ -633,6 +635,11 @@ impl AppRig {
         });
     }
 
+    /// Whether the playback of `video_id` goes to the watch history (and saves its position).
+    fn history_for(&self, _video_id: &str) -> bool {
+        self.store.settings.watch_history != "off"
+    }
+
     /// "Subtitles per channel": applies the channel's remembered subtitles when its video starts,
     /// and remembers a change made while watching it.
     fn channel_subtitles(&mut self) {
@@ -941,6 +948,7 @@ impl Rig<YtHost> for AppRig {
                         .collect(),
                     dislikes: s.return_dislikes,
                     channel_subtitles: s.subtitles_per_channel,
+                    history: self.history_for(&video_id),
                 };
                 self.sb = yt_core::ext::sponsorblock::SkipTracker::new(!s.sb_skip_once);
                 self.sb_offer = None;
@@ -989,7 +997,7 @@ impl Rig<YtHost> for AppRig {
                 // Only a video that really played reports where it is (a BACK while resolving would
                 // otherwise store 0 over the resume point).
                 let played = matches!(v.phase, crate::player::Phase::Playing | crate::player::Phase::Paused | crate::player::Phase::Ended);
-                let keep = !v.live || self.store.settings.resume_live;
+                let keep = (!v.live || self.store.settings.resume_live) && self.history_for(&v.video_id);
                 if !v.video_id.is_empty() && v.duration_ms > 0 && played && keep {
                     let mut m = yt_core::memory::PlayerMemory::load();
                     m.set_position(&v.video_id, v.position_ms / 1000, v.duration_ms / 1000);

@@ -24,6 +24,8 @@ enum Item {
     Opt(&'static str, Get, Change),
     Action(&'static str, fn(&mut Effects<'_, YtHost>)),
     Info(&'static str, fn(&Cx<'_, YtHost>) -> String),
+    /// A blocked channel (by index in the settings): OK unblocks it.
+    Blocked(usize),
 }
 
 fn cycle_key(k: &mut String, d: i32) {
@@ -96,9 +98,11 @@ fn sb(a: SbAction) -> String {
 }
 const SB: &[SbAction] = &[SbAction::Off, SbAction::Skip, SbAction::SkipWithToast, SbAction::Ask];
 
-fn items(page: SettingsPage) -> Vec<Item> {
+fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
     use Item::*;
     match page {
+        SettingsPage::Blocked if s.blocked_channels.is_empty() => vec![Info("No blocked channels", |_| String::new())],
+        SettingsPage::Blocked => (0..s.blocked_channels.len()).map(Blocked).collect(),
         SettingsPage::Root => vec![
             Page("Playback", SettingsPage::Playback),
             Page("Subtitles", SettingsPage::Subtitles),
@@ -196,13 +200,31 @@ fn items(page: SettingsPage) -> Vec<Item> {
             Opt("Return YouTube Dislike", |s| on_off(s.return_dislikes), |s, _| s.return_dislikes = !s.return_dislikes),
         ],
         SettingsPage::Content => vec![
+            Opt("Hide Shorts everywhere", |s| on_off(s.hide_shorts_everywhere), |s, _| s.hide_shorts_everywhere = !s.hide_shorts_everywhere),
             Opt("Hide Shorts on Home", |s| on_off(s.hide_shorts_home), |s, _| s.hide_shorts_home = !s.hide_shorts_home),
             Opt("Hide Shorts in Subscriptions", |s| on_off(s.hide_shorts_subscriptions), |s, _| s.hide_shorts_subscriptions = !s.hide_shorts_subscriptions),
             Opt("Hide Shorts in Search", |s| on_off(s.hide_shorts_search), |s, _| s.hide_shorts_search = !s.hide_shorts_search),
-            Opt("Hide watched videos", |s| on_off(s.hide_watched), |s, _| s.hide_watched = !s.hide_watched),
-            Opt("Hide upcoming streams", |s| on_off(s.hide_upcoming), |s, _| s.hide_upcoming = !s.hide_upcoming),
+            Opt("Hide watched videos on Home", |s| on_off(s.hide_watched_home), |s, _| s.hide_watched_home = !s.hide_watched_home),
+            Opt("Hide watched videos in Subscriptions", |s| on_off(s.hide_watched_subscriptions), |s, _| {
+                s.hide_watched_subscriptions = !s.hide_watched_subscriptions
+            }),
+            Opt("Hide upcoming streams on Home", |s| on_off(s.hide_upcoming_home), |s, _| s.hide_upcoming_home = !s.hide_upcoming_home),
+            Opt("Hide upcoming streams in Subscriptions", |s| on_off(s.hide_upcoming_subscriptions), |s, _| {
+                s.hide_upcoming_subscriptions = !s.hide_upcoming_subscriptions
+            }),
+            Opt("Hide upcoming streams on channel pages", |s| on_off(s.hide_upcoming_channels), |s, _| s.hide_upcoming_channels = !s.hide_upcoming_channels),
+            Opt("Hide streams in Subscriptions", |s| on_off(s.hide_streams_subscriptions), |s, _| s.hide_streams_subscriptions = !s.hide_streams_subscriptions),
             Opt("Hide mixes", |s| on_off(s.hide_mixes), |s, _| s.hide_mixes = !s.hide_mixes),
-            Opt("Blocked channels (OK clears)", |s| s.blocked_channels.len().to_string(), |s, _| s.blocked_channels.clear()),
+            Page("Blocked channels", SettingsPage::Blocked),
+            Opt("Watch history", |s| match s.watch_history.as_str() { "on" => "On".into(), "off" => "Off".into(), _ => "Automatic".into() }, |s, d| {
+                cycle_str(&["auto", "on", "off"], &mut s.watch_history, d)
+            }),
+            Opt("Search history", |s| on_off(s.search_history), |s, _| {
+                s.search_history = !s.search_history;
+                if !s.search_history {
+                    let _ = yt_core::search_history::clear();
+                }
+            }),
             Action("Clear search history", |fx| fx.push(Fx::App(YtFx::Act(crate::host::UserAction::ClearSearchHistory)))),
             Action("Import channel groups from USB", |fx| fx.push(Fx::App(YtFx::Act(crate::host::UserAction::ImportGroups)))),
             Opt("Child mode (no search, no comments)", |s| on_off(s.child_mode), |s, _| s.child_mode = !s.child_mode),
@@ -333,6 +355,7 @@ fn title(page: SettingsPage) -> &'static str {
         SettingsPage::Interface => "Interface",
         SettingsPage::Remote => "Remote control",
         SettingsPage::About => "Account & about",
+        SettingsPage::Blocked => "Blocked channels",
     }
 }
 
@@ -370,7 +393,7 @@ impl SettingsScreen {
     /// The values option `i` can take, from its own `change` (applied to a copy until it comes
     /// back round), and the current one's index.
     fn values(&self, i: usize, cx: &Cx<'_, YtHost>) -> Option<(Vec<String>, usize)> {
-        let Some(Item::Opt(_, get, change)) = items(self.page).into_iter().nth(i) else { return None };
+        let Some(Item::Opt(_, get, change)) = items(self.page, &cx.views.store.settings).into_iter().nth(i) else { return None };
         let mut s = cx.views.store.settings.clone();
         let first = get(&s);
         let mut v = vec![first.clone()];
@@ -391,9 +414,16 @@ impl SettingsScreen {
         Some((v, cur))
     }
 
-    fn change(&self, i: usize, dir: i32, fx: &mut Effects<'_, YtHost>) {
-        let list = items(self.page);
+    fn change(&self, i: usize, dir: i32, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
+        let list = items(self.page, &cx.views.store.settings);
         match list.get(i) {
+            Some(Item::Blocked(b)) if dir >= 0 => {
+                if let Some(name) = cx.views.store.settings.blocked_channels.get(*b).cloned() {
+                    fx.push(Fx::App(YtFx::Toast(crate::i18n::tr("{} unblocked").replace("{}", &name))));
+                    fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| s.blocked_channels.retain(|c| *c != name)))));
+                    fx.invalidate(plx_machine::present::Provenance::Input);
+                }
+            }
             Some(Item::Page(_, p)) if dir >= 0 => fx.push(Fx::Nav(NavOp::Push(YtArg::Settings(*p)))),
             Some(Item::Opt(_, _, change)) => {
                 let change = *change;
@@ -412,13 +442,13 @@ impl Machine<YtHost> for SettingsScreen {
         if let Some(a) = super::common::press_commit_as_activate(ev, cx, |_| true) {
             return self.step(&a, cx, fx);
         }
-        let n = items(self.page).len();
+        let n = items(self.page, &cx.views.store.settings).len();
         match ev {
             ScreenEvent::Activate(e) if self.choice.as_ref().is_some_and(|c| c.owns(*e)) => {
                 let c = self.choice.take().unwrap();
                 self.closed_row.set(c.row);
                 let k = c.list.index(*e, c.options.len()).unwrap_or(0);
-                if let Some(Item::Opt(_, get, change)) = items(self.page).into_iter().nth(c.row) {
+                if let Some(Item::Opt(_, get, change)) = items(self.page, &cx.views.store.settings).into_iter().nth(c.row) {
                     let target = c.options[k].clone();
                     fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| {
                         for _ in 0..300 {
@@ -441,7 +471,7 @@ impl Machine<YtHost> for SettingsScreen {
                             self.choice = Some(ui::ChoiceBox::new(self.list.entry, i, v, cur, anchor));
                             fx.invalidate(plx_machine::present::Provenance::Input);
                         }
-                        _ => self.change(i, 1, fx),
+                        _ => self.change(i, 1, cx, fx),
                     }
                 }
                 Handled::Yes
@@ -457,8 +487,8 @@ impl Machine<YtHost> for SettingsScreen {
             ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: Key::Left | Key::Right, .. }, .. }) if self.choice.is_some() => Handled::Yes,
             ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: key @ (Key::Left | Key::Right), edge: Edge::Down | Edge::Repeat, .. }, .. }) => {
                 if let Some(i) = self.list.focused(cx, n) {
-                    if matches!(items(self.page).get(i), Some(Item::Opt(..))) {
-                        self.change(i, if *key == Key::Left { -1 } else { 1 }, fx);
+                    if matches!(items(self.page, &cx.views.store.settings).get(i), Some(Item::Opt(..))) {
+                        self.change(i, if *key == Key::Left { -1 } else { 1 }, cx, fx);
                         return Handled::Yes;
                     }
                 }
@@ -475,38 +505,38 @@ impl Machine<YtHost> for SettingsScreen {
 }
 
 impl Focusable<YtHost> for SettingsScreen {
-    fn groups(&self, _cx: &Cx<'_, YtHost>, out: &mut Vec<GroupSpec>) {
+    fn groups(&self, cx: &Cx<'_, YtHost>, out: &mut Vec<GroupSpec>) {
         if let Some(c) = &self.choice {
             out.push(c.list.spec(c.options.len()));
             return;
         }
-        out.push(self.list.spec(items(self.page).len()));
+        out.push(self.list.spec(items(self.page, &cx.views.store.settings).len()));
     }
     fn group_of(&self, key: &u32, _cx: &Cx<'_, YtHost>) -> Option<GroupId> {
         Some(if self.choice.as_ref().is_some_and(|c| c.owns(*key)) { ui::CHOICE_GROUP } else { G })
     }
-    fn neighbour(&self, key: FocusKey<u32>, dir: Dir, _cx: &Cx<'_, YtHost>) -> Step<u32> {
+    fn neighbour(&self, key: FocusKey<u32>, dir: Dir, cx: &Cx<'_, YtHost>) -> Step<u32> {
         if let Some(c) = &self.choice {
             return c.list.neighbour(key, dir, c.options.len());
         }
-        self.list.neighbour(key, dir, items(self.page).len())
+        self.list.neighbour(key, dir, items(self.page, &cx.views.store.settings).len())
     }
     fn place(&self, key: &u32, cx: &Cx<'_, YtHost>, _at: At) -> Option<Placed> {
         if let Some(c) = self.choice.as_ref().filter(|c| c.owns(*key)) {
             let n = c.options.len();
             return c.list.place(*key, n, c.list.focused(cx, n));
         }
-        let n = items(self.page).len();
+        let n = items(self.page, &cx.views.store.settings).len();
         self.list.place(*key, n, self.list.focused(cx, n))
     }
-    fn reconcile(&self, want: FocusKey<u32>, _cx: &Cx<'_, YtHost>) -> FocusKey<u32> {
+    fn reconcile(&self, want: FocusKey<u32>, cx: &Cx<'_, YtHost>) -> FocusKey<u32> {
         if let Some(c) = &self.choice {
             return if c.owns(want.elem) { want } else { c.list.key(c.current) };
         }
         if want.elem >= ui::CHOICE_BASE {
             return self.list.key(self.closed_row.get());
         }
-        if self.list.index(want.elem, items(self.page).len()).is_some() { want } else { self.list.key(0) }
+        if self.list.index(want.elem, items(self.page, &cx.views.store.settings).len()).is_some() { want } else { self.list.key(0) }
     }
     fn seat(&self, g: GroupId, _from: Placed, _cx: &Cx<'_, YtHost>) -> FocusKey<u32> {
         if let (Some(c), true) = (&self.choice, g == ui::CHOICE_GROUP) {
@@ -532,9 +562,10 @@ impl Screen<YtHost> for SettingsScreen {
         let cx = f.cx;
         ui::text(p, title(self.page), 360.0, 70.0, 48, ui::WHITE, ui::ALIGN_LEFT, true);
         let s = &cx.views.store.settings;
-        let rows: Vec<Row> = items(self.page)
+        let rows: Vec<Row> = items(self.page, s)
             .iter()
             .map(|it| match it {
+                Item::Blocked(i) => Row::new(s.blocked_channels.get(*i).cloned().unwrap_or_default()).value(crate::i18n::tr("Unblock")),
                 Item::Page(l, _) => Row::new(*l).value("\u{203A}"),
                 Item::Opt(l, get, _) => Row::new(*l).value(format!("{}  \u{203A}", crate::i18n::tr(&get(s)))),
                 Item::Action(l, _) => Row::new(*l),
