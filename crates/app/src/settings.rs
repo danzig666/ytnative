@@ -219,6 +219,9 @@ pub struct Settings {
     pub subtitle_bold: bool,
     /// Background opacity 0..=100.
     pub subtitle_background: u32,
+    /// Subtitles switched on / off or a language chosen while watching a channel are remembered
+    /// for that channel.
+    pub subtitles_per_channel: bool,
     // SponsorBlock / DeArrow / RYD
     pub sponsorblock: bool,
     pub sb_sponsor: SbAction,
@@ -320,6 +323,7 @@ impl Default for Settings {
             subtitle_bottom_offset: 90,
             subtitle_color: "white".into(),
             subtitle_background: 72,
+            subtitles_per_channel: true,
             sponsorblock: true,
             sb_sponsor: SbAction::SkipWithToast,
             sb_intro: SbAction::Off,

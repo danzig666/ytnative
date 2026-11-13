@@ -83,6 +83,8 @@ pub struct ExtrasPrefs {
     pub sponsorblock: bool,
     pub categories: Vec<yt_core::ext::sponsorblock::Category>,
     pub dislikes: bool,
+    /// Use the subtitle state remembered for the video's channel, if any.
+    pub channel_subtitles: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -655,8 +657,19 @@ pub(crate) fn load_extras(video_id: &str, session: &Mutex<Option<yt_core::sessio
     }
     publish(&ex);
     let _ = tracks;
-    if prefs.subtitles {
-        load_captions(video_id, session, status, &prefs.language, prefs.auto_translate);
+    // The channel's remembered subtitles ("" = off) win over the global setting.
+    let (mut subtitles, mut language) = (prefs.subtitles, prefs.language.clone());
+    if prefs.channel_subtitles {
+        let channel = status.lock().unwrap().channel_id.clone();
+        if let Some(l) = yt_core::memory::PlayerMemory::load().channel_subtitle.peek(&channel).filter(|_| !channel.is_empty()) {
+            subtitles = !l.is_empty();
+            if subtitles {
+                language = l.clone();
+            }
+        }
+    }
+    if subtitles {
+        load_captions(video_id, session, status, &language, prefs.auto_translate);
     }
 }
 

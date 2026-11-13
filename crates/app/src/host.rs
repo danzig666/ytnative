@@ -279,6 +279,14 @@ pub struct AppRig {
     video_ms: u32,
     /// `settings.subtitles` as last seen, to load captions when they are switched on mid-video.
     subtitles_were: bool,
+    /// The subtitle language as last seen (a change reloads the captions).
+    subtitle_language_was: String,
+    /// "Subtitles per channel": the video whose channel's subtitles were applied, the state seen
+    /// since (a change is the user's, remembered for the channel), and the global state to put
+    /// back for channels without one.
+    subs_applied_for: String,
+    subs_seen: (bool, String),
+    subs_global: Option<(bool, String)>,
     /// `ui_language` the translations were last switched to.
     applied_language: String,
     mounter: Mount,
@@ -314,6 +322,10 @@ impl AppRig {
             video_applied: [0, 0, 1920, 1080],
             video_ms: 0,
             subtitles_were: false,
+            subtitle_language_was: String::new(),
+            subs_applied_for: String::new(),
+            subs_seen: (false, String::new()),
+            subs_global: None,
             applied_language: String::new(),
             mounter: Mount,
             store,
@@ -416,8 +428,12 @@ impl AppRig {
             self.player.set_video_rect(if r == [0, 0, 1920, 1080] { None } else { Some(r) });
         }
         self.player_view = self.player.status.lock().unwrap().clone();
+        self.channel_subtitles();
         let subs = self.store.settings.subtitles;
-        if subs && !self.subtitles_were && !self.player_view.video_id.is_empty() && self.player_view.extras.cues.is_empty() {
+        let language_changed = self.store.settings.subtitle_language != self.subtitle_language_was;
+        self.subtitle_language_was = self.store.settings.subtitle_language.clone();
+        let wanted = (!self.subtitles_were && self.player_view.extras.cues.is_empty()) || (self.subtitles_were && language_changed);
+        if subs && wanted && !self.player_view.video_id.is_empty() {
             let (v, session, status) = (self.player_view.video_id.clone(), self.session.clone(), self.player.status.clone());
             let (lang, tr) = (self.store.settings.subtitle_language.clone(), self.store.settings.subtitle_auto_translate);
             plx_base::task::spawn("captions", move || crate::player::load_captions(&v, &session, &status, &lang, tr));
@@ -604,6 +620,54 @@ impl AppRig {
                 plx_machine::present::wake_from_worker();
             }
         });
+    }
+
+    /// "Subtitles per channel": applies the channel's remembered subtitles when its video starts,
+    /// and remembers a change made while watching it.
+    fn channel_subtitles(&mut self) {
+        let (v, ch) = (&self.player_view.video_id, &self.player_view.channel_id);
+        let watching = matches!(self.player_view.phase, Phase::Loading | Phase::Playing | Phase::Paused | Phase::Ended);
+        if !self.store.settings.subtitles_per_channel || !watching || v.is_empty() || ch.is_empty() {
+            return;
+        }
+        let s = &mut self.store.settings;
+        let now = (s.subtitles, s.subtitle_language.clone());
+        if self.subs_applied_for != *v {
+            self.subs_applied_for = v.clone();
+            match yt_core::memory::PlayerMemory::load().channel_subtitle.peek(ch).cloned() {
+                Some(l) => {
+                    self.subs_global.get_or_insert(now);
+                    s.subtitles = !l.is_empty();
+                    if !l.is_empty() {
+                        s.subtitle_language = l;
+                    }
+                }
+                None => {
+                    if let Some((on, lang)) = self.subs_global.take() {
+                        s.subtitles = on;
+                        s.subtitle_language = lang;
+                    }
+                }
+            }
+            self.subs_seen = (s.subtitles, s.subtitle_language.clone());
+        } else if now != self.subs_seen {
+            // Changed while watching: this channel's from now on; the global one stays.
+            self.subs_global.get_or_insert(self.subs_seen.clone());
+            let mut m = yt_core::memory::PlayerMemory::load();
+            m.set_channel_subtitle(ch, Some(if now.0 { now.1.as_str() } else { "" }));
+            let _ = m.save();
+            self.subs_seen = now;
+        }
+    }
+
+    /// Leaving the player: the global subtitle state comes back.
+    fn restore_global_subtitles(&mut self) {
+        self.subs_applied_for.clear();
+        if let Some((on, lang)) = self.subs_global.take() {
+            self.store.settings.subtitles = on;
+            self.store.settings.subtitle_language = lang;
+            self.store.settings.save();
+        }
     }
 
     /// A speed chosen by the user: the speed OK toggles to, and remembered per the setting.
@@ -865,6 +929,7 @@ impl Rig<YtHost> for AppRig {
                         .cloned()
                         .collect(),
                     dislikes: s.return_dislikes,
+                    channel_subtitles: s.subtitles_per_channel,
                 };
                 self.sb = yt_core::ext::sponsorblock::SkipTracker::new(!s.sb_skip_once);
                 self.sb_offer = None;
@@ -920,6 +985,7 @@ impl Rig<YtHost> for AppRig {
                     let _ = m.save();
                 }
                 self.player.stop();
+                self.restore_global_subtitles();
             }
             YtFx::TogglePause => self.player.toggle_pause(),
             YtFx::OkInPlayer => {

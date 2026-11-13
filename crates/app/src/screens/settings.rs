@@ -158,6 +158,7 @@ fn items(page: SettingsPage) -> Vec<Item> {
                 |s| language_name(&s.subtitle_language),
                 |s, d| cycle_str(&language_codes(), &mut s.subtitle_language, d),
             ),
+            Opt("Subtitles per channel", |s| on_off(s.subtitles_per_channel), |s, _| s.subtitles_per_channel = !s.subtitles_per_channel),
             Opt("Auto-translate when missing", |s| on_off(s.subtitle_auto_translate), |s, _| s.subtitle_auto_translate = !s.subtitle_auto_translate),
             Opt("Size", |s| s.subtitle_size.to_string(), |s, d| s.subtitle_size = cycle(&[32, 38, 44, 52, 60, 72], s.subtitle_size, d)),
             Opt("Colour", |s| s.subtitle_color.clone(), |s, d| {
