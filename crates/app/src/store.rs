@@ -150,14 +150,24 @@ pub struct Feed {
     pub error: Option<String>,
     /// Bumped whenever cards change, so screens can notice.
     pub gen: u32,
-    /// Titled rows of `cards` (title, index range), in order. One untitled entry = a plain grid.
-    pub shelves: Vec<(String, std::ops::Range<usize>)>,
+    /// Rows of `cards`, in order. One untitled row = a plain grid.
+    pub shelves: Vec<Row>,
+}
+
+/// One row (shelf) of a feed: its title, its cards' range in `Feed::cards`, and the token for
+/// more of THIS row (YouTube's rows continue to the right).
+#[derive(Clone, Debug, Default)]
+pub struct Row {
+    pub title: String,
+    pub range: std::ops::Range<usize>,
+    pub continuation: Option<String>,
+    pub loading: bool,
 }
 
 impl Feed {
     /// Several titled rows: show as shelves (Home, topics) rather than one grid.
     pub fn has_rows(&self) -> bool {
-        self.shelves.len() > 1 && self.shelves.iter().filter(|s| !s.0.is_empty()).count() >= 2
+        self.shelves.len() > 1 && self.shelves.iter().filter(|s| !s.title.is_empty()).count() >= 2
     }
 }
 
@@ -237,7 +247,7 @@ impl Store {
         };
         let mut fresh = Vec::new();
         let channel_items: Vec<Item>;
-        let groups: Vec<(String, Vec<&Item>)> = if *k == FeedKey::Section(Section::Channels) {
+        let groups: Vec<(String, Vec<&Item>, Option<String>)> = if *k == FeedKey::Section(Section::Channels) {
             channel_items = page
                 .tabs
                 .iter()
@@ -251,13 +261,13 @@ impl Store {
                     ..Default::default()
                 })
                 .collect();
-            vec![(String::new(), channel_items.iter().collect())]
+            vec![(String::new(), channel_items.iter().collect(), None)]
         } else {
-            page.shelves.iter().map(|s| (s.title.clone(), s.items.iter().collect())).collect()
+            page.shelves.iter().map(|s| (s.title.clone(), s.items.iter().collect(), s.continuation.clone())).collect()
         };
         let base = if append { self.cards(k).len() } else { 0 };
         let mut rows = Vec::new();
-        for (title, items) in groups {
+        for (title, items, continuation) in groups {
             let start = fresh.len();
             for it in items {
                 if !seen.insert(it.id.clone()) || !filter.keep(it) {
@@ -273,7 +283,7 @@ impl Store {
                 });
             }
             if fresh.len() > start {
-                rows.push((title, base + start..base + fresh.len()));
+                rows.push(Row { title, range: base + start..base + fresh.len(), continuation, loading: false });
             }
         }
         let f = self.feeds.entry(k.clone()).or_default();
@@ -291,6 +301,69 @@ impl Store {
         f.loading = false;
         f.error = None;
         f.gen += 1;
+    }
+
+    /// Marks row `row` of feed `k` as loading more; returns its token when there is one to load.
+    pub fn begin_shelf(&mut self, k: &FeedKey, row: usize) -> Option<String> {
+        let r = self.feeds.get_mut(k)?.shelves.get_mut(row)?;
+        if r.loading {
+            return None;
+        }
+        let t = r.continuation.clone()?;
+        r.loading = true;
+        Some(t)
+    }
+
+    /// The next items of row `row` (asked with `token`): inserted at the row's end, later rows
+    /// shifted. Returns the range of the new cards. A stale answer (the feed reloaded, the row
+    /// moved on) is dropped.
+    pub fn apply_shelf(&mut self, k: &FeedKey, row: usize, token: &str, items: Vec<Item>, next: Option<String>) -> std::ops::Range<usize> {
+        let filter = Filter::from(&self.settings, k);
+        let Some(f) = self.feeds.get(k) else { return 0..0 };
+        let Some(r) = f.shelves.get(row) else { return 0..0 };
+        if r.continuation.as_deref() != Some(token) {
+            return 0..0;
+        }
+        let seen: std::collections::HashSet<String> = f.cards[r.range.clone()].iter().map(|c| c.item.id.clone()).collect();
+        let at = r.range.end;
+        let mut fresh = Vec::new();
+        for it in items {
+            if seen.contains(&it.id) || !filter.keep(&it) || fresh.iter().any(|c: &Card| c.item.id == it.id) {
+                continue;
+            }
+            self.next_elem += 1;
+            fresh.push(Card {
+                elem: self.next_elem,
+                title: it.title.clone(),
+                detail: it.lines.join(" \u{2022} "),
+                thumb: it.thumbnail.clone().unwrap_or_default(),
+                item: it,
+            });
+        }
+        let n = fresh.len();
+        let f = self.feeds.get_mut(k).unwrap();
+        f.cards.splice(at..at, fresh);
+        for (i, s) in f.shelves.iter_mut().enumerate() {
+            if i == row {
+                s.range.end += n;
+                // The same token again with nothing new: the row has ended.
+                s.continuation = if n == 0 && next.as_deref() == Some(token) { None } else { next.clone() };
+                s.loading = false;
+            } else if i > row {
+                s.range.start += n;
+                s.range.end += n;
+            }
+        }
+        f.gen += 1;
+        at..at + n
+    }
+
+    /// Loading more of row `row` failed: it stops asking (until the feed reloads).
+    pub fn fail_shelf(&mut self, k: &FeedKey, row: usize) {
+        if let Some(r) = self.feeds.get_mut(k).and_then(|f| f.shelves.get_mut(row)) {
+            r.loading = false;
+            r.continuation = None;
+        }
     }
 
     pub fn fail(&mut self, k: &FeedKey, e: String) {

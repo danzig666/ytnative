@@ -305,6 +305,32 @@ fn best_thumb(list: &Value) -> Option<String> {
     list.as_array().and_then(|l| pick_largest(l))
 }
 
+/// The next items of ONE shelf (a horizontal continuation answer) and its next token, in
+/// MediaServiceCore's order: horizontalListContinuation, gridContinuation,
+/// playlistVideoListContinuation, tvSurfaceContentContinuation's grid, else every shelf of a
+/// sectionListContinuation flattened (token: the last shelf's).
+pub fn shelf_continuation(resp: &Value) -> (Vec<Item>, Option<String>) {
+    let cc = &resp["continuationContents"];
+    let lists = [
+        (&cc["horizontalListContinuation"]["items"], &cc["horizontalListContinuation"]["continuations"]),
+        (&cc["gridContinuation"]["items"], &cc["gridContinuation"]["continuations"]),
+        (&cc["playlistVideoListContinuation"]["contents"], &cc["playlistVideoListContinuation"]["continuations"]),
+        (
+            &cc["tvSurfaceContentContinuation"]["content"]["gridRenderer"]["items"],
+            &cc["tvSurfaceContentContinuation"]["content"]["gridRenderer"]["continuations"],
+        ),
+    ];
+    for (items, conts) in lists {
+        if let Some(a) = items.as_array() {
+            return (a.iter().filter_map(item).collect(), continuation_token(conts));
+        }
+    }
+    // A section list: all its shelves' items in one row, the last shelf's token (else the list's).
+    let p = page(resp);
+    let token = p.shelves.last().and_then(|s| s.continuation.clone()).or(p.continuation);
+    (p.shelves.into_iter().flat_map(|s| s.items).collect(), token)
+}
+
 /// The vertical continuation of a page: the first `nextContinuationData` / continuation command
 /// that belongs to the section list rather than to a shelf.
 fn page_continuation(resp: &Value) -> Option<String> {

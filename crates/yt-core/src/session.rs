@@ -96,6 +96,12 @@ impl Session {
         Ok(parse::page(&self.raw(endpoint, json!({ "continuation": continuation }))?))
     }
 
+    /// The next items of ONE shelf (horizontal continuation): `endpoint` is "browse" for feeds,
+    /// "next" for the player's suggestions.
+    pub fn shelf_more(&mut self, endpoint: &str, continuation: &str) -> Result<(Vec<crate::model::Item>, Option<String>)> {
+        Ok(parse::shelf_continuation(&self.raw(endpoint, json!({ "continuation": continuation }))?))
+    }
+
     /// Opens whatever a card or link points at, for the browse/search kinds.
     pub fn open(&mut self, ep: &Endpoint) -> Result<Option<Page>> {
         Ok(match ep {

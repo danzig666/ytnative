@@ -69,15 +69,18 @@ impl StackPage<YtHost> for Rows {
     }
     fn cards<'a>(&'a self, cx: &'a Cx<'_, YtHost>, k: usize) -> Option<CardsSrc<'a>> {
         let f = cx.views.store.feed(&self.key)?;
-        let (_, r) = f.shelves.get(k)?;
-        Some(CardsSrc { cards: &f.cards[r.clone()], more: false })
+        let r = f.shelves.get(k)?;
+        // A row with a token asks for more as focus nears its end (plx's look-ahead).
+        Some(CardsSrc { cards: &f.cards[r.range.clone()], more: r.continuation.is_some() })
     }
     /// Room under every shelf for the caption of the shelf below (plx asserts at least this much).
     fn shelf_foot(&self, _cx: &Cx<'_, YtHost>, _k: usize) -> f32 {
         plx_ui::consts::UNDER_LABEL_AIR
     }
     fn draw_heading(&self, k: usize, f: &mut DrawFrame<'_, '_, YtHost>, r: Rect, _lift: f32) {
-        if let Some((title, _)) = f.cx.views.store.feed(&self.key).and_then(|fd| fd.shelves.get(k)) {
+        if let Some(row) = f.cx.views.store.feed(&self.key).and_then(|fd| fd.shelves.get(k)) {
+            // An untitled row in a titled page reads as YouTube's own suggestions (as SmartTube).
+            let title = if row.title.is_empty() { crate::i18n::tr("Suggestions") } else { row.title.as_str() };
             ui::text(f.painter, title, SHELF_STYLE.margin_x, r.y + 8.0, 32, ui::WHITE, ui::ALIGN_LEFT, true);
         }
     }
@@ -360,8 +363,8 @@ impl Machine<YtHost> for BrowseScreen {
             if let ScreenEvent::FocusMoved { to, .. } = ev {
                 if let Some(f) = cx.views.store.feed(&self.key()) {
                     let idx = f.cards.iter().position(|c| c.elem == to.elem);
-                    let row = idx.and_then(|i| f.shelves.iter().position(|(_, r)| r.contains(&i)));
-                    if row.is_some_and(|r| r + 2 >= f.shelves.len()) && f.continuation.is_some() {
+                    let row = idx.and_then(|i| f.shelves.iter().position(|r| r.range.contains(&i)));
+                    if row.is_some_and(|r| r + 3 >= f.shelves.len()) && f.continuation.is_some() {
                         fx.push(Fx::App(YtFx::More(self.key())));
                     }
                 }
@@ -369,14 +372,18 @@ impl Machine<YtHost> for BrowseScreen {
             match self.stack.on(&self.rows, ev, cx, fx) {
                 Some(StackEvent::Card(_, CardEvent::Activate(e))) => {
                     if let (Some(card), Some(f)) = (cx.views.store.card(e), cx.views.store.feed(&self.key())) {
-                        let row = f.shelves.iter().find(|(_, r)| f.cards[r.clone()].iter().any(|c| c.elem == e));
-                        let list = row.map(|(_, r)| &f.cards[r.clone()]).unwrap_or(&f.cards[..]);
+                        let row = f.shelves.iter().find(|r| f.cards[r.range.clone()].iter().any(|c| c.elem == e));
+                        let list = row.map(|r| &f.cards[r.range.clone()]).unwrap_or(&f.cards[..]);
                         common::open_card_in(card, list, fx);
                     }
                     return Handled::Yes;
                 }
                 Some(StackEvent::Card(_, CardEvent::Hold(e))) => {
                     fx.push(Fx::Nav(NavOp::Present(YtArg::Menu(e))));
+                    return Handled::Yes;
+                }
+                Some(StackEvent::Card(k, CardEvent::Want(_))) if k != SPACER => {
+                    fx.push(Fx::App(YtFx::MoreShelf { key: self.key(), row: k }));
                     return Handled::Yes;
                 }
                 _ => {}

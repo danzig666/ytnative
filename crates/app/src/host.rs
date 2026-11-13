@@ -154,6 +154,8 @@ pub enum YtFx {
     LoadComments { key: String, continuation: Option<String>, append: bool },
     Load(FeedKey),
     More(FeedKey),
+    /// More videos of one row of a feed (rows continue to the right).
+    MoreShelf { key: FeedKey, row: usize },
     Play { video_id: String, playlist: Option<String> },
     /// Play `video_id` again from the start (Repeat one).
     Replay { video_id: String, playlist: Option<String> },
@@ -264,6 +266,7 @@ enum Work {
     Branding(Vec<(String, Option<String>, Option<String>)>),
     Comments { video_id: String, page: Option<yt_core::comments::CommentsPage>, append: bool },
     Page { key: FeedKey, page: yt_core::model::Page, append: bool, failed: Option<String> },
+    Shelf { key: FeedKey, row: usize, token: String, result: Result<(Vec<yt_core::model::Item>, Option<String>), String> },
     Suggestions(Vec<String>),
     SignIn(SignIn),
 }
@@ -454,10 +457,23 @@ impl AppRig {
                         let before = if append { self.store.cards(&key).len() } else { 0 };
                         self.store.apply(&key, page, append);
                         crate::log(&format!("feed {key:?}: {} cards", self.store.cards(&key).len()));
-                        self.dearrow(addr, &key, before);
+                        let n = self.store.cards(&key).len();
+                        self.dearrow(addr, &key, before..n);
                         out.push((addr, YtMsg::Loaded(key)));
                     }
                 }
+                Work::Shelf { key, row, token, result } => match result {
+                    Ok((items, next)) => {
+                        let added = self.store.apply_shelf(&key, row, &token, items, next);
+                        crate::log(&format!("feed {key:?} row {row}: +{} cards", added.len()));
+                        self.dearrow(addr, &key, added);
+                        out.push((addr, YtMsg::Loaded(key)));
+                    }
+                    Err(e) => {
+                        crate::log(&format!("feed {key:?} row {row} more failed: {e}"));
+                        self.store.fail_shelf(&key, row);
+                    }
+                },
                 Work::Toast { msg, accounts_changed } => {
                     self.store.toast(msg, now_ms);
                     self.refresh_groups();
@@ -560,13 +576,14 @@ impl AppRig {
     }
 
     /// DeArrow: replace clickbait titles / thumbnails of newly loaded cards (when enabled).
-    fn dearrow(&mut self, addr: Addr, key: &FeedKey, from: usize) {
+    fn dearrow(&mut self, addr: Addr, key: &FeedKey, range: std::ops::Range<usize>) {
         let s = &self.store.settings;
         let (titles, thumbs) = (s.dearrow_titles, s.dearrow_thumbnails);
         if !titles && !thumbs {
             return;
         }
-        let ids: Vec<String> = self.store.cards(key)[from.min(self.store.cards(key).len())..]
+        let cards = self.store.cards(key);
+        let ids: Vec<String> = cards[range.start.min(cards.len())..range.end.min(cards.len())]
             .iter()
             .filter_map(|c| c.video_id().map(str::to_string))
             .collect();
@@ -792,6 +809,14 @@ impl Rig<YtHost> for AppRig {
                 }
                 self.store.mark_loading(&key);
                 self.spawn(from, "feed", move |s| load_page(s, &key, None));
+            }
+            YtFx::MoreShelf { key, row } => {
+                let Some(token) = self.store.begin_shelf(&key, row) else { return };
+                let endpoint = if matches!(key, FeedKey::Related(_)) { "next" } else { "browse" };
+                self.spawn(from, "shelf", move |s| {
+                    let result = crate::host::with_session(s, |se| se.shelf_more(endpoint, &token)).map_err(|e| format!("{e:#}"));
+                    Work::Shelf { key, row, token, result }
+                });
             }
             YtFx::More(key) => {
                 let Some(f) = self.store.feed(&key) else { return };
