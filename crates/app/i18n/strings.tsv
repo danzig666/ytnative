@@ -354,3 +354,12 @@ No watch history for videos started from the phone	Nincs megtekintési előzmén
 {} connected	{} csatlakozott	{} verbunden	{} conectado	{} connecté	{} подключён
 {} disconnected	{} levált	{} getrennt	{} desconectado	{} déconnecté	{} отключён
 A phone	Egy telefon	Ein Handy	Un teléfono	Un téléphone	Телефон
+Play from the start	Lejátszás az elejéről	Von Anfang an abspielen	Reproducir desde el principio	Lire depuis le début	Воспроизвести с начала
+Play without history	Lejátszás előzmények nélkül	Ohne Verlauf abspielen	Reproducir sin historial	Lire sans historique	Воспроизвести без истории
+Subscribe to {}	Feliratkozás: {}	{} abonnieren	Suscribirse a {}	S'abonner à {}	Подписаться на {}
+Unsubscribe from {}	Leiratkozás: {}	{} deabonnieren	Cancelar suscripción a {}	Se désabonner de {}	Отписаться от {}
+Unblock {}	{} letiltásának feloldása	{} freigeben	Desbloquear {}	Débloquer {}	Разблокировать {}
+Card menu: Play from the start	Kártyamenü: Lejátszás az elejéről	Kartenmenü: Von Anfang an abspielen	Menú de tarjeta: Reproducir desde el principio	Menu de la carte : Lire depuis le début	Меню карточки: Воспроизвести с начала
+Card menu: Play without history	Kártyamenü: Lejátszás előzmények nélkül	Kartenmenü: Ohne Verlauf abspielen	Menú de tarjeta: Reproducir sin historial	Menu de la carte : Lire sans historique	Меню карточки: Воспроизвести без истории
+Card menu: Subscribe / unsubscribe	Kártyamenü: Feliratkozás / leiratkozás	Kartenmenü: Abonnieren / deabonnieren	Menú de tarjeta: Suscribirse / cancelar suscripción	Menu de la carte : S'abonner / se désabonner	Меню карточки: Подписаться / отписаться
+Card menu: Comments	Kártyamenü: Hozzászólások	Kartenmenü: Kommentare	Menú de tarjeta: Comentarios	Menu de la carte : Commentaires	Меню карточки: Комментарии

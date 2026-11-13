@@ -161,6 +161,8 @@ pub enum YtFx {
     /// More videos of one row of a feed (rows continue to the right).
     MoreShelf { key: FeedKey, row: usize },
     Play { video_id: String, playlist: Option<String> },
+    /// The next Play of `video_id` from the start and / or without watch history (card menu).
+    PlayOptions { video_id: String, from_start: bool, no_history: bool },
     /// Play `video_id` again from the start (Repeat one).
     Replay { video_id: String, playlist: Option<String> },
     Stop,
@@ -327,6 +329,9 @@ pub struct AppRig {
     pub last_key_ms: u32,
     /// The last video a phone started ("no watch history for videos started from the phone").
     pub phone_video: Option<String>,
+    /// "Play without history": asked for the next Play of this video / the one playing so.
+    pending_private: Option<String>,
+    private_video: Option<String>,
 }
 
 impl AppRig {
@@ -366,6 +371,8 @@ impl AppRig {
             audio_choice: None,
             last_key_ms: 0,
             phone_video: None,
+            pending_private: None,
+            private_video: None,
         };
         rig.refresh_accounts();
         rig.refresh_groups();
@@ -726,7 +733,8 @@ impl AppRig {
     fn history_for(&self, video_id: &str) -> bool {
         let s = &self.store.settings;
         let from_phone = self.phone_video.as_deref() == Some(video_id);
-        s.watch_history != "off" && !(s.lounge_no_history && from_phone)
+        let private = self.private_video.as_deref() == Some(video_id);
+        s.watch_history != "off" && !(s.lounge_no_history && from_phone) && !private
     }
 
     /// "Subtitles per channel": applies the channel's remembered subtitles when its video starts,
@@ -1020,8 +1028,24 @@ impl Rig<YtHost> for AppRig {
                 self.store.mark_loading(&key);
                 self.spawn(from, "more", move |s| load_page(s, &key, Some(c)));
             }
+            YtFx::PlayOptions { video_id, from_start, no_history } => {
+                if from_start {
+                    self.pending_start = Some((video_id.clone(), 0));
+                }
+                if no_history {
+                    self.pending_private = Some(video_id);
+                }
+            }
             YtFx::Play { video_id, playlist } => {
                 crate::log(&format!("play {video_id} (playlist {playlist:?})"));
+                // Without history: asked for this video, or the same playback starting again
+                // (repeat, another audio track).
+                let again = self.player_view.video_id == video_id && self.player_view.phase != Phase::Idle;
+                if self.pending_private.take().as_deref() == Some(video_id.as_str()) {
+                    self.private_video = Some(video_id.clone());
+                } else if !again {
+                    self.private_video = None;
+                }
                 let s = &self.store.settings;
                 let audio_track = self.audio_choice.as_ref().filter(|(v, _)| *v == video_id).map(|(_, t)| t.clone());
                 let audio_language = (!s.audio_language.is_empty()).then(|| s.audio_language.clone());

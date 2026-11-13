@@ -24,6 +24,9 @@ enum Act {
     OpenChannel(String),
     OpenPlaylist(String),
     BlockChannel(String),
+    UnblockChannel(String),
+    /// Play (video id) from the start and / or without watch history.
+    PlayWith(String, bool, bool),
     Pin(String, String, Option<String>),
     AddToGroup(Option<String>, String, String, Option<String>),
     Unpin(String),
@@ -83,8 +86,10 @@ const SUB_STYLES: &[&str] = &["outline", "shadow", "box"];
 const SUB_FONTS: &[&str] = &["default", "sans", "serif", "mono", "roboto"];
 
 /// Card-menu item kinds, in the default order, with their settings labels.
-pub const CARD_ITEMS: [(&str, &str); 10] = [
+pub const CARD_ITEMS: [(&str, &str); 14] = [
     ("play", "Card menu: Play"),
+    ("play_start", "Card menu: Play from the start"),
+    ("play_private", "Card menu: Play without history"),
     ("open", "Card menu: Open channel / playlist"),
     ("groups", "Card menu: Channel groups"),
     ("pin", "Card menu: Pin to sidebar"),
@@ -94,6 +99,8 @@ pub const CARD_ITEMS: [(&str, &str); 10] = [
     ("more_from", "Card menu: More from channel"),
     ("block", "Card menu: Block channel"),
     ("sponsorblock", "Card menu: SponsorBlock on this channel"),
+    ("subscribe", "Card menu: Subscribe / unsubscribe"),
+    ("comments", "Card menu: Comments"),
 ];
 
 impl MenuScreen {
@@ -121,12 +128,26 @@ impl MenuScreen {
             if let Some(v) = card.video_id() {
                 kind = "play";
                 tagged.push((kind, "Play".to_string(), Act::Play(v.to_string())));
+                tagged.push(("play_start", "Play from the start".to_string(), Act::PlayWith(v.to_string(), true, false)));
+                tagged.push(("play_private", "Play without history".to_string(), Act::PlayWith(v.to_string(), false, true)));
+                if !cx.views.store.settings.child_mode {
+                    tagged.push(("comments", "Comments".to_string(), Act::Comments(v.to_string())));
+                }
             }
             if let Some(Endpoint::Browse { browse_id, params }) = &card.item.endpoint {
                 if browse_id.starts_with("UC") {
                     tagged.push(("open", "Open channel".into(), Act::OpenChannel(browse_id.clone())));
                 } else {
                     tagged.push(("open", "Open".into(), Act::OpenPlaylist(browse_id.clone())));
+                }
+                if browse_id.starts_with("UC") && cx.views.store.signed_in {
+                    // Subscribed: as YouTube said, or it is on the subscribed channels' pages.
+                    let in_subs = [FeedKey::Section(crate::store::Section::Channels), FeedKey::Section(crate::store::Section::Subscriptions)]
+                        .iter()
+                        .any(|k| cx.views.store.cards(k).iter().any(|c| c.elem == card.elem));
+                    let subscribed = cx.views.store.subscribed.get(browse_id).copied().unwrap_or(in_subs);
+                    let label = crate::i18n::tr(if subscribed { "Unsubscribe from {}" } else { "Subscribe to {}" }).replace("{}", &card.title);
+                    tagged.push(("subscribe", label, Act::User(UserAction::Subscribe { channel_id: browse_id.clone(), subscribe: !subscribed })));
                 }
                 if browse_id.starts_with("UC") {
                     for (gid, gt) in &cx.views.store.groups {
@@ -158,7 +179,11 @@ impl MenuScreen {
             }
             if let Some(ch) = card.item.channel.as_ref().filter(|_| !cx.views.store.settings.child_mode) {
                 tagged.push(("more_from", format!("More from {ch}"), Act::SearchFor(ch.clone())));
-                tagged.push(("block", format!("Block {ch}"), Act::BlockChannel(ch.clone())));
+                if cx.views.store.settings.blocked_channels.contains(ch) {
+                    tagged.push(("block", crate::i18n::tr("Unblock {}").replace("{}", ch), Act::UnblockChannel(ch.clone())));
+                } else {
+                    tagged.push(("block", format!("Block {ch}"), Act::BlockChannel(ch.clone())));
+                }
                 if cx.views.store.settings.sponsorblock && card.video_id().is_some() {
                     tagged.push(("sponsorblock", "SponsorBlock on this channel".into(), Act::SbChannel(ch.clone())));
                 }
@@ -381,6 +406,17 @@ impl MenuScreen {
             Act::Play(v) => {
                 fx.push(Fx::Nav(NavOp::Pop));
                 fx.push(Fx::Nav(NavOp::Push(YtArg::Player { video_id: v.clone(), playlist: None })));
+            }
+            Act::PlayWith(v, from_start, no_history) => {
+                fx.push(Fx::App(YtFx::PlayOptions { video_id: v.clone(), from_start: *from_start, no_history: *no_history }));
+                fx.push(Fx::Nav(NavOp::Pop));
+                fx.push(Fx::Nav(NavOp::Push(YtArg::Player { video_id: v.clone(), playlist: None })));
+            }
+            Act::UnblockChannel(ch) => {
+                let ch = ch.clone();
+                fx.push(Fx::App(YtFx::Toast(crate::i18n::tr("{} unblocked").replace("{}", &ch))));
+                fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| s.blocked_channels.retain(|c| *c != ch)))));
+                fx.push(Fx::Nav(NavOp::Pop));
             }
             Act::OpenChannel(id) | Act::OpenPlaylist(id) => {
                 fx.push(Fx::Nav(NavOp::Pop));
