@@ -2,7 +2,7 @@
 //! value; OK or Right steps forward, Left steps back. Changes are saved immediately.
 
 use crate::host::{SettingsPage, YtArg, YtFx, YtHost};
-use crate::settings::{Codec, Repeat, SbAction, Settings};
+use crate::settings::{secs_label, Codec, ControlsTime, OkAction, PlaybackMode, RememberSpeed, SbAction, Settings, SLEEP_MINS, SPEEDS};
 use crate::store::Section;
 use crate::ui::{self, Row, VList};
 use plx_machine::machine::{
@@ -63,6 +63,18 @@ fn language_name(code: &str) -> String {
     crate::i18n::language_name(code)
 }
 
+/// Language codes offered in language lists (each language once: aliases such as iw / zh-CN are
+/// not offered).
+fn language_codes() -> Vec<&'static str> {
+    crate::i18n::LANGUAGES.iter().map(|(c, _)| *c).filter(|c| !matches!(*c, "iw" | "tl" | "nb" | "zh-CN" | "zh-TW" | "zh")).collect()
+}
+
+/// Steps through `list` (strings) from `cur` by `d`, wrapping.
+fn cycle_str(list: &[&str], cur: &mut String, d: i32) {
+    let i = list.iter().position(|x| *x == cur.as_str()).unwrap_or(0) as i32;
+    *cur = list[((i + d).rem_euclid(list.len() as i32)) as usize].to_string();
+}
+
 fn on_off(b: bool) -> String {
     if b { "On".into() } else { "Off".into() }
 }
@@ -109,42 +121,42 @@ fn items(page: SettingsPage) -> Vec<Item> {
                 |s, d| s.codec = cycle(&[Codec::Avc, Codec::Vp9, Codec::Av1], s.codec, d),
             ),
             Opt("HDR", |s| on_off(s.hdr), |s, _| s.hdr = !s.hdr),
-            Opt("Default speed", |s| format!("{}x", s.speed), |s, d| s.speed = cycle(&[0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0], s.speed, d)),
-            Opt("Remember speed per channel", |s| on_off(s.remember_speed_per_channel), |s, _| s.remember_speed_per_channel = !s.remember_speed_per_channel),
-            Opt("Seek step", |s| format!("{} s", s.seek_step_secs), |s, d| s.seek_step_secs = cycle(&[5, 10, 15, 30, 60], s.seek_step_secs, d)),
-            Opt(
-                "When a video ends",
-                |s| match s.repeat {
-                    Repeat::Autoplay => "Play next".into(),
-                    Repeat::Off => "Stop".into(),
-                    Repeat::One => "Repeat video".into(),
-                    Repeat::List => "Repeat list".into(),
-                },
-                |s, d| s.repeat = cycle(&[Repeat::Autoplay, Repeat::Off, Repeat::One, Repeat::List], s.repeat, d),
-            ),
             Opt("Playback engine", |s| if s.engine == "auto" { "4K / VP9 / AV1 (engine B)".into() } else { "System player".into() }, |s, _| {
                 s.engine = if s.engine == "auto" { "system".into() } else { "auto".into() }
             }),
-            Opt("Resume where you left off", |s| on_off(s.resume_playback), |s, _| s.resume_playback = !s.resume_playback),
-            Opt("Hide controls after", |s| format!("{} s", s.hud_timeout_secs), |s, d| s.hud_timeout_secs = cycle(&[2, 3, 4, 6, 8, 12], s.hud_timeout_secs, d)),
+            Opt("When a video ends", |s| s.playback_mode.label().into(), |s, d| s.playback_mode = cycle(PlaybackMode::ALL, s.playback_mode, d)),
+            Opt("Default speed", |s| format!("{}x", s.speed), |s, d| {
+                let i = crate::settings::speed_index(s.speed) as i32;
+                s.speed = SPEEDS[((i + d).rem_euclid(SPEEDS.len() as i32)) as usize];
+            }),
+            Opt("Remember speed", |s| s.remember_speed.label().into(), |s, d| s.remember_speed = cycle(RememberSpeed::ALL, s.remember_speed, d)),
+            Opt("OK button during playback", |s| s.ok_action.label().into(), |s, d| s.ok_action = cycle(OkAction::ALL, s.ok_action, d)),
+            Opt("Hide controls after", |s| if s.hud_timeout_secs == 0 { "Never".into() } else { secs_label(s.hud_timeout_secs) }, |s, d| {
+                s.hud_timeout_secs = cycle(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], s.hud_timeout_secs, d)
+            }),
+            Opt("Seek step", |s| secs_label(s.seek_step_secs), |s, d| s.seek_step_secs = cycle(&[1, 2, 3, 5, 7, 10, 15, 20, 30, 60], s.seek_step_secs, d)),
+            Opt("Seek with number keys", |s| on_off(s.seek_number_keys), |s, _| s.seek_number_keys = !s.seek_number_keys),
+            Opt("Time in the controls", |s| s.controls_time.label().into(), |s, d| s.controls_time = cycle(ControlsTime::ALL, s.controls_time, d)),
             Opt("Clock in player", |s| on_off(s.show_clock), |s, _| s.show_clock = !s.show_clock),
-            Opt("Show remaining time", |s| on_off(s.show_ending_time), |s, _| s.show_ending_time = !s.show_ending_time),
+            Opt("Sleep timer", |s| crate::settings::sleep_label(s.sleep_timer_mins), |s, d| s.sleep_timer_mins = cycle(SLEEP_MINS, s.sleep_timer_mins, d)),
+            Opt("Resume where you left off", |s| on_off(s.resume_playback), |s, _| s.resume_playback = !s.resume_playback),
+            Opt("Resume short videos (under 5 minutes)", |s| on_off(s.resume_short_videos), |s, _| s.resume_short_videos = !s.resume_short_videos),
+            Opt("Remember live stream position", |s| on_off(s.resume_live), |s, _| s.resume_live = !s.resume_live),
+            Opt("Loop Shorts", |s| on_off(s.loop_shorts), |s, _| s.loop_shorts = !s.loop_shorts),
+            Opt("Leave the player with a double BACK", |s| on_off(s.double_back_exit), |s, _| s.double_back_exit = !s.double_back_exit),
+            Opt("Show the controls when the next video starts", |s| on_off(s.hud_on_next_video), |s, _| s.hud_on_next_video = !s.hud_on_next_video),
+            Opt("Preferred audio language", |s| if s.audio_language.is_empty() { "Original".into() } else { language_name(&s.audio_language) }, |s, d| {
+                let mut l = vec![""];
+                l.extend(language_codes());
+                cycle_str(&l, &mut s.audio_language, d);
+            }),
         ],
         SettingsPage::Subtitles => vec![
             Opt("Subtitles", |s| on_off(s.subtitles), |s, _| s.subtitles = !s.subtitles),
             Opt(
                 "Language",
                 |s| language_name(&s.subtitle_language),
-                |s, d| {
-                    // Every listed language once (aliases such as iw / zh-CN are not offered).
-                    let l: Vec<&str> = crate::i18n::LANGUAGES
-                        .iter()
-                        .map(|(c, _)| *c)
-                        .filter(|c| !matches!(*c, "iw" | "tl" | "nb" | "zh-CN" | "zh-TW" | "zh"))
-                        .collect();
-                    let i = l.iter().position(|x| *x == s.subtitle_language).unwrap_or(0) as i32;
-                    s.subtitle_language = l[((i + d).rem_euclid(l.len() as i32)) as usize].into();
-                },
+                |s, d| cycle_str(&language_codes(), &mut s.subtitle_language, d),
             ),
             Opt("Auto-translate when missing", |s| on_off(s.subtitle_auto_translate), |s, _| s.subtitle_auto_translate = !s.subtitle_auto_translate),
             Opt("Size", |s| s.subtitle_size.to_string(), |s, d| s.subtitle_size = cycle(&[32, 38, 44, 52, 60, 72], s.subtitle_size, d)),
@@ -351,7 +363,7 @@ impl SettingsScreen {
         let mut s = cx.views.store.settings.clone();
         let first = get(&s);
         let mut v = vec![first.clone()];
-        for _ in 0..40 {
+        for _ in 0..300 {
             change(&mut s, 1);
             let x = get(&s);
             if x == first || v.contains(&x) {
@@ -398,7 +410,7 @@ impl Machine<YtHost> for SettingsScreen {
                 if let Some(Item::Opt(_, get, change)) = items(self.page).into_iter().nth(c.row) {
                     let target = c.options[k].clone();
                     fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| {
-                        for _ in 0..40 {
+                        for _ in 0..300 {
                             if get(s) == target {
                                 break;
                             }

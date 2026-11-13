@@ -166,12 +166,12 @@ pub enum YtFx {
     SeekBy(i64),
     SeekTo(u64),
     SetSpeed(f32),
+    /// OK's "Toggle speed": 1.0 <-> the last other speed chosen.
+    ToggleSpeed,
     SetAudioTrack(String),
     SetZoom(crate::player::Zoom),
     /// Shrink the video into `[x, y, w, h]` (comments beside it), or `None` for full screen.
     VideoRect(Option<[i32; 4]>),
-    /// Minutes until playback pauses (0 = off).
-    SleepTimer(u32),
     Suggest(String),
     EditSettings(Box<dyn FnOnce(&mut Settings) + Send>),
     SignInStart,
@@ -301,8 +301,8 @@ pub struct AppRig {
     pending_rate: Option<f32>,
     /// Chosen audio track for the current video: (video id, track id).
     audio_choice: Option<(String, String)>,
-    /// Sleep timer deadline (ms, frame clock).
-    pub sleep_at: Option<u32>,
+    /// Last key press (ms, frame clock): the sleep timer pauses after a while without one.
+    pub last_key_ms: u32,
 }
 
 impl AppRig {
@@ -331,7 +331,7 @@ impl AppRig {
             pending_start: None,
             pending_rate: None,
             audio_choice: None,
-            sleep_at: None,
+            last_key_ms: 0,
         };
         rig.refresh_accounts();
         rig.refresh_groups();
@@ -428,15 +428,12 @@ impl AppRig {
                 self.store.toast = None;
             }
         }
-        if let Some(at) = self.sleep_at {
-            if now_ms >= at {
-                self.sleep_at = None;
-                self.store.sleep_minutes = 0;
-                if self.player_view.phase == Phase::Playing {
-                    self.player.toggle_pause();
-                }
-                self.store.toast("Sleep timer: playback paused", now_ms);
-            }
+        // Sleep timer: pause after the chosen time without a key press (any key starts it over).
+        let sleep_ms = self.store.settings.sleep_timer_mins.saturating_mul(60_000);
+        if sleep_ms > 0 && self.player_view.phase == Phase::Playing && now_ms.wrapping_sub(self.last_key_ms) >= sleep_ms {
+            self.last_key_ms = now_ms;
+            self.player.toggle_pause();
+            self.store.toast("Sleep timer: playback paused", now_ms);
         }
         if self.player_view.phase == Phase::Playing {
             if let Some(r) = self.pending_rate.take() {
@@ -444,6 +441,7 @@ impl AppRig {
             }
         }
         self.sponsorblock(now_ms);
+        self.store.sb_offered = self.sb_offer.is_some();
         let done = std::mem::take(&mut *self.done.lock().unwrap());
         let mut out = Vec::new();
         for (addr, work) in done {
@@ -606,6 +604,29 @@ impl AppRig {
                 plx_machine::present::wake_from_worker();
             }
         });
+    }
+
+    /// A speed chosen by the user: the speed OK toggles to, and remembered per the setting.
+    fn remember_speed(&mut self, r: f32) {
+        use crate::settings::RememberSpeed;
+        let s = &mut self.store.settings;
+        if (r - 1.0).abs() > 0.01 {
+            s.toggle_speed = r;
+        }
+        match s.remember_speed {
+            RememberSpeed::Off => {}
+            RememberSpeed::All => s.speed = r,
+            RememberSpeed::PerVideo if !self.player_view.video_id.is_empty() => {
+                let mut m = yt_core::memory::PlayerMemory::load();
+                m.set_video_speed(&self.player_view.video_id, Some(r));
+                let _ = m.save();
+            }
+            RememberSpeed::PerChannel if !self.player_view.author.is_empty() => {
+                s.speed_by_channel.insert(self.player_view.author.clone(), r);
+            }
+            _ => {}
+        }
+        s.save();
     }
 
     /// OK during an "Ask" segment skips it. Returns true when it did.
@@ -831,7 +852,8 @@ impl Rig<YtHost> for AppRig {
                 crate::log(&format!("play {video_id} (playlist {playlist:?})"));
                 let s = &self.store.settings;
                 let audio_track = self.audio_choice.as_ref().filter(|(v, _)| *v == video_id).map(|(_, t)| t.clone());
-                let prefs = yt_core::streams::Prefs { min_height: s.min_height as u64, max_height: s.max_height as u64, codec: "avc1", audio_track };
+                let audio_language = (!s.audio_language.is_empty()).then(|| s.audio_language.clone());
+                let prefs = yt_core::streams::Prefs { min_height: s.min_height as u64, max_height: s.max_height as u64, codec: "avc1", audio_track, audio_language };
                 let extras = crate::player::ExtrasPrefs {
                     subtitles: s.subtitles,
                     language: s.subtitle_language.clone(),
@@ -846,11 +868,19 @@ impl Rig<YtHost> for AppRig {
                 };
                 self.sb = yt_core::ext::sponsorblock::SkipTracker::new(!s.sb_skip_once);
                 self.sb_offer = None;
-                let speed = (s.remember_speed_per_channel)
-                    .then(|| self.store.card_channel(&video_id).and_then(|ch| s.speed_by_channel.get(&ch).copied()))
-                    .flatten()
-                    .unwrap_or(s.speed);
+                let memory = yt_core::memory::PlayerMemory::load();
+                let speed = match s.remember_speed {
+                    crate::settings::RememberSpeed::PerChannel => self.store.card_channel(&video_id).and_then(|ch| s.speed_by_channel.get(&ch).copied()),
+                    crate::settings::RememberSpeed::PerVideo => memory.video_speed.peek(&video_id).copied(),
+                    _ => None,
+                }
+                .unwrap_or(s.speed);
                 self.pending_rate = ((speed - 1.0).abs() > 0.01).then_some(speed);
+                // Resume: not for short videos (under 5 minutes) or live streams unless allowed.
+                let stored = memory.positions.peek(&video_id).copied();
+                let duration_secs = stored.map(|p| p.duration).filter(|d| *d > 0).or_else(|| self.store.card_duration_ms(&video_id).map(|ms| ms / 1000));
+                let short = duration_secs.is_some_and(|d| d < 300);
+                let resume = s.resume_playback && (s.resume_short_videos || !short) && (s.resume_live || !self.store.card_is_live(&video_id));
                 let start = self
                     .pending_start
                     .take()
@@ -858,14 +888,8 @@ impl Rig<YtHost> for AppRig {
                     .map(|(_, ms)| ms)
                     // This app's own exact record first (0 = start over); YouTube's watched
                     // percentage on the card only for videos never played here.
-                    .or_else(|| {
-                        if s.resume_playback {
-                            yt_core::memory::PlayerMemory::load().position(&video_id).map(|secs| secs * 1000)
-                        } else {
-                            None
-                        }
-                    })
-                    .or_else(|| if s.resume_playback { self.store.resume_point(&video_id) } else { None });
+                    .or_else(|| if resume { stored.map(|p| p.secs * 1000) } else { None })
+                    .or_else(|| if resume { self.store.resume_point(&video_id) } else { None });
                 #[cfg(not(windows))]
                 {
                     let codec = match s.codec {
@@ -889,7 +913,8 @@ impl Rig<YtHost> for AppRig {
                 // Only a video that really played reports where it is (a BACK while resolving would
                 // otherwise store 0 over the resume point).
                 let played = matches!(v.phase, crate::player::Phase::Playing | crate::player::Phase::Paused | crate::player::Phase::Ended);
-                if !v.video_id.is_empty() && v.duration_ms > 0 && played {
+                let keep = !v.live || self.store.settings.resume_live;
+                if !v.video_id.is_empty() && v.duration_ms > 0 && played && keep {
                     let mut m = yt_core::memory::PlayerMemory::load();
                     m.set_position(&v.video_id, v.position_ms / 1000, v.duration_ms / 1000);
                     let _ = m.save();
@@ -906,13 +931,21 @@ impl Rig<YtHost> for AppRig {
             YtFx::SeekTo(ms) => self.player.seek_to(ms),
             YtFx::SetSpeed(r) => {
                 self.player.set_rate(r);
-                if self.store.settings.remember_speed_per_channel && !self.player_view.author.is_empty() {
-                    self.store.settings.speed_by_channel.insert(self.player_view.author.clone(), r);
-                    self.store.settings.save();
-                }
+                self.remember_speed(r);
+            }
+            YtFx::ToggleSpeed => {
+                let cur = if self.player_view.rate > 0.0 { self.player_view.rate } else { 1.0 };
+                let other = self.store.settings.toggle_speed;
+                let r = if (cur - 1.0).abs() > 0.01 || (other - 1.0).abs() < 0.01 { 1.0 } else { other };
+                self.player.set_rate(r);
+                self.store.toast(format!("{}: {r}x", crate::i18n::tr("Playback speed")), self.now_ms);
             }
             YtFx::SetAudioTrack(t) => {
                 let v = self.player_view.video_id.clone();
+                // The chosen language becomes the preferred one (the original track: no preference).
+                let original = self.player_view.audio_tracks.iter().any(|x| x.0 == t && x.2);
+                self.store.settings.audio_language = if original { String::new() } else { t.split('.').next().unwrap_or("").to_string() };
+                self.store.settings.save();
                 if !v.is_empty() {
                     self.audio_choice = Some((v.clone(), t));
                     self.pending_start = Some((v.clone(), self.player_view.position_ms));
@@ -922,11 +955,6 @@ impl Rig<YtHost> for AppRig {
             }
             YtFx::SetZoom(z) => self.player.set_zoom(z),
             YtFx::VideoRect(r) => self.video_target = r.map_or([0.0, 0.0, 1920.0, 1080.0], |r| r.map(|v| v as f32)),
-            YtFx::SleepTimer(min) => {
-                self.sleep_at = (min > 0).then(|| self.now_ms + min * 60_000);
-                self.store.sleep_minutes = min;
-                self.store.toast(if min > 0 { format!("Sleep timer: {min} min") } else { "Sleep timer off".into() }, self.now_ms);
-            }
             YtFx::Suggest(prefix) => {
                 self.spawn(from, "suggest", move |s| Work::Suggestions(with_session(s, |s| s.suggestions(&prefix)).unwrap_or_default()));
             }

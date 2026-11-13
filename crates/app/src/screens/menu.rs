@@ -2,7 +2,7 @@
 //! A panel on the right; OK runs an action, Left/Right change a player option in place.
 
 use crate::host::{UserAction, YtArg, YtFx, YtHost};
-use crate::settings::Repeat;
+use crate::settings::{PlaybackMode, SLEEP_MINS, SPEEDS};
 use crate::store::FeedKey;
 use crate::ui::{self, Row, VList};
 use plx_machine::machine::{
@@ -79,7 +79,6 @@ const SUB_SIZES: &[u32] = &[32, 38, 44, 52, 60, 72];
 const SUB_COLORS: &[&str] = &["white", "light gray", "gray", "dark gray", "yellow", "light yellow", "cyan", "green", "orange", "pink"];
 const SUB_STYLES: &[&str] = &["outline", "shadow", "box"];
 const SUB_FONTS: &[&str] = &["default", "sans", "serif", "mono", "roboto"];
-const SPEEDS: &[f32] = &[0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
 
 /// Card-menu item kinds, in the default order, with their settings labels.
 pub const CARD_ITEMS: [(&str, &str); 9] = [
@@ -233,6 +232,7 @@ impl MenuScreen {
         acts.extend(vec![
             ("Playback speed".to_string(), Act::Speed),
             ("Audio language".to_string(), Act::AudioTrack),
+            ("Video zoom".to_string(), Act::ZoomMode),
             ("Sleep timer".to_string(), Act::Sleep),
             ("Maximum quality".to_string(), Act::MaxQuality),
             ("Subtitles".to_string(), Act::Subtitles),
@@ -315,25 +315,14 @@ impl MenuScreen {
                     crate::player::Zoom::Zoom => "Zoom in",
                 })
             ),
-            Act::Sleep => match cx.views.store.sleep_minutes {
-                0 => format!("{}  \u{203A}", crate::i18n::tr("Off")),
-                m => format!("{m} min  \u{203A}"),
-            },
+            Act::Sleep => format!("{}  \u{203A}", crate::settings::sleep_label(s.sleep_timer_mins)),
             Act::Subtitles => format!("{}  \u{203A}", crate::i18n::tr(if s.subtitles { "On" } else { "Off" })),
             Act::SubSize => format!("{}  \u{203A}", s.subtitle_size),
             Act::SubColor => format!("{}  \u{203A}", crate::i18n::tr(&s.subtitle_color)),
             Act::SubBold => format!("{}  \u{203A}", crate::i18n::tr(if s.subtitle_bold { "On" } else { "Off" })),
             Act::SubFont => format!("{}  \u{203A}", crate::i18n::tr(&s.subtitle_font)),
             Act::SubStyle => format!("{}  \u{203A}", crate::i18n::tr(&s.subtitle_style)),
-            Act::RepeatMode => format!(
-                "{}  \u{203A}",
-                crate::i18n::tr(match s.repeat {
-                    Repeat::Autoplay => "Play next",
-                    Repeat::Off => "Stop",
-                    Repeat::One => "Repeat",
-                    Repeat::List => "Repeat list",
-                })
-            ),
+            Act::RepeatMode => format!("{}  \u{203A}", crate::i18n::tr(s.playback_mode.label())),
             _ => return None,
         })
     }
@@ -345,7 +334,7 @@ impl MenuScreen {
         Some(match act {
             Act::Speed => {
                 let r = if cx.views.player.rate > 0.0 { cx.views.player.rate } else { 1.0 };
-                (SPEEDS.iter().map(|v| format!("{v}x")).collect(), SPEEDS.iter().position(|v| (v - r).abs() < 0.01).unwrap_or(3))
+                (SPEEDS.iter().map(|v| format!("{v}x")).collect(), crate::settings::speed_index(r))
             }
             Act::MaxQuality => {
                 const Q: &[u32] = &[480, 720, 1080, 1440, 2160];
@@ -359,24 +348,18 @@ impl MenuScreen {
                 let cur = st.audio_track.clone().or_else(|| st.audio_tracks.iter().find(|t| t.2).map(|t| t.0.clone()));
                 (st.audio_tracks.iter().map(|t| t.1.clone()).collect(), st.audio_tracks.iter().position(|t| Some(&t.0) == cur.as_ref()).unwrap_or(0))
             }
-            Act::Sleep => {
-                const T: &[u32] = &[0, 15, 30, 60, 90];
-                (
-                    T.iter().map(|m| if *m == 0 { "Off".to_string() } else { format!("{m} min") }).collect(),
-                    T.iter().position(|m| *m == cx.views.store.sleep_minutes).unwrap_or(0),
-                )
-            }
+            Act::Sleep => (
+                SLEEP_MINS.iter().map(|m| crate::settings::sleep_label(*m)).collect(),
+                SLEEP_MINS.iter().position(|m| *m == s.sleep_timer_mins).unwrap_or(0),
+            ),
             Act::SubSize => (SUB_SIZES.iter().map(|v| v.to_string()).collect(), SUB_SIZES.iter().position(|v| *v == s.subtitle_size).unwrap_or(2)),
             Act::SubColor => (SUB_COLORS.iter().map(|v| v.to_string()).collect(), SUB_COLORS.iter().position(|v| *v == s.subtitle_color).unwrap_or(0)),
             Act::SubFont => (SUB_FONTS.iter().map(|v| v.to_string()).collect(), SUB_FONTS.iter().position(|v| *v == s.subtitle_font).unwrap_or(0)),
             Act::SubStyle => (SUB_STYLES.iter().map(|v| v.to_string()).collect(), SUB_STYLES.iter().position(|v| *v == s.subtitle_style).unwrap_or(0)),
-            Act::RepeatMode => {
-                const R: &[Repeat] = &[Repeat::Autoplay, Repeat::Off, Repeat::One, Repeat::List];
-                (
-                    vec!["Play next".into(), "Stop".into(), "Repeat".into(), "Repeat list".into()],
-                    R.iter().position(|x| *x == s.repeat).unwrap_or(0),
-                )
-            }
+            Act::RepeatMode => (
+                PlaybackMode::ALL.iter().map(|m| m.label().to_string()).collect(),
+                PlaybackMode::ALL.iter().position(|x| *x == s.playback_mode).unwrap_or(0),
+            ),
             _ => return None,
         })
     }
@@ -423,7 +406,7 @@ impl MenuScreen {
             }
             Act::Speed => {
                 let cur = if cx.views.player.rate > 0.0 { cx.views.player.rate } else { 1.0 };
-                let i = SPEEDS.iter().position(|s| (*s - cur).abs() < 0.01).unwrap_or(3) as i32;
+                let i = crate::settings::speed_index(cur) as i32;
                 let r = SPEEDS[((i + dir).clamp(0, SPEEDS.len() as i32 - 1)) as usize];
                 fx.push(Fx::App(YtFx::SetSpeed(r)));
             }
@@ -443,11 +426,10 @@ impl MenuScreen {
                 let i = Z.iter().position(|z| *z == cx.views.player.zoom).unwrap_or(0) as i32;
                 fx.push(Fx::App(YtFx::SetZoom(Z[((i + dir).rem_euclid(3)) as usize])));
             }
-            Act::Sleep => {
-                const M: &[u32] = &[0, 15, 30, 60, 90];
-                let i = M.iter().position(|m| *m == cx.views.store.sleep_minutes).unwrap_or(0) as i32;
-                fx.push(Fx::App(YtFx::SleepTimer(M[((i + dir).rem_euclid(M.len() as i32)) as usize])));
-            }
+            Act::Sleep => fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| {
+                let i = SLEEP_MINS.iter().position(|m| *m == s.sleep_timer_mins).unwrap_or(0) as i32;
+                s.sleep_timer_mins = SLEEP_MINS[((i + dir).rem_euclid(SLEEP_MINS.len() as i32)) as usize];
+            })))),
             Act::MaxQuality => {
                 fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| {
                     const Q: &[u32] = &[480, 720, 1080, 1440, 2160];
@@ -476,9 +458,9 @@ impl MenuScreen {
                 s.subtitle_style = SUB_STYLES[(i + dir).rem_euclid(SUB_STYLES.len() as i32) as usize].into();
             })))),
             Act::RepeatMode => fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| {
-                const R: &[Repeat] = &[Repeat::Autoplay, Repeat::Off, Repeat::One, Repeat::List];
-                let i = R.iter().position(|r| *r == s.repeat).unwrap_or(0) as i32;
-                s.repeat = R[((i + dir).rem_euclid(R.len() as i32)) as usize];
+                let all = PlaybackMode::ALL;
+                let i = all.iter().position(|r| *r == s.playback_mode).unwrap_or(0) as i32;
+                s.playback_mode = all[((i + dir).rem_euclid(all.len() as i32)) as usize];
             })))),
             Act::User(a) => {
                 fx.push(Fx::App(YtFx::Act(a.clone())));

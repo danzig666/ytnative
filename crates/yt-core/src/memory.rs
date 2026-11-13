@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 pub const FILE_NAME: &str = "player_memory.json";
 pub const MAX_CHANNEL_SPEEDS: usize = 300;
 pub const MAX_CHANNEL_SUBTITLES: usize = 300;
+pub const MAX_VIDEO_SPEEDS: usize = 500;
 pub const MAX_POSITIONS: usize = 500;
 pub const MAX_WATCH_DAYS: usize = 90;
 /// Positions this close to the start are not worth resuming.
@@ -103,6 +104,9 @@ pub struct PlayerMemory {
     pub channel_speed: LruMap<f32>,
     #[serde(default)]
     pub channel_subtitle: LruMap<String>,
+    /// Per-video playback speed ("remember speed per video").
+    #[serde(default)]
+    pub video_speed: LruMap<f32>,
     #[serde(default)]
     pub positions: LruMap<Position>,
     /// "YYYY-MM-DD" -> seconds watched that day (UTC).
@@ -121,6 +125,7 @@ impl PlayerMemory {
         let mut m: PlayerMemory = crate::fsutil::load_json_or_default(path);
         m.channel_speed.trim(MAX_CHANNEL_SPEEDS);
         m.channel_subtitle.trim(MAX_CHANNEL_SUBTITLES);
+        m.video_speed.trim(MAX_VIDEO_SPEEDS);
         m.positions.trim(MAX_POSITIONS);
         m.watch_time.trim(MAX_WATCH_DAYS);
         m.path = Some(path.to_path_buf());
@@ -143,6 +148,21 @@ impl PlayerMemory {
             Some(s) => self.channel_speed.insert(channel_id, s, MAX_CHANNEL_SPEEDS),
             None => {
                 self.channel_speed.remove(channel_id);
+            }
+        }
+    }
+
+    /// Remembered speed for a video.
+    pub fn video_speed(&mut self, video_id: &str) -> Option<f32> {
+        self.video_speed.get(video_id).copied()
+    }
+
+    /// Remembers `speed` for a video; `None` (or a non-positive/NaN speed) forgets it.
+    pub fn set_video_speed(&mut self, video_id: &str, speed: Option<f32>) {
+        match speed.filter(|s| s.is_finite() && *s > 0.0) {
+            Some(s) => self.video_speed.insert(video_id, s, MAX_VIDEO_SPEEDS),
+            None => {
+                self.video_speed.remove(video_id);
             }
         }
     }

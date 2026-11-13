@@ -458,7 +458,7 @@ fn run(
         s.storyboard = resolved.storyboard_spec.clone();
         s.captions = resolved.captions.clone();
         s.audio_tracks = resolved.audio_tracks();
-        s.audio_track = prefs.audio_track.clone();
+        s.audio_track = prefs.audio_track.clone().or_else(|| prefs.audio_language.as_deref().and_then(|l| resolved.audio_track_for(l)));
         s.quality_hint = resolved
             .adaptive
             .iter()

@@ -193,8 +193,8 @@ pub struct Store {
     pub groups: Vec<(String, String)>,
     /// Subscribe state per channel id (from YouTube, updated optimistically).
     pub subscribed: HashMap<String, bool>,
-    /// Sleep timer length chosen (0 = off), for the menu.
-    pub sleep_minutes: u32,
+    /// A SponsorBlock segment is offered for skipping (OK skips it).
+    pub sb_offered: bool,
     /// Playlists for the "Save to playlist" picker: video id -> options.
     pub playlist_options: HashMap<String, Vec<yt_core::actions::PlaylistOption>>,
     /// Videos of the list the current video was opened from (for next/previous), and whether
@@ -376,6 +376,17 @@ impl Store {
     /// The channel name of a video's card, if any card shows it.
     pub fn card_channel(&self, video_id: &str) -> Option<String> {
         self.feeds.values().flat_map(|f| f.cards.iter()).find(|c| c.video_id() == Some(video_id)).and_then(|c| c.item.channel.clone())
+    }
+
+    /// A video's length from its card's duration badge (ms).
+    pub fn card_duration_ms(&self, video_id: &str) -> Option<u64> {
+        let card = self.feeds.values().flat_map(|f| f.cards.iter()).find(|c| c.video_id() == Some(video_id))?;
+        parse_duration(card.item.badge.as_deref()?)
+    }
+
+    /// A card shows `video_id` as a live stream.
+    pub fn card_is_live(&self, video_id: &str) -> bool {
+        self.feeds.values().flat_map(|f| f.cards.iter()).any(|c| c.video_id() == Some(video_id) && c.item.kind == ItemKind::Live)
     }
 
     /// Where to resume a partly watched video: its card's watched percentage of its duration

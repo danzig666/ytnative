@@ -396,6 +396,7 @@ fn main() {
 
             if !inputs.is_empty() {
                 last_input = now;
+                rig.last_key_ms = now;
                 if std::env::var_os("YTNATIVE_FRAME_DEBUG").is_some() {
                     log(&format!("framedbg input x{} at {now}", inputs.len()));
                 }
@@ -427,6 +428,7 @@ fn main() {
                         }
                         d.request(MachineId::Nav, if in_player { NavOp::Replace(arg) } else { NavOp::Push(arg) });
                         last_input = now;
+                        rig.last_key_ms = now;
                     }
                     lounge::Action::TogglePause(want_play) => {
                         let paused = rig.player_view.phase == player::Phase::Paused;

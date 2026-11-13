@@ -277,3 +277,39 @@ Fit to screen	Képernyőhöz igazítás	An Bildschirm anpassen	Ajustar a la pant
 Fill the screen	Kitöltés	Bildschirm füllen	Llenar la pantalla	Remplir l'écran	Заполнить экран
 Zoom in	Nagyítás	Vergrößern	Ampliar	Zoomer	Увеличить
 Suggestions	Javaslatok	Vorschläge	Sugerencias	Suggestions	Рекомендации
+Video zoom	Videó nagyítása	Videozoom	Zoom del vídeo	Zoom de la vidéo	Масштаб видео
+Remember speed	Sebesség megjegyzése	Geschwindigkeit merken	Recordar velocidad	Mémoriser la vitesse	Запоминать скорость
+OK button during playback	OK gomb lejátszás közben	OK-Taste bei der Wiedergabe	Botón OK durante la reproducción	Bouton OK pendant la lecture	Кнопка OK при воспроизведении
+Seek with number keys	Tekerés a számgombokkal	Mit Zifferntasten spulen	Avanzar con las teclas numéricas	Avancer avec les touches numériques	Перемотка цифровыми кнопками
+Time in the controls	Idő a vezérlőkön	Zeit in der Steuerung	Tiempo en los controles	Heure dans les commandes	Время на панели управления
+Resume short videos (under 5 minutes)	Rövid videók folytatása (5 perc alatt)	Kurze Videos fortsetzen (unter 5 Minuten)	Reanudar vídeos cortos (menos de 5 minutos)	Reprendre les vidéos courtes (moins de 5 minutes)	Продолжать короткие видео (до 5 минут)
+Remember live stream position	Élő közvetítés pozíciójának megjegyzése	Position in Livestreams merken	Recordar la posición en directos	Mémoriser la position des directs	Запоминать позицию в трансляциях
+Loop Shorts	Shorts ismétlése	Shorts wiederholen	Repetir Shorts	Lire les Shorts en boucle	Повторять Shorts
+Leave the player with a double BACK	Kilépés a lejátszóból dupla VISSZA gombbal	Player mit zweimal ZURÜCK verlassen	Salir del reproductor con doble ATRÁS	Quitter le lecteur avec un double RETOUR	Выход из плеера двойным НАЗАД
+Show the controls when the next video starts	Vezérlők megjelenítése a következő videó indulásakor	Steuerung beim Start des nächsten Videos zeigen	Mostrar los controles al empezar el siguiente vídeo	Afficher les commandes au début de la vidéo suivante	Показывать управление при запуске следующего видео
+Preferred audio language	Előnyben részesített hangnyelv	Bevorzugte Audiosprache	Idioma de audio preferido	Langue audio préférée	Предпочитаемый язык аудио
+Repeat this video	A videó ismétlése	Dieses Video wiederholen	Repetir este vídeo	Répéter cette vidéo	Повторять это видео
+Play the list then stop	A lista lejátszása, majd leállás	Liste abspielen, dann stoppen	Reproducir la lista y parar	Lire la liste puis arrêter	Воспроизвести список и остановиться
+Repeat the list	A lista ismétlése	Liste wiederholen	Repetir la lista	Répéter la liste	Повторять список
+Shuffle the list	A lista keverése	Liste zufällig abspielen	Reproducir la lista en orden aleatorio	Lire la liste en aléatoire	Перемешать список
+Play the list in reverse	A lista lejátszása visszafelé	Liste rückwärts abspielen	Reproducir la lista al revés	Lire la liste à l'envers	Воспроизводить список в обратном порядке
+Pause after each video	Szünet minden videó után	Nach jedem Video pausieren	Pausar tras cada vídeo	Pause après chaque vidéo	Пауза после каждого видео
+Close the player after each video	A lejátszó bezárása minden videó után	Player nach jedem Video schließen	Cerrar el reproductor tras cada vídeo	Fermer le lecteur après chaque vidéo	Закрывать плеер после каждого видео
+Same for all videos	Minden videónál ugyanaz	Für alle Videos gleich	Igual para todos los vídeos	Identique pour toutes les vidéos	Одинаково для всех видео
+Per video	Videónként	Pro Video	Por vídeo	Par vidéo	Для каждого видео
+Per channel	Csatornánként	Pro Kanal	Por canal	Par chaîne	Для каждого канала
+Show controls only	Csak a vezérlők megjelenítése	Nur Steuerung zeigen	Solo mostrar controles	Afficher seulement les commandes	Только показать управление
+Show controls and pause	Vezérlők megjelenítése és szünet	Steuerung zeigen und pausieren	Mostrar controles y pausar	Afficher les commandes et mettre en pause	Показать управление и пауза
+Pause only	Csak szünet	Nur pausieren	Solo pausar	Pause seulement	Только пауза
+Toggle speed	Sebesség váltása	Geschwindigkeit umschalten	Alternar velocidad	Basculer la vitesse	Переключать скорость
+Remaining time	Hátralévő idő	Restzeit	Tiempo restante	Temps restant	Оставшееся время
+Ending time	Befejezés időpontja	Endzeit	Hora de finalización	Heure de fin	Время окончания
+Never	Soha	Nie	Nunca	Jamais	Никогда
+Original	Eredeti	Original	Original	Originale	Оригинал
+second	másodperc	Sekunde	segundo	seconde	секунда
+seconds	másodperc	Sekunden	segundos	secondes	секунд
+hour	óra	Stunde	hora	heure	час
+hours	óra	Stunden	horas	heures	часа
+{} left	{} van hátra	noch {}	quedan {}	{} restantes	осталось {}
+Ends at {}	Vége: {}	Endet um {}	Termina a las {}	Se termine à {}	Закончится в {}
+Press BACK again to leave	A kilépéshez nyomd meg újra a VISSZA gombot	Zum Verlassen erneut ZURÜCK drücken	Pulsa ATRÁS otra vez para salir	Appuyez à nouveau sur RETOUR pour quitter	Нажмите НАЗАД ещё раз для выхода
