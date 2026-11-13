@@ -50,8 +50,12 @@ pub struct PlayerScreen {
     preview_until: u32,
     /// Last Magic Remote pointer position (OSD button hover).
     pointer: Option<(f32, f32)>,
-    /// Keyboard selection on the OSD buttons (0 subtitles, 1 comments, 2 options).
+    /// Keyboard selection on the OSD buttons (see [`osd_button`] for the order).
     osd_sel: Option<usize>,
+    /// Keyboard selection in the suggestions row under the controls (Down from the lower row).
+    sugg_sel: Option<usize>,
+    /// The speed the speed button returns to (it toggles between 1x and this).
+    last_rate: f32,
     /// Pointer jitter guard (see the Pointer event).
     ptr_quiet: bool,
     ptr_anchor: Option<(f32, f32)>,
@@ -60,7 +64,7 @@ pub struct PlayerScreen {
 
 impl PlayerScreen {
     pub fn new(entry: EntryId, video_id: String, playlist: Option<String>) -> Self {
-        PlayerScreen { entry, state: State(video_id.clone()), video_id, playlist, hud: true, ended_handled: false, preview_until: 0, pointer: None, osd_sel: None, ptr_quiet: false, ptr_anchor: None }
+        PlayerScreen { entry, state: State(video_id.clone()), video_id, playlist, hud: true, ended_handled: false, preview_until: 0, pointer: None, osd_sel: None, sugg_sel: None, last_rate: 1.5, ptr_quiet: false, ptr_anchor: None }
     }
 
     fn show_hud(&mut self, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
@@ -97,22 +101,64 @@ impl PlayerScreen {
     }
 }
 
-/// OSD buttons, left to right: 0 previous, 1 play/pause, 2 next (centred on the bottom row);
-/// 3 like, 4 dislike, 5 subtitles, 6 chapters, 7 comments, 8 options (right-aligned).
-const OSD_N: usize = 9;
-const OSD_CHAPTERS: usize = 6;
-const OSD_PLAY: usize = 1;
-const OSD_LIKE: usize = 3;
-const OSD_DISLIKE: usize = 4;
-const OSD_CC: usize = 5;
+/// OSD buttons in two rows, as SmartTube lays them out.
+/// Above the seek bar: 0 play/pause, 1 previous, 2 next, 3 playback mode, 4 speed, 5 chapters,
+/// 6 comments, 7 search. Below it: 8 options, 9 channel, 10 like, 11 dislike, 12 subtitles,
+/// 13 save to playlist, 14 subscribe, 15 video info, 16 SponsorBlock.
+const OSD_N: usize = 17;
+const OSD_ROW_B: usize = 8;
+const OSD_PLAY: usize = 0;
+const OSD_PREV: usize = 1;
+const OSD_NEXT: usize = 2;
+const OSD_REPEAT: usize = 3;
+const OSD_SPEED: usize = 4;
+const OSD_CHAPTERS: usize = 5;
+const OSD_COMMENTS: usize = 6;
+const OSD_SEARCH: usize = 7;
+const OSD_OPTIONS: usize = 8;
+const OSD_CHANNEL: usize = 9;
+const OSD_LIKE: usize = 10;
+const OSD_DISLIKE: usize = 11;
+const OSD_CC: usize = 12;
+const OSD_SAVE: usize = 13;
+const OSD_SUBSCRIBE: usize = 14;
+const OSD_INFO: usize = 15;
+const OSD_SB: usize = 16;
+/// Vertical layout of the controls.
+const ROW_A_Y: f32 = 806.0;
+const BAR_Y: f32 = 900.0;
+const ROW_B_Y: f32 = 930.0;
+const BTN: f32 = 64.0;
+const BTN_PITCH: f32 = 84.0;
 
 fn osd_button(i: usize) -> Rect {
-    if i < OSD_LIKE {
-        return Rect::new(918.0 + (i as f32 - 1.0) * 100.0, 994.0, 84.0, 46.0);
-    }
-    let from_right = (OSD_N - 1 - i) as f32;
-    Rect::new(1740.0 - from_right * 100.0, 994.0, 84.0, 46.0)
+    let (col, y) = if i < OSD_ROW_B { (i, ROW_A_Y) } else { (i - OSD_ROW_B, ROW_B_Y) };
+    Rect::new(96.0 + col as f32 * BTN_PITCH, y, BTN, BTN)
 }
+
+/// The button in the other row nearest to button `i` (Up / Down between the rows).
+fn osd_other_row(i: usize) -> usize {
+    if i < OSD_ROW_B {
+        (i + OSD_ROW_B).min(OSD_N - 1)
+    } else {
+        (i - OSD_ROW_B).min(OSD_ROW_B - 1)
+    }
+}
+
+/// The video's suggestions, flattened into one row (videos only).
+fn suggestions(cx: &Cx<'_, YtHost>) -> Vec<yt_core::model::Item> {
+    let Some(w) = cx.views.player.extras.watch.as_ref() else { return Vec::new() };
+    let mut out: Vec<yt_core::model::Item> = Vec::new();
+    for it in w.suggestions.iter().flat_map(|s| s.items.iter()) {
+        if matches!(it.endpoint, Some(yt_core::model::Endpoint::Watch { .. })) && !out.iter().any(|o| o.id == it.id) && it.id != w.video_id {
+            out.push(it.clone());
+        }
+    }
+    out
+}
+
+/// The playback-mode cycle of the playback mode button.
+const REPEAT_CYCLE: [Repeat; 4] = [Repeat::Autoplay, Repeat::List, Repeat::One, Repeat::Off];
 
 thread_local! {
     /// Videos played in this run, oldest first (the "previous" button walks back through it).
@@ -162,10 +208,65 @@ impl PlayerScreen {
     /// OSD button `i` pressed (pointer or OK); see [`osd_button`] for the order.
     fn press_osd(&mut self, i: usize, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
         let st = cx.views.player;
+        let pause_if_playing = |fx: &mut Effects<'_, YtHost>| {
+            if st.phase == Phase::Playing {
+                fx.push(Fx::App(YtFx::TogglePause));
+            }
+        };
         match i {
-            0 => self.prev(cx, fx),
+            OSD_PREV => self.prev(cx, fx),
             OSD_PLAY => fx.push(Fx::App(YtFx::TogglePause)),
-            2 => self.next(cx, fx),
+            OSD_NEXT => self.next(cx, fx),
+            OSD_REPEAT => {
+                let cur = cx.views.store.settings.repeat;
+                let i = REPEAT_CYCLE.iter().position(|r| *r == cur).unwrap_or(0);
+                let next = REPEAT_CYCLE[(i + 1) % REPEAT_CYCLE.len()];
+                fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| s.repeat = next))));
+                fx.push(Fx::App(YtFx::Toast(repeat_label(next).into())));
+            }
+            OSD_SPEED => {
+                let rate = if st.rate > 0.0 { st.rate } else { 1.0 };
+                let to = if (rate - 1.0).abs() > 0.01 {
+                    self.last_rate = rate;
+                    1.0
+                } else {
+                    self.last_rate
+                };
+                fx.push(Fx::App(YtFx::SetSpeed(to)));
+                fx.push(Fx::App(YtFx::Toast(format!("{to}x"))));
+            }
+            OSD_SEARCH if !cx.views.store.settings.child_mode => {
+                pause_if_playing(fx);
+                self.osd_sel = None;
+                fx.push(Fx::Nav(NavOp::Push(YtArg::Search)));
+            }
+            OSD_SEARCH => {}
+            OSD_CHANNEL if !st.channel_id.is_empty() => {
+                pause_if_playing(fx);
+                self.osd_sel = None;
+                fx.push(Fx::Nav(NavOp::Push(YtArg::Feed(crate::store::FeedKey::Browse { id: st.channel_id.clone(), params: None }))));
+            }
+            OSD_CHANNEL => {}
+            OSD_SAVE if !st.video_id.is_empty() => {
+                self.osd_sel = None;
+                fx.push(Fx::App(YtFx::LoadPlaylists(st.video_id.clone())));
+                fx.push(Fx::Nav(NavOp::Present(YtArg::PlaylistPicker(st.video_id.clone(), st.title.clone()))));
+            }
+            OSD_SAVE => {}
+            OSD_SUBSCRIBE if !st.channel_id.is_empty() => {
+                let subscribed = st.extras.watch.as_ref().and_then(|w| w.subscribed).unwrap_or(false);
+                fx.push(Fx::App(YtFx::Act(crate::host::UserAction::Subscribe { channel_id: st.channel_id.clone(), subscribe: !subscribed })));
+            }
+            OSD_SUBSCRIBE => {}
+            OSD_INFO => {
+                self.osd_sel = None;
+                fx.push(Fx::Nav(NavOp::Push(YtArg::Info)));
+            }
+            OSD_SB => {
+                let on = !cx.views.store.settings.sponsorblock;
+                fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| s.sponsorblock = on))));
+                fx.push(Fx::App(YtFx::Toast(if on { "SponsorBlock on".into() } else { "SponsorBlock off".into() })));
+            }
             OSD_LIKE | OSD_DISLIKE if !st.video_id.is_empty() => {
                 use yt_core::actions::Rating;
                 let cur = st.extras.watch.as_ref().map(|w| w.like_status);
@@ -188,7 +289,7 @@ impl PlayerScreen {
                     fx.push(Fx::App(YtFx::Toast("No chapters".into())));
                 }
             }
-            7 => {
+            OSD_COMMENTS => {
                 if !st.video_id.is_empty() && !cx.views.store.settings.child_mode {
                     self.osd_sel = None;
                     fx.push(Fx::Nav(NavOp::Present(YtArg::Comments(st.video_id.clone()))));
@@ -229,7 +330,7 @@ impl Machine<YtHost> for PlayerScreen {
                 Handled::Yes
             }
             ScreenEvent::Timer(T_HIDE) => {
-                if cx.views.player.phase == Phase::Playing {
+                if cx.views.player.phase == Phase::Playing && self.sugg_sel.is_none() {
                     self.hud = false;
                     self.osd_sel = None;
                     self.pointer = None;
@@ -334,12 +435,41 @@ impl Machine<YtHost> for PlayerScreen {
                 // opens Options, Up / BACK leave the buttons.
                 let transport = [WCODE_PLAY, WCODE_PAUSE, WCODE_PLAYPAUSE, WCODE_RW, WCODE_FF, WCODE_CH_UP, WCODE_CH_DOWN].contains(wcode)
                     || WCODE_STOP.contains(wcode);
-                if let Some(sel) = self.osd_sel.filter(|_| !transport) {
+                // The suggestions row: Left / Right through it, OK plays, Up / BACK go back.
+                if let Some(s) = self.sugg_sel.filter(|_| !transport) {
+                    let n = suggestions(cx).len();
                     match key {
-                        Key::Left => self.osd_sel = Some(sel.saturating_sub(1)),
-                        Key::Right => self.osd_sel = Some((sel + 1).min(OSD_N - 1)),
-                        Key::Down => {}
+                        Key::Left => self.sugg_sel = Some(s.saturating_sub(1)),
+                        Key::Right => self.sugg_sel = Some((s + 1).min(n.saturating_sub(1))),
+                        Key::Ok => {
+                            if let Some(it) = suggestions(cx).get(s) {
+                                fx.push(Fx::Nav(NavOp::Replace(YtArg::Player { video_id: it.id.clone(), playlist: None })));
+                            }
+                        }
+                        Key::Up | Key::Back => {
+                            self.sugg_sel = None;
+                            self.osd_sel = Some(OSD_ROW_B);
+                        }
+                        _ => {}
+                    }
+                    self.show_hud(cx, fx);
+                    return Handled::Yes;
+                }
+                if let Some(sel) = self.osd_sel.filter(|_| !transport) {
+                    let row = if sel < OSD_ROW_B { 0..OSD_ROW_B } else { OSD_ROW_B..OSD_N };
+                    match key {
+                        Key::Left => self.osd_sel = Some(sel.saturating_sub(1).max(row.start)),
+                        Key::Right => self.osd_sel = Some((sel + 1).min(row.end - 1)),
+                        Key::Down if sel < OSD_ROW_B => self.osd_sel = Some(osd_other_row(sel)),
+                        Key::Down => {
+                            // Below the lower row: the suggestions.
+                            if !suggestions(cx).is_empty() {
+                                self.osd_sel = None;
+                                self.sugg_sel = Some(0);
+                            }
+                        }
                         Key::Ok => self.press_osd(sel, cx, fx),
+                        Key::Up if sel >= OSD_ROW_B => self.osd_sel = Some(osd_other_row(sel)),
                         Key::Up | Key::Back => self.osd_sel = None,
                         _ => {}
                     }
@@ -502,7 +632,7 @@ impl Screen<YtHost> for PlayerScreen {
         let ex = st.extras.clone();
         if cx.views.store.settings.subtitles {
             if let Some(cue) = yt_core::captions::cue_at(&ex.cues, st.position_ms) {
-                let lift = if self.hud { 330.0 } else { 0.0 };
+                let lift = if self.hud { 480.0 } else { 0.0 }; // above the title and both button rows
                 let s = &cx.views.store.settings;
                 SUB_STYLE.with(|c| c.set(match s.subtitle_style.as_str() { "shadow" => 1, "box" => 2, _ => 0 }));
                 let face = match s.subtitle_font.as_str() { "sans" => 1, "serif" => 2, "mono" => 3, "roboto" => 4, _ => 0 };
@@ -535,17 +665,24 @@ impl Screen<YtHost> for PlayerScreen {
             common::toast(p, cx);
             return;
         }
-        // Bottom scrim + title + progress
-        ui::fill(p, Rect::new(0.0, 755.0, 1920.0, 325.0), 0.0, [0.0, 0.0, 0.0, 0.55]);
-        if cx.views.store.settings.show_clock {
-            ui::fill(p, Rect::new(0.0, 0.0, 1920.0, 96.0), 0.0, [0.0, 0.0, 0.0, 0.40]);
+        let s = &cx.views.store.settings;
+        // Browsing the suggestions: they take the screen (SmartTube scrolls them up under a dark
+        // veil), the title stays on top.
+        if let Some(sel) = self.sugg_sel {
+            ui::fill(p, Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, [0.0, 0.0, 0.0, 0.82]);
+            ui::text(p, &ui::ellipsize(&st.title, 70), 96.0, 90.0, 48, ui::WHITE, ui::ALIGN_LEFT, true);
+            ui::text(p, &st.author, 96.0, 160.0, 28, ui::DIM, ui::ALIGN_LEFT, false);
+            draw_suggestions(p, f.measure, &suggestions(cx), sel, 560.0);
+            common::toast(p, cx);
+            return;
         }
-        ui::text(p, &ui::ellipsize(&st.title, 80), 96.0, 780.0, 44, ui::WHITE, ui::ALIGN_LEFT, true);
+        // A gradient from the picture into the controls (SmartTube's player background).
+        p.rect(Rect::new(0.0, 520.0, 1920.0, 260.0), 0.0, [0.0, 0.0, 0.0, 0.0], ui::dimmed([0.0, 0.0, 0.0, 0.82]), 0.0);
+        ui::fill(p, Rect::new(0.0, 780.0, 1920.0, 300.0), 0.0, [0.0, 0.0, 0.0, 0.82]);
+        // Title and the line under it: channel, views, age, likes, dislikes, subscribers.
+        ui::text(p, &ui::ellipsize(&st.title, 72), 96.0, 640.0, 50, ui::WHITE, ui::ALIGN_LEFT, true);
         let mut byline = st.author.clone();
         if let Some(w) = &ex.watch {
-            if let Some(subs) = &w.subscriber_count_text {
-                byline.push_str(&format!("  \u{2022}  {subs}"));
-            }
             if let Some(v) = &w.short_view_count_text {
                 byline.push_str(&format!("  \u{2022}  {v}"));
             }
@@ -558,28 +695,34 @@ impl Screen<YtHost> for PlayerScreen {
             (None, Some(l)) => Some((l, None)),
             _ => None,
         };
-        let mut bx = 96.0 + ui::text(p, &byline, 96.0, 842.0, 30, ui::DIM, ui::ALIGN_LEFT, false);
+        let my = 712.0;
+        let mut bx = 96.0 + ui::text(p, &byline, 96.0, my, 28, ui::DIM, ui::ALIGN_LEFT, false);
         if let Some((likes, dislikes)) = votes {
-            bx += ui::text(p, "  \u{2022}  ", bx, 842.0, 30, ui::DIM, ui::ALIGN_LEFT, false);
-            ui::icon::draw(p, ui::icon::Kind::ThumbUp, Rect::new(bx, 846.0, 28.0, 28.0), ui::DIM, false);
-            bx += 36.0;
-            bx += ui::text(p, &likes, bx, 842.0, 30, ui::DIM, ui::ALIGN_LEFT, false) + 24.0;
+            bx += ui::text(p, "  \u{2022}  ", bx, my, 28, ui::DIM, ui::ALIGN_LEFT, false);
+            ui::icon::draw(p, ui::icon::Kind::ThumbUp, Rect::new(bx, my + 3.0, 26.0, 26.0), ui::DIM, false);
+            bx += 34.0;
+            bx += ui::text(p, &likes, bx, my, 28, ui::DIM, ui::ALIGN_LEFT, false);
             if let Some(d) = dislikes {
-                ui::icon::draw(p, ui::icon::Kind::ThumbDown, Rect::new(bx, 850.0, 28.0, 28.0), ui::DIM, false);
-                bx += 36.0;
-                ui::text(p, &d, bx, 842.0, 30, ui::DIM, ui::ALIGN_LEFT, false);
+                bx += ui::text(p, "  \u{2022}  ", bx, my, 28, ui::DIM, ui::ALIGN_LEFT, false);
+                ui::icon::draw(p, ui::icon::Kind::ThumbDown, Rect::new(bx, my + 6.0, 26.0, 26.0), ui::DIM, false);
+                bx += 34.0;
+                bx += ui::text(p, &d, bx, my, 28, ui::DIM, ui::ALIGN_LEFT, false);
             }
         }
+        if let Some(subs) = ex.watch.as_ref().and_then(|w| w.subscriber_count_text.as_ref()) {
+            ui::text(p, &format!("  \u{2022}  {subs}"), bx, my, 28, ui::DIM, ui::ALIGN_LEFT, false);
+        }
+        // The chapter being played, over the right end of the bar.
         if let Some(w) = &ex.watch {
             if let Some(i) = yt_core::watch::chapter_at(&w.chapters, st.position_ms) {
                 let t = format!("\u{25B6} {}", ui::ellipsize(&w.chapters[i].title, 60));
-                ui::text(p, &t, 1824.0, 842.0, 28, ui::WHITE, ui::ALIGN_RIGHT, false);
+                ui::text(p, &t, 1824.0, 712.0, 28, ui::WHITE, ui::ALIGN_RIGHT, false);
             }
         }
-        let bar = Rect::new(96.0, 920.0, 1728.0, 10.0);
+        // Seek bar: one piece per chapter with a small clear gap between.
+        let bar = Rect::new(96.0, BAR_Y, 1728.0, 8.0);
         let frac = if st.duration_ms > 0 { (st.position_ms as f32 / st.duration_ms as f32).clamp(0.0, 1.0) } else { 0.0 };
         {
-            // One piece per chapter with a small clear gap between (no marks drawn over the bar).
             let mut cuts: Vec<f32> = vec![0.0];
             if st.duration_ms > 0 {
                 if let Some(w) = &ex.watch {
@@ -594,16 +737,16 @@ impl Screen<YtHost> for PlayerScreen {
                 if x1 <= x0 {
                     continue;
                 }
-                ui::fill(p, Rect::new(x0, bar.y, x1 - x0, bar.h), 3.0, [1.0, 1.0, 1.0, 0.25]);
+                ui::fill(p, Rect::new(x0, bar.y, x1 - x0, bar.h), 4.0, [1.0, 1.0, 1.0, 0.28]);
                 let f1 = x1.min(px);
                 if f1 > x0 {
-                    ui::fill(p, Rect::new(x0, bar.y, f1 - x0, bar.h), 3.0, ui::accent());
+                    ui::fill(p, Rect::new(x0, bar.y, f1 - x0, bar.h), 4.0, ui::accent());
                 }
             }
         }
         if st.duration_ms > 0 {
             let x_of = |ms: u64| bar.x + bar.w * (ms as f32 / st.duration_ms as f32).clamp(0.0, 1.0);
-            if cx.views.store.settings.sb_markers {
+            if s.sb_markers {
                 for seg in ex.segments.iter().filter(|s| s.is_ranged()) {
                     let c = yt_core::ext::sponsorblock::colour(&seg.category);
                     let col = [((c >> 16) & 0xff) as f32 / 255.0, ((c >> 8) & 0xff) as f32 / 255.0, (c & 0xff) as f32 / 255.0, 0.95];
@@ -621,12 +764,8 @@ impl Screen<YtHost> for PlayerScreen {
                     let r = Rect::new(px, bar.y - ph - 40.0, pw, ph);
                     ui::fill(p, Rect::new(r.x - 4.0, r.y - 4.0, r.w + 8.0, r.h + 8.0), 10.0, ui::WHITE);
                     if tex != 0 && tw > 0.0 && th > 0.0 {
-                        // Frame coordinates are in the sheet's own pixels; the texture size may differ.
-                        // The sheet's real size: the last sheet of a video holds fewer rows than
-                        // `rows`, so a full-grid size maps its frames to the wrong place.
-                        let (sw, sh) = (tw, th);
-                        // plx's uv is [u, v, width, height] (`Rect::cover_uv`), not two corners.
-                        let uv = [fr.x as f32 / sw, fr.y as f32 / sh, fr.w as f32 / sw, fr.h as f32 / sh];
+                        // plx's uv is [u, v, width, height] (`Rect::cover_uv`), in the sheet's pixels.
+                        let uv = [fr.x as f32 / tw, fr.y as f32 / th, fr.w as f32 / tw, fr.h as f32 / th];
                         p.tex_uv(tex, uv, r, 8.0, ui::dimmed(ui::WHITE));
                     } else {
                         ui::fill(p, r, 8.0, [0.1, 0.1, 0.12, 1.0]);
@@ -635,76 +774,126 @@ impl Screen<YtHost> for PlayerScreen {
                 }
             }
         }
-        ui::fill(p, Rect::new(bar.x + bar.w * frac - 12.0, bar.y - 7.0, 24.0, 24.0), 12.0, ui::WHITE);
+        ui::fill(p, Rect::new(bar.x + bar.w * frac - 11.0, bar.y - 7.0, 22.0, 22.0), 11.0, ui::WHITE);
+        // Right of the upper row: quality / codec / HDR, and the date and time.
+        let mut quality = String::new();
+        let h = if st.height > 0 { st.height } else { st.quality_hint };
+        if h > 0 {
+            quality = format!("{}p{}", h, if st.fps > 30 { st.fps.to_string() } else { String::new() });
+            if !st.hdr.is_empty() && !st.hdr.eq_ignore_ascii_case("none") {
+                quality.push_str(&format!("  \u{2022}  {}", st.hdr));
+            }
+        }
+        if (st.rate - 1.0).abs() > 0.01 && st.rate > 0.0 {
+            quality.push_str(&format!("  \u{2022}  {}x", st.rate));
+        }
+        if st.phase == Phase::Ended {
+            quality = format!("{}  {quality}", crate::i18n::tr("Ended"));
+        }
+        ui::text(p, &quality, 1824.0, ROW_A_Y + 2.0, 26, ui::DIM, ui::ALIGN_RIGHT, false);
+        if s.show_clock {
+            let now = format!("{}  {}", common::date_text(), common::clock(&cx.views));
+            ui::text(p, &now, 1824.0, ROW_A_Y + 34.0, 26, ui::DIM, ui::ALIGN_RIGHT, false);
+        }
+        // Right of the lower row: remaining time, position / duration (or live).
         if st.live {
             let behind = st.live_edge_ms.saturating_sub(st.position_ms);
             if behind < 20_000 {
-                ui::text(p, "\u{25CF} LIVE", 96.0, 950.0, 30, ui::accent(), ui::ALIGN_LEFT, true);
+                ui::text(p, "\u{25CF} LIVE", 1824.0, ROW_B_Y + 16.0, 30, ui::accent(), ui::ALIGN_RIGHT, true);
             } else {
-                ui::text(p, &format!("\u{2212}{} behind live", ui::fmt_time(behind)), 96.0, 950.0, 30, ui::WHITE, ui::ALIGN_LEFT, false);
+                ui::text(p, &format!("\u{2212}{} behind live", ui::fmt_time(behind)), 1824.0, ROW_B_Y + 16.0, 28, ui::WHITE, ui::ALIGN_RIGHT, false);
             }
         } else {
-            ui::text(p, &ui::fmt_time(st.position_ms), 96.0, 950.0, 30, ui::WHITE, ui::ALIGN_LEFT, false);
-        }
-        let mut right = if st.live { String::new() } else { ui::fmt_time(st.duration_ms) };
-        if cx.views.store.settings.show_ending_time && st.duration_ms > st.position_ms {
-            right = format!("{right}   \u{2022}   ends in {}", ui::fmt_time(st.duration_ms - st.position_ms));
-        }
-        ui::text(p, &right, 1824.0, 950.0, 30, ui::WHITE, ui::ALIGN_RIGHT, false);
-        // State + quality line
-        // (Playing / paused shows on the play button.)
-        let mut info = match st.phase {
-            Phase::Ended => "Ended   ".to_string(),
-            _ => String::new(),
-        };
-        // Quality, always: the decoder's resolution, else the best the stream offers.
-        let h = if st.height > 0 { st.height } else { st.quality_hint };
-        if h > 0 {
-            info.push_str(&format!("{}p{}", h, if st.fps > 30 { st.fps.to_string() } else { String::new() }));
-            if !st.hdr.is_empty() && !st.hdr.eq_ignore_ascii_case("none") {
-                info.push_str(&format!("  {}", st.hdr));
+            if s.show_ending_time && st.duration_ms > st.position_ms {
+                let left = format!("{} {}", crate::i18n::tr("Remaining:"), ui::fmt_time(st.duration_ms - st.position_ms));
+                ui::text(p, &left, 1824.0, ROW_B_Y + 2.0, 26, ui::DIM, ui::ALIGN_RIGHT, false);
             }
-        } else if !matches!(st.phase, Phase::Failed(_)) {
-            info.push_str("   \u{2014}p");
+            let pos = format!("{}  /  {}", ui::fmt_time(st.position_ms), ui::fmt_time(st.duration_ms));
+            ui::text(p, &pos, 1824.0, ROW_B_Y + 34.0, 28, ui::WHITE, ui::ALIGN_RIGHT, false);
         }
-        if (st.rate - 1.0).abs() > 0.01 && st.rate > 0.0 {
-            info.push_str(&format!("   {}x", st.rate));
-        }
-        ui::text(p, &info, 96.0, 1010.0, 26, ui::DIM, ui::ALIGN_LEFT, false);
-        // Pointer buttons: Subtitles on/off, Comments, Options.
-        let subs_on = cx.views.store.settings.subtitles;
-        let tr = crate::i18n::tr;
-        let _ = tr;
-        let rating = st.extras.watch.as_ref().map(|w| w.like_status);
+        // The two rows of round buttons.
+        let w = st.extras.watch.as_ref();
+        let rating = w.map(|w| w.like_status);
         let liked = matches!(rating, Some(yt_core::watch::LikeStatus::Like));
         let disliked = matches!(rating, Some(yt_core::watch::LikeStatus::Dislike));
+        let subscribed = w.and_then(|w| w.subscribed).unwrap_or(false);
         use ui::icon::Kind;
         let play = if matches!(st.phase, Phase::Paused | Phase::Ended) { Kind::Play } else { Kind::Pause };
-        let kinds = [Kind::Prev, play, Kind::Next, Kind::ThumbUp, Kind::ThumbDown, Kind::Cc, Kind::List, Kind::Chat, Kind::Gear];
+        let repeat_icon = match s.repeat {
+            Repeat::One => Kind::Repeat1,
+            Repeat::List => Kind::Repeat,
+            Repeat::Off => Kind::PauseEnd,
+            _ => Kind::Autoplay,
+        };
+        let kinds = [
+            play,
+            Kind::Prev,
+            Kind::Next,
+            repeat_icon,
+            Kind::Gauge,
+            Kind::List,
+            Kind::Chat,
+            Kind::Search,
+            Kind::Gear,
+            Kind::User,
+            Kind::ThumbUp,
+            Kind::ThumbDown,
+            Kind::Cc,
+            Kind::ListPlus,
+            Kind::Bell,
+            Kind::Info,
+            Kind::Shield,
+        ];
         let chapters = has_chapters(cx);
         for (i, k) in kinds.iter().enumerate() {
             let b = osd_button(i);
             let hot = self.pointer.is_some_and(|(x, y)| b.contains(x, y)) || self.osd_sel == Some(i);
-            // Without chapters the button stays (fixed positions for the keys) but faded.
-            let off = i == OSD_CHAPTERS && !chapters;
-            let on = (i == OSD_CC && subs_on) || (i == OSD_LIKE && liked) || (i == OSD_DISLIKE && disliked);
-            ui::fill(p, b, b.h / 2.0, if hot { [1.0, 1.0, 1.0, 0.9] } else if on { [1.0, 1.0, 1.0, 0.22] } else { [1.0, 1.0, 1.0, 0.10] });
-            let ink = match (hot, off) {
-                (true, _) => [0.0, 0.0, 0.0, 1.0],
-                (false, true) => [1.0, 1.0, 1.0, 0.3],
+            let off = (i == OSD_CHAPTERS && !chapters) || (i == OSD_SEARCH && s.child_mode) || (i == OSD_COMMENTS && s.child_mode);
+            let on = match i {
+                OSD_CC => s.subtitles,
+                OSD_LIKE => liked,
+                OSD_DISLIKE => disliked,
+                OSD_SUBSCRIBE => subscribed,
+                OSD_SB => s.sponsorblock,
+                OSD_SPEED => (st.rate - 1.0).abs() > 0.01 && st.rate > 0.0,
+                OSD_REPEAT => s.repeat != Repeat::Autoplay,
+                _ => false,
+            };
+            if hot {
+                ui::fill(p, b, b.h / 2.0, [1.0, 1.0, 1.0, 0.92]);
+            }
+            let ink = match (hot, off, on) {
+                (true, _, _) => [0.05, 0.05, 0.07, 1.0],
+                (false, true, _) => [1.0, 1.0, 1.0, 0.3],
+                (false, false, true) => ui::accent(),
                 _ => ui::WHITE,
             };
-            let s = 30.0;
-            // Transport icons are solid; thumbs fill when active.
-            let filled = i < OSD_LIKE || (on && (i == OSD_LIKE || i == OSD_DISLIKE));
-            let s = if i < OSD_LIKE { 26.0 } else { s };
-            ui::icon::draw(p, *k, Rect::new(b.x + (b.w - s) / 2.0, b.y + (b.h - s) / 2.0, s, s), ink, filled);
-            if on {
-                ui::fill(p, Rect::new(b.x + 22.0, b.y + b.h - 6.0, b.w - 44.0, 3.0), 1.5, ui::accent());
+            let sz = if i <= OSD_NEXT { 30.0 } else { 34.0 };
+            let ir = Rect::new(b.x + (b.w - sz) / 2.0, b.y + (b.h - sz) / 2.0, sz, sz);
+            // The channel button shows the channel's picture when there is one.
+            let avatar = (i == OSD_CHANNEL).then(|| w.and_then(|w| w.channel_avatar.clone())).flatten();
+            let drawn = avatar.is_some_and(|url| {
+                let (tex, _, _) = plx_ui::tex::resolve_wh_on(0, &url, 0, 0, false);
+                if tex != 0 {
+                    let a = Rect::new(b.x + 10.0, b.y + 10.0, b.w - 20.0, b.h - 20.0);
+                    p.tex_uv(tex, [0.0, 0.0, 1.0, 1.0], a, a.w / 2.0, ui::dimmed(ui::WHITE));
+                }
+                tex != 0
+            });
+            if !drawn {
+                let filled = i <= OSD_NEXT || (on && (i == OSD_LIKE || i == OSD_DISLIKE));
+                ui::icon::draw(p, *k, ir, ink, filled);
+            }
+            // The focused button's name under it (a tooltip, as SmartTube shows).
+            if self.osd_sel == Some(i) && i >= OSD_ROW_B {
+                ui::text(p, osd_name(i), b.x + b.w / 2.0, b.y + b.h + 6.0, 22, ui::WHITE, ui::ALIGN_CENTER, false);
+            } else if self.osd_sel == Some(i) {
+                ui::text(p, osd_name(i), b.x + b.w / 2.0, b.y - 32.0, 22, ui::WHITE, ui::ALIGN_CENTER, false);
             }
         }
-        if cx.views.store.settings.show_clock {
-            ui::text(p, &common::clock(&cx.views), 1824.0, 28.0, 34, ui::WHITE, ui::ALIGN_RIGHT, false);
+        // There is more below: the suggestions.
+        if !suggestions(cx).is_empty() && self.osd_sel.is_some_and(|i| i >= OSD_ROW_B) {
+            ui::text(p, &format!("\u{25BC}  {}", crate::i18n::tr("Suggestions")), 960.0, 1030.0, 24, ui::DIM, ui::ALIGN_CENTER, false);
         }
         common::toast(p, cx);
     }
@@ -715,6 +904,80 @@ impl Screen<YtHost> for PlayerScreen {
 
 /// Next video when one ends: the next playlist item (or the first when repeating the list),
 /// else the watch page's autoplay pick.
+/// What each OSD button does, in words (its tooltip).
+fn osd_name(i: usize) -> &'static str {
+    crate::i18n::tr(match i {
+        OSD_PLAY => "Play / pause",
+        OSD_PREV => "Previous video",
+        OSD_NEXT => "Next video",
+        OSD_REPEAT => "Playback mode",
+        OSD_SPEED => "Speed",
+        OSD_CHAPTERS => "Chapters",
+        OSD_COMMENTS => "Comments",
+        OSD_SEARCH => "Search",
+        OSD_OPTIONS => "Options",
+        OSD_CHANNEL => "Channel",
+        OSD_LIKE => "Like",
+        OSD_DISLIKE => "Dislike",
+        OSD_CC => "Subtitles",
+        OSD_SAVE => "Save to playlist",
+        OSD_SUBSCRIBE => "Subscribe",
+        OSD_INFO => "Video info",
+        _ => "SponsorBlock",
+    })
+}
+
+/// A playback mode in words.
+fn repeat_label(r: Repeat) -> &'static str {
+    match r {
+        Repeat::Autoplay => "Play next",
+        Repeat::Off => "Stop",
+        Repeat::One => "Repeat",
+        Repeat::List => "Repeat list",
+    }
+}
+
+/// The suggestions as a row of cards at `y`, the selected one lifted and lit.
+fn draw_suggestions(p: plx_ui::Painter, m: &dyn plx_machine::machine::Measure, items: &[yt_core::model::Item], sel: usize, y: f32) {
+    const W: f32 = 400.0;
+    const H: f32 = 225.0;
+    const GAP: f32 = 32.0;
+    ui::text(p, "Suggestions", 96.0, y - 70.0, 36, ui::WHITE, ui::ALIGN_LEFT, true);
+    let first = sel.saturating_sub(1);
+    for (k, it) in items.iter().enumerate().skip(first).take(5) {
+        let x = 96.0 + (k - first) as f32 * (W + GAP);
+        let focused = k == sel;
+        let grow = if focused { 12.0 } else { 0.0 };
+        let r = Rect::new(x - grow, y - grow, W + 2.0 * grow, H + 2.0 * grow);
+        let url = it.thumbnail.clone().unwrap_or_default();
+        let (tex, _, _) = plx_ui::tex::resolve_wh_on(0, &url, 0, 0, false);
+        if tex != 0 {
+            p.tex_uv(tex, [0.0, 0.0, 1.0, 1.0], r, 14.0, ui::dimmed(ui::WHITE));
+        } else {
+            ui::fill(p, r, 14.0, [1.0, 1.0, 1.0, 0.08]);
+        }
+        if let Some(b) = &it.badge {
+            let bw = 14.0 * b.chars().count() as f32 + 20.0;
+            let br = Rect::new(r.x + r.w - bw - 10.0, r.y + r.h - 44.0, bw, 34.0);
+            ui::fill(p, br, 6.0, [0.0, 0.0, 0.0, 0.78]);
+            ui::text(p, b, br.x + bw / 2.0, br.y + 4.0, 22, ui::WHITE, ui::ALIGN_CENTER, true);
+        }
+        let panel = Rect::new(r.x, r.y + r.h + 6.0, r.w, 104.0);
+        let (bg, ink, dim) = if focused {
+            ([0.94, 0.94, 0.96, 1.0], [0.09, 0.09, 0.11, 1.0], [0.09, 0.09, 0.11, 0.66])
+        } else {
+            ([1.0, 1.0, 1.0, 0.08], [1.0, 1.0, 1.0, 0.92], ui::DIM)
+        };
+        ui::fill(p, panel, 14.0, bg);
+        let tw = panel.w - 32.0;
+        let t1 = m.fit_line(&it.title, tw, 24, true).to_string_lossy().into_owned();
+        ui::text(p, &t1, panel.x + 16.0, panel.y + 12.0, 24, ink, ui::ALIGN_LEFT, true);
+        let detail = it.lines.join(" \u{2022} ");
+        let d = m.fit_line(&detail, tw, 20, false).to_string_lossy().into_owned();
+        ui::text(p, &d, panel.x + 16.0, panel.y + 52.0, 20, dim, ui::ALIGN_LEFT, false);
+    }
+}
+
 /// The playing video has chapters.
 fn has_chapters(cx: &Cx<'_, YtHost>) -> bool {
     cx.views.player.extras.watch.as_ref().is_some_and(|w| !w.chapters.is_empty())

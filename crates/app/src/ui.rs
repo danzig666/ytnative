@@ -695,6 +695,15 @@ pub mod icon {
     const PAUSE: &str = r##"<path d="M6 4h4v16H6z"/><path d="M14 4h4v16h-4z"/>"##;
     const PREV: &str = r##"<path d="M19 20 9 12l10-8z"/><path d="M5 19V5"/>"##;
     const NEXT: &str = r##"<path d="M5 4l10 8-10 8z"/><path d="M19 5v14"/>"##;
+    const REPEAT: &str = r##"<path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/>"##;
+    const REPEAT1: &str = r##"<path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/><path d="M11 10h1v4"/>"##;
+    const AUTOPLAY: &str = r##"<path d="M5 5l9 7-9 7z"/><path d="M14 5l9 7-9 7"/>"##;
+    const PAUSE_END: &str = r##"<circle cx="12" cy="12" r="10"/><path d="M10 15V9"/><path d="M14 15V9"/>"##;
+    const GAUGE: &str = r##"<path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>"##;
+    const LIST_PLUS: &str = r##"<path d="M11 12H3"/><path d="M16 6H3"/><path d="M16 18H3"/><path d="M18 9v6"/><path d="M21 12h-6"/>"##;
+    const BELL: &str = r##"<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>"##;
+    const INFO: &str = r##"<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>"##;
+    const SHIELD: &str = r##"<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M10 9l5 3-5 3z"/>"##;
     const LIST: &str = r##"<path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/>"##;
 
     const HOME: &str = r##"<path d="M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8"/><path d="M3 10a2 2 0 0 1 .709-1.528l7-5.999a2 2 0 0 1 2.582 0l7 5.999A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>"##;
@@ -746,6 +755,15 @@ pub mod icon {
         User,
         Star,
         Folder,
+        Repeat,
+        Repeat1,
+        Autoplay,
+        PauseEnd,
+        Gauge,
+        ListPlus,
+        Bell,
+        Info,
+        Shield,
     }
 
     fn svg(k: Kind, filled: bool) -> &'static str {
@@ -755,7 +773,8 @@ pub mod icon {
             let mut v = Vec::new();
             for body in [
                 THUMB_UP, THUMB_DOWN, CHAT, GEAR, PLAY, PAUSE, PREV, NEXT, LIST, HOME, FLAME, SUBS, USERS, HISTORY, LIBRARY, MUSIC, GAMEPAD,
-                NEWS, MIC, LIVE, FILM, TROPHY, TRENDING, SEARCH, USER, STAR, FOLDER,
+                NEWS, MIC, LIVE, FILM, TROPHY, TRENDING, SEARCH, USER, STAR, FOLDER, REPEAT, REPEAT1, AUTOPLAY, PAUSE_END, GAUGE,
+                LIST_PLUS, BELL, INFO, SHIELD,
             ] {
                 v.push(format!("{HEAD}{body}</svg>"));
                 v.push(format!("{}{body}</svg>", HEAD.replace(r##"fill="none""##, r##"fill="#ffffff""##)));
@@ -790,6 +809,15 @@ pub mod icon {
             Kind::User => 48,
             Kind::Star => 50,
             Kind::Folder => 52,
+            Kind::Repeat => 54,
+            Kind::Repeat1 => 56,
+            Kind::Autoplay => 58,
+            Kind::PauseEnd => 60,
+            Kind::Gauge => 62,
+            Kind::ListPlus => 64,
+            Kind::Bell => 66,
+            Kind::Info => 68,
+            Kind::Shield => 70,
         };
         &all[i + filled as usize]
     }
