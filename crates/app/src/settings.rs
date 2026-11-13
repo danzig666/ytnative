@@ -249,6 +249,15 @@ pub fn sleep_label(mins: u32) -> String {
     format!("{h} {}", tr(if mins == 60 { "hour" } else { "hours" }))
 }
 
+/// "Off" / "0.5 seconds" for a duration in milliseconds (translated).
+pub fn ms_label(ms: u32) -> String {
+    if ms == 0 {
+        return crate::i18n::tr("Off").to_string();
+    }
+    let v = ms as f32 / 1000.0;
+    format!("{v} {}", crate::i18n::tr(if ms == 1000 { "second" } else { "seconds" }))
+}
+
 /// "5 seconds" (translated).
 pub fn secs_label(n: u32) -> String {
     format!("{n} {}", crate::i18n::tr(if n == 1 { "second" } else { "seconds" }))
@@ -332,10 +341,26 @@ pub struct Settings {
     pub sb_music_offtopic: SbAction,
     pub sb_preview: SbAction,
     pub sb_filler: SbAction,
+    /// The highlight point: skip = jump to it when the video starts, ask = offer the jump.
+    pub sb_highlight: SbAction,
     pub sb_skip_once: bool,
+    /// Segment markers on the seek bar (all categories)...
     pub sb_markers: bool,
+    /// ...except these categories (API names: "sponsor", "intro", ...).
+    pub sb_marker_hidden: Vec<String>,
+    /// Segments shorter than this are not skipped (0 = all are).
+    pub sb_min_segment_ms: u32,
+    /// Channels (by name) SponsorBlock leaves alone.
+    pub sb_excluded_channels: Vec<String>,
+    /// Ask SponsorBlock's alternative server first.
+    pub sb_alt_server: bool,
+    /// A notice when YouTube marks the video as containing paid promotion.
+    pub sb_paid_notice: bool,
     pub dearrow_titles: bool,
     pub dearrow_thumbnails: bool,
+    /// Videos DeArrow has no thumbnail for: "default" (keep it), "start", "middle", "end"
+    /// (YouTube's frames).
+    pub dearrow_fallback: String,
     pub return_dislikes: bool,
     // Content filters
     pub hide_shorts_home: bool,
@@ -450,10 +475,17 @@ impl Default for Settings {
             sb_music_offtopic: SbAction::Off,
             sb_preview: SbAction::Off,
             sb_filler: SbAction::Off,
+            sb_highlight: SbAction::Ask,
             sb_skip_once: true,
             sb_markers: true,
+            sb_marker_hidden: Vec::new(),
+            sb_min_segment_ms: 5000,
+            sb_excluded_channels: Vec::new(),
+            sb_alt_server: false,
+            sb_paid_notice: false,
             dearrow_titles: false,
             dearrow_thumbnails: false,
+            dearrow_fallback: "default".into(),
             return_dislikes: true,
             hide_shorts_home: false,
             hide_shorts_subscriptions: false,

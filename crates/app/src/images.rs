@@ -10,6 +10,31 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Condvar, Mutex};
 
 const WORKERS: usize = 3;
+
+/// The picture for a video DeArrow has no thumbnail for: 0 YouTube's default, 1..3 its frame
+/// from the start / middle / end (set from the settings every frame).
+static DEARROW_FALLBACK: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn set_dearrow_fallback(frame: yt_core::ext::dearrow::FallbackFrame) {
+    use yt_core::ext::dearrow::FallbackFrame as F;
+    let v = match frame {
+        F::Default => 0,
+        F::Start => 1,
+        F::Middle => 2,
+        F::End => 3,
+    };
+    DEARROW_FALLBACK.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn dearrow_fallback() -> yt_core::ext::dearrow::FallbackFrame {
+    use yt_core::ext::dearrow::FallbackFrame as F;
+    match DEARROW_FALLBACK.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => F::Start,
+        2 => F::Middle,
+        3 => F::End,
+        _ => F::Default,
+    }
+}
 /// Thumbnails are scaled down to at most this width before upload (YouTube serves 640x360+).
 const MAX_W: u32 = 480;
 
@@ -104,7 +129,7 @@ fn fetch(http: &reqwest::blocking::Client, url: &str) -> Result<Decoded, PosterE
         // DeArrow renders crowd thumbnails on demand and often has none yet (204 / 404 / an
         // empty body): fall back to the video's own thumbnail instead of a blank card.
         Err(e) if url.contains("dearrow-thumb") => match url.split("videoID=").nth(1).map(|r| r.split('&').next().unwrap_or(r)) {
-            Some(id) if !id.is_empty() => fetch_one(http, &format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg")),
+            Some(id) if !id.is_empty() => fetch_one(http, &dearrow_fallback().url(id)),
             _ => Err(e),
         },
         Err(e) => Err(e),

@@ -30,6 +30,8 @@ pub enum SettingsPage {
     About,
     /// The blocked channels (OK unblocks one).
     Blocked,
+    /// SponsorBlock's seek-bar markers, per category.
+    Markers,
 }
 
 /// What a navigation entry shows.
@@ -305,8 +307,16 @@ pub struct AppRig {
     next_req: u32,
     pub player: Player,
     sb: yt_core::ext::sponsorblock::SkipTracker,
-    /// A segment the user may skip with OK ("Ask" action): (end_ms, label).
-    pub sb_offer: Option<(u64, String)>,
+    /// A jump the user may take with OK ("Ask" action): (target ms, label, offered until ms).
+    pub sb_offer: Option<(u64, String, u64)>,
+    /// The video whose highlight was handled.
+    highlight_for: String,
+    /// The video the paid-promotion notice was shown for.
+    paid_noticed: String,
+    /// The player's extras as fetched (the view's copy shows only the wanted markers), and the
+    /// view's copy with what it was made from.
+    raw_extras: Arc<crate::player::Extras>,
+    shown_extras: Option<(Arc<crate::player::Extras>, (Vec<String>, bool, bool, u64), Arc<crate::player::Extras>)>,
     /// Start position for the next Play of this video (phone cast, resume).
     pub pending_start: Option<(String, u64)>,
     /// Default speed to apply once the new video is playing.
@@ -345,6 +355,10 @@ impl AppRig {
             player: Player::new(),
             sb: Default::default(),
             sb_offer: None,
+            highlight_for: String::new(),
+            paid_noticed: String::new(),
+            raw_extras: Default::default(),
+            shown_extras: None,
             pending_start: None,
             pending_rate: None,
             audio_choice: None,
@@ -441,6 +455,15 @@ impl AppRig {
             self.player.set_video_rect(if r == [0, 0, 1920, 1080] { None } else { Some(r) });
         }
         self.player_view = self.player.status.lock().unwrap().clone();
+        self.raw_extras = self.player_view.extras.clone();
+        self.player_view.extras = self.shown_extras();
+        yt_core::ext::sponsorblock::set_alt_server(self.store.settings.sb_alt_server);
+        crate::images::set_dearrow_fallback(crate::settings::thumbnail_frame(&self.store.settings.dearrow_fallback));
+        let v = &self.player_view;
+        if self.store.settings.sb_paid_notice && v.paid_promotion && v.phase == Phase::Playing && self.paid_noticed != v.video_id {
+            self.paid_noticed = v.video_id.clone();
+            self.store.toast(crate::i18n::tr("This video contains paid promotion"), now_ms);
+        }
         self.channel_subtitles();
         let subs = self.store.settings.subtitles;
         let language_changed = self.store.settings.subtitle_language != self.subtitle_language_was;
@@ -575,14 +598,39 @@ impl AppRig {
     /// SponsorBlock: act on the segment playback just entered, per the category's setting.
     fn sponsorblock(&mut self, now_ms: u32) {
         use crate::settings::SbAction;
+        use yt_core::ext::sponsorblock::Category;
         if self.player_view.phase != Phase::Playing || !self.store.settings.sponsorblock {
             return;
         }
-        let ex = self.player_view.extras.clone();
+        if self.sb_excluded() {
+            self.sb_offer = None;
+            return;
+        }
+        let ex = self.raw_extras.clone();
         let pos = self.player_view.position_ms;
-        if let Some((end, _)) = &self.sb_offer {
-            if pos >= *end {
+        if let Some((_, _, until)) = &self.sb_offer {
+            if pos >= *until {
                 self.sb_offer = None;
+            }
+        }
+        // The highlight, once per video when it starts: jump there, or offer the jump.
+        if self.highlight_for != self.player_view.video_id {
+            if let Some(h) = ex.segments.iter().find(|s| s.category == Category::PoiHighlight).cloned() {
+                self.highlight_for = self.player_view.video_id.clone();
+                if pos + 1000 < h.start_ms {
+                    match sb_action(&self.store.settings, &h.category) {
+                        SbAction::Off => {}
+                        SbAction::Skip => self.player.seek_to(h.start_ms),
+                        SbAction::SkipWithToast => {
+                            self.player.seek_to(h.start_ms);
+                            self.store.toast(crate::i18n::tr("Jumped to the highlight"), now_ms);
+                        }
+                        SbAction::Ask => {
+                            self.store.toast(crate::i18n::tr("Highlight: press OK to jump there"), now_ms);
+                            self.sb_offer = Some((h.start_ms, "Highlight".into(), (pos + 15_000).min(h.start_ms)));
+                        }
+                    }
+                }
             }
         }
         let Some(seg) = self.sb.check(&ex.segments, pos).cloned() else { return };
@@ -596,7 +644,7 @@ impl AppRig {
             }
             SbAction::Ask => {
                 self.store.toast(format!("{label} \u{2014} press OK to skip"), now_ms);
-                self.sb_offer = Some((seg.end_ms, label));
+                self.sb_offer = Some((seg.end_ms, label, seg.end_ms));
             }
         }
         self.sb.mark_done(&seg);
@@ -604,8 +652,10 @@ impl AppRig {
 
     /// DeArrow: replace clickbait titles / thumbnails of newly loaded cards (when enabled).
     fn dearrow(&mut self, addr: Addr, key: &FeedKey, range: std::ops::Range<usize>) {
+        use yt_core::ext::dearrow::FallbackFrame;
         let s = &self.store.settings;
         let (titles, thumbs) = (s.dearrow_titles, s.dearrow_thumbnails);
+        let fallback = crate::settings::thumbnail_frame(&s.dearrow_fallback);
         if !titles && !thumbs {
             return;
         }
@@ -621,9 +671,10 @@ impl AppRig {
         let _ = plx_base::task::spawn("dearrow", move || {
             let mut out = Vec::new();
             for id in ids {
-                let Ok(Some(b)) = crate::player::ext().branding(&id) else { continue };
-                let title = if titles { b.title() } else { None };
-                let thumb = if thumbs { b.thumbnail_url(&id) } else { None };
+                let b = crate::player::ext().branding(&id).ok().flatten();
+                let title = if titles { b.as_ref().and_then(|b| b.title()) } else { None };
+                // No crowd thumbnail: YouTube's frame, if one is chosen.
+                let thumb = if thumbs { b.as_ref().and_then(|b| b.thumbnail_url(&id)).or_else(|| (fallback != FallbackFrame::Default).then(|| fallback.url(&id))) } else { None };
                 if title.is_some() || thumb.is_some() {
                     out.push((id, title, thumb));
                 }
@@ -633,6 +684,39 @@ impl AppRig {
                 plx_machine::present::wake_from_worker();
             }
         });
+    }
+
+    /// SponsorBlock is off for the playing video's channel.
+    fn sb_excluded(&self) -> bool {
+        let a = &self.player_view.author;
+        !a.is_empty() && self.store.settings.sb_excluded_channels.iter().any(|c| c == a)
+    }
+
+    /// The extras the screens see: SponsorBlock segments only of the categories whose markers
+    /// are shown (none for an excluded channel), the highlight point as a short mark.
+    fn shown_extras(&mut self) -> Arc<crate::player::Extras> {
+        let s = &self.store.settings;
+        let dur = self.player_view.duration_ms;
+        let key = (s.sb_marker_hidden.clone(), self.sb_excluded(), s.sponsorblock, dur / 1000);
+        if let Some((src, k, out)) = &self.shown_extras {
+            if Arc::ptr_eq(src, &self.raw_extras) && *k == key {
+                return out.clone();
+            }
+        }
+        let mut ex = (*self.raw_extras).clone();
+        if key.1 || !key.2 {
+            ex.segments.clear();
+        } else {
+            use yt_core::ext::sponsorblock::{ActionType, Category};
+            ex.segments.retain(|seg| !key.0.iter().any(|c| c == seg.category.as_str()));
+            for seg in ex.segments.iter_mut().filter(|seg| seg.category == Category::PoiHighlight && !seg.is_ranged()) {
+                seg.action_type = ActionType::Skip;
+                seg.end_ms = seg.start_ms + (dur / 300).max(1000);
+            }
+        }
+        let out = Arc::new(ex);
+        self.shown_extras = Some((self.raw_extras.clone(), key, out.clone()));
+        out
     }
 
     /// Whether the playback of `video_id` goes to the watch history (and saves its position).
@@ -714,8 +798,8 @@ impl AppRig {
     /// OK during an "Ask" segment skips it. Returns true when it did.
     pub fn take_sb_offer(&mut self) -> bool {
         match self.sb_offer.take() {
-            Some((end, _)) => {
-                self.player.seek_to(end);
+            Some((to, _, _)) => {
+                self.player.seek_to(to);
                 true
             }
             None => false,
@@ -744,6 +828,7 @@ pub fn sb_action(s: &Settings, c: &yt_core::ext::sponsorblock::Category) -> crat
         C::MusicOfftopic => s.sb_music_offtopic,
         C::Preview => s.sb_preview,
         C::Filler => s.sb_filler,
+        C::PoiHighlight => s.sb_highlight,
         _ => SbAction::Off,
     }
 }
@@ -941,9 +1026,10 @@ impl Rig<YtHost> for AppRig {
                     language: s.subtitle_language.clone(),
                     auto_translate: s.subtitle_auto_translate,
                     sponsorblock: s.sponsorblock,
+                    // Categories acted on, and those whose markers are shown.
                     categories: yt_core::ext::sponsorblock::Category::ALL
                         .iter()
-                        .filter(|c| sb_action(s, c) != crate::settings::SbAction::Off)
+                        .filter(|c| sb_action(s, c) != crate::settings::SbAction::Off || (s.sb_markers && !s.sb_marker_hidden.iter().any(|h| h == c.as_str())))
                         .cloned()
                         .collect(),
                     dislikes: s.return_dislikes,
@@ -951,7 +1037,9 @@ impl Rig<YtHost> for AppRig {
                     history: self.history_for(&video_id),
                 };
                 self.sb = yt_core::ext::sponsorblock::SkipTracker::new(!s.sb_skip_once);
+                self.sb.min_duration_ms = s.sb_min_segment_ms as u64;
                 self.sb_offer = None;
+                self.highlight_for.clear();
                 let memory = yt_core::memory::PlayerMemory::load();
                 let speed = match s.remember_speed {
                     crate::settings::RememberSpeed::PerChannel => self.store.card_channel(&video_id).and_then(|ch| s.speed_by_channel.get(&ch).copied()),

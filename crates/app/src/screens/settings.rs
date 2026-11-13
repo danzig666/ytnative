@@ -103,6 +103,31 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
     match page {
         SettingsPage::Blocked if s.blocked_channels.is_empty() => vec![Info("No blocked channels", |_| String::new())],
         SettingsPage::Blocked => (0..s.blocked_channels.len()).map(Blocked).collect(),
+        SettingsPage::Markers => {
+            macro_rules! marker {
+                ($label:expr, $cat:expr) => {
+                    Opt($label, |s| on_off(!s.sb_marker_hidden.iter().any(|c| c == $cat)), |s, _| {
+                        if let Some(i) = s.sb_marker_hidden.iter().position(|c| c == $cat) {
+                            s.sb_marker_hidden.remove(i);
+                        } else {
+                            s.sb_marker_hidden.push($cat.to_string());
+                        }
+                    })
+                };
+            }
+            vec![
+                Opt("Segment markers on the seek bar", |s| on_off(s.sb_markers), |s, _| s.sb_markers = !s.sb_markers),
+                marker!("Sponsor", "sponsor"),
+                marker!("Self-promotion", "selfpromo"),
+                marker!("Interaction reminder", "interaction"),
+                marker!("Intro", "intro"),
+                marker!("Outro / endcards", "outro"),
+                marker!("Preview / recap", "preview"),
+                marker!("Non-music section", "music_offtopic"),
+                marker!("Filler", "filler"),
+                marker!("Highlight", "poi_highlight"),
+            ]
+        }
         SettingsPage::Root => vec![
             Page("Playback", SettingsPage::Playback),
             Page("Subtitles", SettingsPage::Subtitles),
@@ -193,10 +218,20 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
             Opt("Preview / recap", |s| sb(s.sb_preview), |s, d| s.sb_preview = cycle(SB, s.sb_preview, d)),
             Opt("Non-music section", |s| sb(s.sb_music_offtopic), |s, d| s.sb_music_offtopic = cycle(SB, s.sb_music_offtopic, d)),
             Opt("Filler", |s| sb(s.sb_filler), |s, d| s.sb_filler = cycle(SB, s.sb_filler, d)),
+            Opt("Highlight", |s| sb(s.sb_highlight), |s, d| s.sb_highlight = cycle(SB, s.sb_highlight, d)),
             Opt("Skip each segment only once", |s| on_off(s.sb_skip_once), |s, _| s.sb_skip_once = !s.sb_skip_once),
-            Opt("Segment markers on the seek bar", |s| on_off(s.sb_markers), |s, _| s.sb_markers = !s.sb_markers),
+            Opt("Ignore short segments", |s| crate::settings::ms_label(s.sb_min_segment_ms), |s, d| {
+                let l: Vec<u32> = (0..=40).map(|i| i * 500).collect();
+                s.sb_min_segment_ms = cycle(&l, s.sb_min_segment_ms, d);
+            }),
+            Page("Segment markers", SettingsPage::Markers),
+            Opt("Use the alternative server", |s| on_off(s.sb_alt_server), |s, _| s.sb_alt_server = !s.sb_alt_server),
+            Opt("Paid promotion notice", |s| on_off(s.sb_paid_notice), |s, _| s.sb_paid_notice = !s.sb_paid_notice),
             Opt("DeArrow titles", |s| on_off(s.dearrow_titles), |s, _| s.dearrow_titles = !s.dearrow_titles),
             Opt("DeArrow thumbnails", |s| on_off(s.dearrow_thumbnails), |s, _| s.dearrow_thumbnails = !s.dearrow_thumbnails),
+            Opt("Fallback thumbnail when DeArrow has none", |s| crate::settings::thumbnail_frame_label(&s.dearrow_fallback).into(), |s, d| {
+                cycle_str(crate::settings::THUMBNAIL_FRAMES, &mut s.dearrow_fallback, d)
+            }),
             Opt("Return YouTube Dislike", |s| on_off(s.return_dislikes), |s, _| s.return_dislikes = !s.return_dislikes),
         ],
         SettingsPage::Content => vec![
@@ -304,7 +339,18 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
                     })
                 };
             }
-            v.extend([card_item!(0), card_item!(1), card_item!(2), card_item!(3), card_item!(4), card_item!(5), card_item!(6), card_item!(7), card_item!(8)]);
+            v.extend([
+                card_item!(0),
+                card_item!(1),
+                card_item!(2),
+                card_item!(3),
+                card_item!(4),
+                card_item!(5),
+                card_item!(6),
+                card_item!(7),
+                card_item!(8),
+                card_item!(9),
+            ]);
             v
         }
         SettingsPage::Remote => vec![
@@ -356,6 +402,7 @@ fn title(page: SettingsPage) -> &'static str {
         SettingsPage::Remote => "Remote control",
         SettingsPage::About => "Account & about",
         SettingsPage::Blocked => "Blocked channels",
+        SettingsPage::Markers => "Segment markers",
     }
 }
 

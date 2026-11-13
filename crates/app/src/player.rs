@@ -117,6 +117,8 @@ pub struct Status {
     /// Engine B: the pipeline's HDR type ("" / "none" when SDR).
     pub hdr: String,
     pub fps: u32,
+    /// YouTube marks the video as containing paid promotion.
+    pub paid_promotion: bool,
 }
 
 #[cfg(not(windows))]
@@ -454,6 +456,7 @@ fn run(
         s.title = resolved.title.clone();
         s.author = resolved.author.clone();
         s.duration_ms = resolved.length_secs * 1000;
+        s.paid_promotion = resolved.raw.get("paidContentOverlay").is_some();
         // Where it will start, so a BACK before the first position event saves this, not 0.
         s.position_ms = start_ms.unwrap_or(0);
         s.phase = Phase::Loading;

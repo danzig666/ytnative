@@ -48,6 +48,8 @@ enum Act {
     SubFont,
     SubBold,
     RepeatMode,
+    /// SponsorBlock on / off for a channel (by name).
+    SbChannel(String),
     Close,
 }
 
@@ -81,7 +83,7 @@ const SUB_STYLES: &[&str] = &["outline", "shadow", "box"];
 const SUB_FONTS: &[&str] = &["default", "sans", "serif", "mono", "roboto"];
 
 /// Card-menu item kinds, in the default order, with their settings labels.
-pub const CARD_ITEMS: [(&str, &str); 9] = [
+pub const CARD_ITEMS: [(&str, &str); 10] = [
     ("play", "Card menu: Play"),
     ("open", "Card menu: Open channel / playlist"),
     ("groups", "Card menu: Channel groups"),
@@ -91,6 +93,7 @@ pub const CARD_ITEMS: [(&str, &str); 9] = [
     ("youtube", "Card menu: YouTube's items"),
     ("more_from", "Card menu: More from channel"),
     ("block", "Card menu: Block channel"),
+    ("sponsorblock", "Card menu: SponsorBlock on this channel"),
 ];
 
 impl MenuScreen {
@@ -156,6 +159,9 @@ impl MenuScreen {
             if let Some(ch) = card.item.channel.as_ref().filter(|_| !cx.views.store.settings.child_mode) {
                 tagged.push(("more_from", format!("More from {ch}"), Act::SearchFor(ch.clone())));
                 tagged.push(("block", format!("Block {ch}"), Act::BlockChannel(ch.clone())));
+                if cx.views.store.settings.sponsorblock && card.video_id().is_some() {
+                    tagged.push(("sponsorblock", "SponsorBlock on this channel".into(), Act::SbChannel(ch.clone())));
+                }
             }
         }
         let s = &cx.views.store.settings;
@@ -242,6 +248,11 @@ impl MenuScreen {
             ("Subtitle font".to_string(), Act::SubFont),
             ("Bold subtitles".to_string(), Act::SubBold),
             ("When the video ends".to_string(), Act::RepeatMode),
+        ]);
+        if cx.views.store.settings.sponsorblock && !st.author.is_empty() {
+            acts.push(("SponsorBlock on this channel".to_string(), Act::SbChannel(st.author.clone())));
+        }
+        acts.extend(vec![
             ("Close".to_string(), Act::Close),
         ]);
         Self::make(entry, "Player options".into(), acts)
@@ -323,6 +334,7 @@ impl MenuScreen {
             Act::SubFont => format!("{}  \u{203A}", crate::i18n::tr(&s.subtitle_font)),
             Act::SubStyle => format!("{}  \u{203A}", crate::i18n::tr(&s.subtitle_style)),
             Act::RepeatMode => format!("{}  \u{203A}", crate::i18n::tr(s.playback_mode.label())),
+            Act::SbChannel(ch) => crate::i18n::tr(if s.sb_excluded_channels.contains(ch) { "Off" } else { "On" }).to_string(),
             _ => return None,
         })
     }
@@ -462,6 +474,16 @@ impl MenuScreen {
                 let i = all.iter().position(|r| *r == s.playback_mode).unwrap_or(0) as i32;
                 s.playback_mode = all[((i + dir).rem_euclid(all.len() as i32)) as usize];
             })))),
+            Act::SbChannel(ch) => {
+                let ch = ch.clone();
+                fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| {
+                    if let Some(i) = s.sb_excluded_channels.iter().position(|c| *c == ch) {
+                        s.sb_excluded_channels.remove(i);
+                    } else {
+                        s.sb_excluded_channels.push(ch);
+                    }
+                }))));
+            }
             Act::User(a) => {
                 fx.push(Fx::App(YtFx::Act(a.clone())));
                 fx.push(Fx::Nav(NavOp::Pop));
