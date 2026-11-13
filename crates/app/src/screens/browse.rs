@@ -86,6 +86,26 @@ impl StackPage<YtHost> for Rows {
     }
 }
 
+/// The sidebar icon of a section (SmartTube's set, drawn as line icons).
+fn section_icon(s: Section) -> ui::icon::Kind {
+    use ui::icon::Kind as K;
+    match s {
+        Section::Home => K::Home,
+        Section::Subscriptions => K::Subs,
+        Section::Channels => K::Users,
+        Section::History => K::History,
+        Section::Library => K::Library,
+        Section::Music => K::Music,
+        Section::Gaming => K::Gamepad,
+        Section::News => K::News,
+        Section::Podcasts => K::Mic,
+        Section::Live => K::Live,
+        Section::Movies => K::Film,
+        Section::Sports => K::Trophy,
+        Section::Trending => K::Flame,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum NavItem {
     Section(Section),
@@ -558,7 +578,7 @@ impl Screen<YtHost> for BrowseScreen {
         ui::header_band(p, Rect::new(0.0, 0.0, 1920.0, 118.0));
         ui::text(p, self.section.title(), LEFT, 30.0, 44, ui::WHITE, ui::ALIGN_LEFT, true);
         if cx.views.store.settings.clock_on_pages {
-            ui::text(p, &common::clock(&cx.views), 1824.0, 34.0, 36, ui::WHITE, ui::ALIGN_RIGHT, false);
+            common::clock_block(p, cx, 1824.0, 22.0);
         }
         // The sidebar: hidden; slides in over the content while it has focus (Left from the first
         // tile) or the pointer rests on the screen's left edge, and out again after.
@@ -585,17 +605,21 @@ impl Screen<YtHost> for BrowseScreen {
         let items = nav_items(cx);
         let rows: Vec<Row> = items
             .iter()
-            .map(|i| match i {
-                NavItem::Section(s) => Row::new(s.title()).active(*s == self.section),
-                NavItem::Search => Row::new(format!("\u{1F50D}  {}", crate::i18n::tr("Search"))),
-                NavItem::Pinned(t, ..) => Row::new(format!("\u{2605} {}", ui::ellipsize(t, 16))),
-                NavItem::Group(_, t) => Row::new(format!("\u{2022} {}", ui::ellipsize(t, 16))),
-                NavItem::Settings => Row::new("Settings"),
-                NavItem::Account => Row::new(match (&cx.views.store.account, cx.views.store.signed_in) {
-                    (Some(a), true) if !a.trim().is_empty() => ui::ellipsize(a, 18),
-                    (_, true) => "Account".into(),
-                    _ => "Sign in".into(),
-                }),
+            .map(|i| {
+                use ui::icon::Kind as K;
+                match i {
+                    NavItem::Section(s) => Row::new(s.title()).active(*s == self.section).icon(section_icon(*s)),
+                    NavItem::Search => Row::new("Search").icon(K::Search),
+                    NavItem::Pinned(t, ..) => Row::new(ui::ellipsize(t, 16)).icon(K::Star),
+                    NavItem::Group(_, t) => Row::new(ui::ellipsize(t, 16)).icon(K::Folder),
+                    NavItem::Settings => Row::new("Settings").icon(K::Gear),
+                    NavItem::Account => Row::new(match (&cx.views.store.account, cx.views.store.signed_in) {
+                        (Some(a), true) if !a.trim().is_empty() => ui::ellipsize(a, 16),
+                        (_, true) => "Account".into(),
+                        _ => "Sign in".into(),
+                    })
+                    .icon(K::User),
+                }
             })
             .collect();
         self.nav.draw(p, &rows, self.nav.focused(cx, items.len()));

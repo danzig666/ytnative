@@ -45,8 +45,18 @@ pub fn set_card_cols(n: u8) {
 
 // Off until the first frame applies the setting (which also sets the row room).
 static TITLES_UNDER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// Room every row keeps under its cards for the title (two lines) and the channel line.
-const UNDER_EXTRA: f32 = 84.0;
+/// Room every row keeps under its cards for the info panel (title on two lines, channel line).
+const UNDER_EXTRA: f32 = 128.0;
+/// The info panel under a card: gap above it, height, inner padding, corner radius.
+const PANEL_GAP: f32 = 6.0;
+const PANEL_H: f32 = 114.0;
+const PANEL_PAD: f32 = 16.0;
+const PANEL_RAD: f32 = 14.0;
+/// Panel colours: unfocused (a lifted dark) and focused (light, dark text: SmartTube's focus).
+const PANEL_IDLE: [f32; 4] = [1.0, 1.0, 1.0, 0.07];
+const PANEL_FOCUS: [f32; 4] = [0.94, 0.94, 0.96, 1.0];
+const PANEL_FOCUS_INK: [f32; 4] = [0.09, 0.09, 0.11, 1.0];
+const PANEL_FOCUS_DIM: [f32; 4] = [0.09, 0.09, 0.11, 0.66];
 
 /// SmartTube-style titles under every thumbnail (on) or plx's caption under the focused card only.
 pub fn titles_under() -> bool {
@@ -116,18 +126,49 @@ pub fn draw_focused_caption(p: Painter, m: &dyn plx_machine::machine::Measure, _
         return;
     }
     const SIZE: i32 = 24;
+    // The focused card's panel turns light (SmartTube's focus): it follows the card's pop.
+    let panel = Rect::new(r.x, r.y + r.h + PANEL_GAP, r.w, PANEL_H);
+    fill(p, panel, PANEL_RAD, PANEL_FOCUS);
+    let (ix, iy, w) = (panel.x + PANEL_PAD, panel.y + 12.0, panel.w - 2.0 * PANEL_PAD);
     let tw = CString::new(title.as_str()).map_or(0.0, |c| m.width(&c, SIZE, true));
-    let (ix, iy, w) = (r.x, r.y + r.h + 12.0, r.w);
     if tw <= w + 0.5 {
-        text(p, &title, ix, iy, SIZE, WHITE, ALIGN_LEFT, true);
+        text(p, &title, ix, iy, SIZE, PANEL_FOCUS_INK, ALIGN_LEFT, true);
+    } else if let (l1, Some(l2), _) = caption_lines(m, &title, "", w).clone() {
+        // Two lines hold it: show them; only a title longer than that glides on one line.
+        if CString::new(format!("{l1} {l2}")).map_or(0.0, |c| m.width(&c, SIZE, true)) <= 2.0 * w && !l2.ends_with('\u{2026}') {
+            text(p, &l1, ix, iy, SIZE, PANEL_FOCUS_INK, ALIGN_LEFT, true);
+            text(p, &l2, ix, iy + 31.0, SIZE, PANEL_FOCUS_INK, ALIGN_LEFT, true);
+            if !detail.is_empty() {
+                let d = m.fit_line(&detail, w, 20, false).to_string_lossy().into_owned();
+                text(p, &d, ix, iy + 67.0, 20, PANEL_FOCUS_DIM, ALIGN_LEFT, false);
+            }
+            return;
+        }
+        marquee(p, m, &title, ix, iy, w, SIZE);
     } else {
+        marquee(p, m, &title, ix, iy, w, SIZE);
+    }
+    if !detail.is_empty() {
+        // Under a one-line title the channel line may take two lines.
+        let (d1, d2) = wrap2(m, &detail, w, 20);
+        text(p, &d1, ix, iy + 36.0, 20, PANEL_FOCUS_DIM, ALIGN_LEFT, false);
+        if let Some(d2) = d2 {
+            text(p, &d2, ix, iy + 62.0, 20, PANEL_FOCUS_DIM, ALIGN_LEFT, false);
+        }
+    }
+}
+
+/// A title that does not fit, gliding on one line (hold, glide to the end, hold, start over).
+fn marquee(p: Painter, m: &dyn plx_machine::machine::Measure, title: &str, ix: f32, iy: f32, w: f32, size: i32) {
+    let tw = CString::new(title).map_or(0.0, |c| m.width(&c, size, true));
+    {
         const HOLD: f32 = 1.5;
         const SPEED: f32 = 70.0;
         let dist = tw - w + 24.0;
         let t = MARQUEE.with(|mq| {
             let mut mq = mq.borrow_mut();
             if mq.0 != title || mq.1.is_none() {
-                *mq = (title.clone(), Some(std::time::Instant::now()));
+                *mq = (title.to_string(), Some(std::time::Instant::now()));
             }
             mq.1.unwrap().elapsed().as_secs_f32()
         });
@@ -135,13 +176,9 @@ pub fn draw_focused_caption(p: Painter, m: &dyn plx_machine::machine::Measure, _
         let off = ((t % cycle - HOLD) * SPEED).clamp(0.0, dist);
         {
             let _scope = plx_ui::screen::ClipScope::open_in(p, Rect::new(ix, iy - 4.0, w, 40.0));
-            text(p, &title, ix - off, iy, SIZE, WHITE, ALIGN_LEFT, true);
+            text(p, title, ix - off, iy, size, PANEL_FOCUS_INK, ALIGN_LEFT, true);
         }
         animating();
-    }
-    if !detail.is_empty() {
-        let d = m.fit_line(&detail, w, 20, false).to_string_lossy().into_owned();
-        text(p, &d, ix, iy + 33.0, 20, DIM, ALIGN_LEFT, false);
     }
 }
 
@@ -246,17 +283,22 @@ pub fn wheel_scrolls_page(screen: Option<&str>) -> bool {
 
 static BLACK_BG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// The app's ground: a dark slate (SmartTube draws its lists on black; a hair of lift keeps
+/// cards and panels readable on LCDs too).
+pub const GROUND: (f32, f32, f32) = (0.063, 0.066, 0.078);
+
 pub fn set_black_background(on: bool) {
     BLACK_BG.store(on, std::sync::atomic::Ordering::Relaxed);
     plx_gfx::gfx::tokens::set_clear_black(on);
+    plx_gfx::gfx::tokens::set_clear_app(GROUND);
 }
 
-/// The page background: plx's ground, or true black (OLED setting).
+/// The page background: the app's ground, or true black (OLED setting).
 pub fn bg_rgb() -> (f32, f32, f32) {
     if BLACK_BG.load(std::sync::atomic::Ordering::Relaxed) {
         (0.0, 0.0, 0.0)
     } else {
-        plx_ui::theme::CLEAR_RGB
+        GROUND
     }
 }
 
@@ -400,19 +442,19 @@ impl CardSource<YtHost> for CardsSrc<'_> {
                 FOCUSED_CAPTION.with(|f| *f.borrow_mut() = Some((screen, c.title.clone(), c.detail.clone())));
                 return self.badge(p, i, tile);
             }
-            let y = r.y + r.h + 12.0;
-            let ink = if tile.focused { WHITE } else { [1.0, 1.0, 1.0, 0.86] };
+            let panel = Rect::new(r.x, r.y + r.h + PANEL_GAP, r.w, PANEL_H);
+            fill(p, panel, PANEL_RAD, PANEL_IDLE);
+            let (x, y, w) = (panel.x + PANEL_PAD, panel.y + 12.0, panel.w - 2.0 * PANEL_PAD);
             // Wrapping measures a title word by word; done once per (card, width), not per frame
             // (the page is drawn several times a frame, and a scroll draws every frame).
-            let (l1, l2, d) = caption_lines(m, &c.title, &c.detail, r.w);
-            text(p, &l1, r.x, y, 24, ink, ALIGN_LEFT, tile.focused);
-            let mut dy = 31.0;
+            let (l1, l2, d) = caption_lines(m, &c.title, &c.detail, w);
+            let ink = [1.0, 1.0, 1.0, 0.92];
+            text(p, &l1, x, y, 24, ink, ALIGN_LEFT, true);
             if let Some(l2) = &l2 {
-                text(p, l2, r.x, y + dy, 24, ink, ALIGN_LEFT, tile.focused);
-                dy += 31.0;
+                text(p, l2, x, y + 31.0, 24, ink, ALIGN_LEFT, true);
             }
             if !d.is_empty() {
-                text(p, &d, r.x, y + dy + 2.0, 20, DIM, ALIGN_LEFT, false);
+                text(p, &d, x, y + 67.0, 20, DIM, ALIGN_LEFT, false);
             }
         }
         self.badge(p, i, tile);
@@ -457,6 +499,8 @@ pub struct Row {
     pub value: Option<String>,
     /// Marks the active choice (current section, selected option).
     pub active: bool,
+    /// An icon before the label (the sidebar).
+    pub icon: Option<icon::Kind>,
 }
 
 impl Row {
@@ -469,6 +513,10 @@ impl Row {
     }
     pub fn active(mut self, on: bool) -> Row {
         self.active = on;
+        self
+    }
+    pub fn icon(mut self, k: icon::Kind) -> Row {
+        self.icon = Some(k);
         self
     }
 }
@@ -565,7 +613,13 @@ impl VList {
             }
             let ty = r.y + (r.h - self.text_size as f32 * 1.3) / 2.0;
             let col = if focused || row.active { WHITE } else { DIM };
-            text(p, &row.label, r.x + 28.0, ty, self.text_size, col, ALIGN_LEFT, focused || row.active);
+            let mut lx = r.x + 28.0;
+            if let Some(k) = row.icon {
+                let s = self.text_size as f32 * 1.15;
+                icon::draw(p, k, Rect::new(lx, r.y + (r.h - s) / 2.0, s, s), col, false);
+                lx += s + 20.0;
+            }
+            text(p, &row.label, lx, ty, self.text_size, col, ALIGN_LEFT, focused || row.active);
             if let Some(v) = &row.value {
                 text(p, v, r.x + r.w - 24.0, ty, self.text_size, if focused { WHITE } else { DIM }, ALIGN_RIGHT, false);
             }
@@ -643,7 +697,26 @@ pub mod icon {
     const NEXT: &str = r##"<path d="M5 4l10 8-10 8z"/><path d="M19 5v14"/>"##;
     const LIST: &str = r##"<path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/>"##;
 
-    #[derive(Clone, Copy, PartialEq)]
+    const HOME: &str = r##"<path d="M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8"/><path d="M3 10a2 2 0 0 1 .709-1.528l7-5.999a2 2 0 0 1 2.582 0l7 5.999A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>"##;
+    const FLAME: &str = r##"<path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/>"##;
+    const SUBS: &str = r##"<path d="M4 7h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2z"/><path d="M6 3h12"/><path d="M10 11l5 3-5 3z"/>"##;
+    const USERS: &str = r##"<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>"##;
+    const HISTORY: &str = r##"<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/>"##;
+    const LIBRARY: &str = r##"<path d="m16 6 4 14"/><path d="M12 6v14"/><path d="M8 8v12"/><path d="M4 4v16"/>"##;
+    const MUSIC: &str = r##"<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>"##;
+    const GAMEPAD: &str = r##"<path d="M6 12h4"/><path d="M8 10v4"/><path d="M15 13h.01"/><path d="M18 11h.01"/><path d="M4 6h16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z"/>"##;
+    const NEWS: &str = r##"<path d="M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 1-2 2Zm0 0a2 2 0 0 1-2-2v-9c0-1.1.9-2 2-2h2"/><path d="M18 14h-8"/><path d="M15 18h-5"/><path d="M10 6h8v4h-8V6Z"/>"##;
+    const MIC: &str = r##"<path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/>"##;
+    const LIVE: &str = r##"<path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/><path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"/><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"/><path d="M19.1 4.9C23 8.8 23 15.1 19.1 19"/>"##;
+    const FILM: &str = r##"<path d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M7 3v18"/><path d="M3 7.5h4"/><path d="M3 12h18"/><path d="M3 16.5h4"/><path d="M17 3v18"/><path d="M17 7.5h4"/><path d="M17 16.5h4"/>"##;
+    const TROPHY: &str = r##"<path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/>"##;
+    const TRENDING: &str = r##"<path d="M22 7 13.5 15.5 8.5 10.5 2 17"/><path d="M16 7h6v6"/>"##;
+    const SEARCH: &str = r##"<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>"##;
+    const USER: &str = r##"<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>"##;
+    const STAR: &str = r##"<path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>"##;
+    const FOLDER: &str = r##"<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>"##;
+
+    #[derive(Clone, Copy, PartialEq, Debug)]
     pub enum Kind {
         ThumbUp,
         ThumbDown,
@@ -655,6 +728,24 @@ pub mod icon {
         Prev,
         Next,
         List,
+        Home,
+        Flame,
+        Subs,
+        Users,
+        History,
+        Library,
+        Music,
+        Gamepad,
+        News,
+        Mic,
+        Live,
+        Film,
+        Trophy,
+        Trending,
+        Search,
+        User,
+        Star,
+        Folder,
     }
 
     fn svg(k: Kind, filled: bool) -> &'static str {
@@ -662,7 +753,10 @@ pub mod icon {
         static S: OnceLock<Vec<String>> = OnceLock::new();
         let all = S.get_or_init(|| {
             let mut v = Vec::new();
-            for body in [THUMB_UP, THUMB_DOWN, CHAT, GEAR, PLAY, PAUSE, PREV, NEXT, LIST] {
+            for body in [
+                THUMB_UP, THUMB_DOWN, CHAT, GEAR, PLAY, PAUSE, PREV, NEXT, LIST, HOME, FLAME, SUBS, USERS, HISTORY, LIBRARY, MUSIC, GAMEPAD,
+                NEWS, MIC, LIVE, FILM, TROPHY, TRENDING, SEARCH, USER, STAR, FOLDER,
+            ] {
                 v.push(format!("{HEAD}{body}</svg>"));
                 v.push(format!("{}{body}</svg>", HEAD.replace(r##"fill="none""##, r##"fill="#ffffff""##)));
             }
@@ -678,6 +772,24 @@ pub mod icon {
             Kind::Prev => 12,
             Kind::Next => 14,
             Kind::List => 16,
+            Kind::Home => 18,
+            Kind::Flame => 20,
+            Kind::Subs => 22,
+            Kind::Users => 24,
+            Kind::History => 26,
+            Kind::Library => 28,
+            Kind::Music => 30,
+            Kind::Gamepad => 32,
+            Kind::News => 34,
+            Kind::Mic => 36,
+            Kind::Live => 38,
+            Kind::Film => 40,
+            Kind::Trophy => 42,
+            Kind::Trending => 44,
+            Kind::Search => 46,
+            Kind::User => 48,
+            Kind::Star => 50,
+            Kind::Folder => 52,
         };
         &all[i + filled as usize]
     }

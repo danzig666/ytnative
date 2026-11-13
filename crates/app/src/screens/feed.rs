@@ -205,7 +205,7 @@ impl Screen<YtHost> for FeedScreen {
         ui::header_band(p, Rect::new(0.0, 0.0, 1920.0, 150.0));
         ui::text(p, &ui::ellipsize(&self.title(cx), 70), 112.0, 64.0, 46, ui::WHITE, ui::ALIGN_LEFT, true);
         if cx.views.store.settings.clock_on_pages {
-            ui::text(p, &common::clock(&cx.views), 1824.0, 68.0, 36, ui::WHITE, ui::ALIGN_RIGHT, false);
+            common::clock_block(p, cx, 1824.0, 40.0);
         }
         if self.channel().is_some() {
             ui::stop(f, FocusKey { entry: self.entry, elem: SUB_BTN }, SUB_RECT, Rect::new(0.0, 0.0, 1920.0, 1080.0));

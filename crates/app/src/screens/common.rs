@@ -94,6 +94,29 @@ pub fn toast(p: Painter, cx: &Cx<'_, YtHost>) {
     ui::text(p, msg, 960.0, r.y + 19.0, 28, ui::WHITE, ui::ALIGN_CENTER, false);
 }
 
+/// The time with the date under it, right-aligned at `right` (SmartTube's corner clock).
+pub fn clock_block(p: Painter, cx: &Cx<'_, YtHost>, right: f32, top: f32) {
+    ui::text(p, &clock(&cx.views), right, top, 40, ui::WHITE, ui::ALIGN_RIGHT, true);
+    ui::text(p, &date_text(), right, top + 50.0, 22, ui::DIM, ui::ALIGN_RIGHT, false);
+}
+
+/// Today's date written out in the interface language ("Friday, 13 November"; no abbreviations).
+pub fn date_text() -> String {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;
+    let days = (secs + local_offset_secs()).div_euclid(86_400);
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as usize; // 1..=12
+    let weekday = (days + 4).rem_euclid(7) as usize; // 0 = Sunday
+    crate::i18n::date_words(weekday, day as u32, month)
+}
+
 /// Wall-clock "HH:MM" (local time is the TV's; UTC fallback).
 pub fn clock(views: &Views<'_>) -> String {
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;

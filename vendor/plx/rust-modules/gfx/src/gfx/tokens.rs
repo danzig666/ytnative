@@ -53,9 +53,25 @@ pub fn set_clear_black(on: bool) {
     CLEAR_BLACK.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// ytnative: the app's own ground (bits of three f32), used instead of [`CLEAR_RGB`] when set.
+static CLEAR_APP: [std::sync::atomic::AtomicU32; 3] =
+    [std::sync::atomic::AtomicU32::new(0), std::sync::atomic::AtomicU32::new(0), std::sync::atomic::AtomicU32::new(0)];
+static CLEAR_APP_SET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_clear_app(rgb: (f32, f32, f32)) {
+    use std::sync::atomic::Ordering::Relaxed;
+    CLEAR_APP[0].store(rgb.0.to_bits(), Relaxed);
+    CLEAR_APP[1].store(rgb.1.to_bits(), Relaxed);
+    CLEAR_APP[2].store(rgb.2.to_bits(), Relaxed);
+    CLEAR_APP_SET.store(true, Relaxed);
+}
+
 pub fn clear_rgb() -> (f32, f32, f32) {
-    if CLEAR_BLACK.load(std::sync::atomic::Ordering::Relaxed) {
+    use std::sync::atomic::Ordering::Relaxed;
+    if CLEAR_BLACK.load(Relaxed) {
         (0.0, 0.0, 0.0)
+    } else if CLEAR_APP_SET.load(Relaxed) {
+        (f32::from_bits(CLEAR_APP[0].load(Relaxed)), f32::from_bits(CLEAR_APP[1].load(Relaxed)), f32::from_bits(CLEAR_APP[2].load(Relaxed)))
     } else {
         CLEAR_RGB
     }

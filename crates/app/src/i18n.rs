@@ -43,6 +43,52 @@ pub fn set_language(pref: &str, system: &str) {
     CURRENT.store(map, Ordering::Relaxed);
 }
 
+/// The interface language's code ("en" when English or untranslated).
+pub fn current() -> &'static str {
+    let p = CURRENT.load(Ordering::Relaxed);
+    if p.is_null() {
+        return "en";
+    }
+    tables().iter().find(|(_, m)| std::ptr::eq(*m as *const Map, p as *const Map)).map_or("en", |(k, _)| k)
+}
+
+/// A date in words in the interface language: `weekday` 0 = Sunday, `month` 1..=12.
+pub fn date_words(weekday: usize, day: u32, month: usize) -> String {
+    let (w, m) = (weekday % 7, month.clamp(1, 12) - 1);
+    match current() {
+        "hu" => {
+            const W: [&str; 7] = ["vasárnap", "hétfő", "kedd", "szerda", "csütörtök", "péntek", "szombat"];
+            const M: [&str; 12] = ["január", "február", "március", "április", "május", "június", "július", "augusztus", "szeptember", "október", "november", "december"];
+            format!("{} {day}., {}", M[m], W[w])
+        }
+        "de" => {
+            const W: [&str; 7] = ["Sonntag", "Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag"];
+            const M: [&str; 12] = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"];
+            format!("{}, {day}. {}", W[w], M[m])
+        }
+        "es" => {
+            const W: [&str; 7] = ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"];
+            const M: [&str; 12] = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
+            format!("{}, {day} de {}", W[w], M[m])
+        }
+        "fr" => {
+            const W: [&str; 7] = ["dimanche", "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi"];
+            const M: [&str; 12] = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"];
+            format!("{} {day} {}", W[w], M[m])
+        }
+        "ru" => {
+            const W: [&str; 7] = ["воскресенье", "понедельник", "вторник", "среда", "четверг", "пятница", "суббота"];
+            const M: [&str; 12] = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"];
+            format!("{}, {day} {}", W[w], M[m])
+        }
+        _ => {
+            const W: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+            const M: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+            format!("{}, {} {day}", W[w], M[m])
+        }
+    }
+}
+
 /// The translation of `s`, or `s` itself.
 pub fn tr(s: &str) -> &str {
     let p = CURRENT.load(Ordering::Relaxed);
