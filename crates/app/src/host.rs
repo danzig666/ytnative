@@ -289,6 +289,8 @@ pub struct AppRig {
     subs_global: Option<(bool, String)>,
     /// `ui_language` the translations were last switched to.
     applied_language: String,
+    /// `content_country` YouTube's requests were last switched to (None: not yet).
+    applied_country: Option<String>,
     mounter: Mount,
     pub store: Store,
     pub player_view: PlayerView,
@@ -327,6 +329,7 @@ impl AppRig {
             subs_seen: (false, String::new()),
             subs_global: None,
             applied_language: String::new(),
+            applied_country: None,
             mounter: Mount,
             store,
             player_view: PlayerView::default(),
@@ -406,6 +409,14 @@ impl AppRig {
         if self.store.settings.ui_language != self.applied_language {
             self.applied_language = self.store.settings.ui_language.clone();
             crate::i18n::set_language(&self.applied_language, plx_platform::i18n::current().format_locale());
+        }
+        if self.applied_country.as_deref() != Some(self.store.settings.content_country.as_str()) {
+            yt_core::innertube::set_content_country(&self.store.settings.content_country);
+            // Another region: the lists reload with its content.
+            if self.applied_country.is_some() {
+                self.store.feeds.clear();
+            }
+            self.applied_country = Some(self.store.settings.content_country.clone());
         }
         self.player.tick();
         // Ease the video window toward its target (comments: zoom out to the left), one placement

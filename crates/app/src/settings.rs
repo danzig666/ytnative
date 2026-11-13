@@ -130,6 +130,106 @@ pub const SPEEDS: &[f32] = &[
     3.25, 3.5, 3.75, 4.0,
 ];
 
+/// Thumbnail frame choices ("default" = YouTube's / the uploader's picture).
+pub const THUMBNAIL_FRAMES: &[&str] = &["default", "start", "middle", "end"];
+
+pub fn thumbnail_frame_label(k: &str) -> &'static str {
+    match k {
+        "start" => "From the start",
+        "middle" => "From the middle",
+        "end" => "From the end",
+        _ => "YouTube's default",
+    }
+}
+
+/// A thumbnail-frame setting as DeArrow's frame choice.
+pub fn thumbnail_frame(k: &str) -> yt_core::ext::dearrow::FallbackFrame {
+    use yt_core::ext::dearrow::FallbackFrame as F;
+    match k {
+        "start" => F::Start,
+        "middle" => F::Middle,
+        "end" => F::End,
+        _ => F::Default,
+    }
+}
+
+/// Content countries offered (region code, the country's own name); "" = automatic.
+pub const COUNTRIES: &[(&str, &str)] = &[
+    ("", "Automatic"),
+    ("US", "United States"),
+    ("GB", "United Kingdom"),
+    ("CA", "Canada"),
+    ("AU", "Australia"),
+    ("NZ", "New Zealand"),
+    ("IE", "Ireland"),
+    ("HU", "Magyarország"),
+    ("DE", "Deutschland"),
+    ("AT", "Österreich"),
+    ("CH", "Schweiz"),
+    ("FR", "France"),
+    ("BE", "Belgique"),
+    ("NL", "Nederland"),
+    ("LU", "Luxembourg"),
+    ("ES", "España"),
+    ("PT", "Portugal"),
+    ("IT", "Italia"),
+    ("PL", "Polska"),
+    ("CZ", "Česko"),
+    ("SK", "Slovensko"),
+    ("SI", "Slovenija"),
+    ("HR", "Hrvatska"),
+    ("RS", "Србија"),
+    ("BA", "Bosna i Hercegovina"),
+    ("RO", "România"),
+    ("BG", "България"),
+    ("GR", "Ελλάδα"),
+    ("TR", "Türkiye"),
+    ("UA", "Україна"),
+    ("RU", "Россия"),
+    ("SE", "Sverige"),
+    ("NO", "Norge"),
+    ("DK", "Danmark"),
+    ("FI", "Suomi"),
+    ("IS", "Ísland"),
+    ("EE", "Eesti"),
+    ("LV", "Latvija"),
+    ("LT", "Lietuva"),
+    ("IL", "ישראל"),
+    ("AE", "الإمارات"),
+    ("SA", "السعودية"),
+    ("EG", "مصر"),
+    ("IN", "भारत"),
+    ("PK", "پاکستان"),
+    ("ID", "Indonesia"),
+    ("TH", "ประเทศไทย"),
+    ("VN", "Việt Nam"),
+    ("PH", "Pilipinas"),
+    ("MY", "Malaysia"),
+    ("SG", "Singapore"),
+    ("JP", "日本"),
+    ("KR", "대한민국"),
+    ("TW", "臺灣"),
+    ("HK", "香港"),
+    ("MX", "México"),
+    ("BR", "Brasil"),
+    ("AR", "Argentina"),
+    ("CL", "Chile"),
+    ("CO", "Colombia"),
+    ("PE", "Perú"),
+    ("ZA", "South Africa"),
+    ("NG", "Nigeria"),
+    ("KE", "Kenya"),
+];
+
+/// A content country's name ("" = "Automatic", translated).
+pub fn country_name(code: &str) -> String {
+    match COUNTRIES.iter().find(|(c, _)| c.eq_ignore_ascii_case(code)) {
+        Some(("", n)) => crate::i18n::tr(n).to_string(),
+        Some((_, n)) => n.to_string(),
+        None => code.to_string(),
+    }
+}
+
 /// Index of the listed speed closest to `r`.
 pub fn speed_index(r: f32) -> usize {
     let r = if r > 0.0 { r } else { 1.0 };
@@ -255,7 +355,12 @@ pub struct Settings {
     /// "red" | "blue" | "green" | "purple" | "orange".
     pub accent: String,
     pub ui_language: String,
+    /// Region of YouTube's content (InnerTube `gl`), "" = automatic.
     pub content_country: String,
+    /// Card thumbnails: "default" (the uploader's), "start", "middle" or "end" (YouTube's frames).
+    pub thumbnail_frame: String,
+    /// Channels page sorted alphabetically (off: YouTube's order, last viewed first).
+    pub channels_alphabetical: bool,
     // Remote
     pub lounge_enabled: bool,
     /// True black background (OLED).
@@ -354,6 +459,8 @@ impl Default for Settings {
             accent: "red".into(),
             ui_language: "system".into(),
             content_country: "".into(),
+            thumbnail_frame: "default".into(),
+            channels_alphabetical: false,
             lounge_enabled: true,
             black_background: false,
             titles_under: true,

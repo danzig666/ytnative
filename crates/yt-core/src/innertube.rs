@@ -5,6 +5,19 @@ use crate::clients::ClientProfile;
 use anyhow::{bail, Result};
 use serde_json::{json, Value};
 
+static CONTENT_COUNTRY: std::sync::RwLock<String> = std::sync::RwLock::new(String::new());
+
+/// Region of the content YouTube returns (InnerTube `gl`, "HU", "DE"...); "" = the default.
+pub fn set_content_country(gl: &str) {
+    *CONTENT_COUNTRY.write().unwrap() = gl.trim().to_ascii_uppercase();
+}
+
+/// The content region set with [`set_content_country`], if any.
+pub fn content_country() -> Option<String> {
+    let g = CONTENT_COUNTRY.read().unwrap();
+    (!g.is_empty()).then(|| g.clone())
+}
+
 /// Client profiles. VISIONOS returns direct (un-ciphered, no "n" challenge, no PO token) HTTPS
 /// URLs, so no JavaScript engine is needed. TVHTML5 is the logged-in TV client.
 /// `Profile` calls with a data-driven profile from `crate::clients` (what `streams::resolve` uses).
@@ -114,6 +127,9 @@ impl Api<'_> {
     ) -> Result<Value> {
         let (ctx, name_id, version) = client.context(self.cfg);
         body["context"] = json!({ "client": ctx });
+        if let Some(gl) = content_country() {
+            body["context"]["client"]["gl"] = json!(gl);
+        }
         let mut req = self
             .http
             .post(format!("https://www.youtube.com/youtubei/v1/{endpoint}?prettyPrint=false"))

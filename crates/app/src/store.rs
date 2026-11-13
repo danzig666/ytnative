@@ -248,7 +248,7 @@ impl Store {
         let mut fresh = Vec::new();
         let channel_items: Vec<Item>;
         let groups: Vec<(String, Vec<&Item>, Option<String>)> = if *k == FeedKey::Section(Section::Channels) {
-            channel_items = page
+            let mut items: Vec<Item> = page
                 .tabs
                 .iter()
                 .filter(|t| matches!(&t.endpoint, Some(Endpoint::Browse { params: Some(_), .. })))
@@ -261,6 +261,10 @@ impl Store {
                     ..Default::default()
                 })
                 .collect();
+            if self.settings.channels_alphabetical {
+                items.sort_by_cached_key(|i| i.title.to_lowercase());
+            }
+            channel_items = items;
             vec![(String::new(), channel_items.iter().collect(), None)]
         } else {
             page.shelves.iter().map(|s| (s.title.clone(), s.items.iter().collect(), s.continuation.clone())).collect()
@@ -278,7 +282,7 @@ impl Store {
                     elem: self.next_elem,
                     title: it.title.clone(),
                     detail: it.lines.join(" \u{2022} "),
-                    thumb: it.thumbnail.clone().unwrap_or_default(),
+                    thumb: card_thumb(&self.settings, it),
                     item: it.clone(),
                 });
             }
@@ -336,7 +340,7 @@ impl Store {
                 elem: self.next_elem,
                 title: it.title.clone(),
                 detail: it.lines.join(" \u{2022} "),
-                thumb: it.thumbnail.clone().unwrap_or_default(),
+                thumb: card_thumb(&self.settings, &it),
                 item: it,
             });
         }
@@ -443,6 +447,17 @@ impl<'a> Filter<'a> {
             }
         }
         true
+    }
+}
+
+/// A card's picture: the item's thumbnail, or YouTube's frame from the start / middle / end of
+/// a video ("Thumbnail picture").
+fn card_thumb(s: &Settings, it: &Item) -> String {
+    let t = it.thumbnail.clone().unwrap_or_default();
+    if it.kind == ItemKind::Video {
+        crate::settings::thumbnail_frame(&s.thumbnail_frame).rewrite(&t)
+    } else {
+        t
     }
 }
 

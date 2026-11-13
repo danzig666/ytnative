@@ -479,7 +479,8 @@ const EMBED_CLIENT: (&str, &str, &str) = ("TVHTML5_SIMPLY_EMBEDDED_PLAYER", "85"
 
 pub fn embed_context(visitor_data: Option<&str>) -> Value {
     let (name, _, ver) = EMBED_CLIENT;
-    json!({ "client": { "clientName": name, "clientVersion": ver, "hl": "en", "gl": "US", "visitorData": visitor_data.unwrap_or_default() } })
+    let gl = crate::innertube::content_country().unwrap_or_else(|| "US".into());
+    json!({ "client": { "clientName": name, "clientVersion": ver, "hl": "en", "gl": gl, "visitorData": visitor_data.unwrap_or_default() } })
 }
 
 impl Session {

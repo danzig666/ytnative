@@ -227,6 +227,16 @@ fn items(page: SettingsPage) -> Vec<Item> {
                     let i = l.iter().position(|x| *x == s.ui_language).unwrap_or(0) as i32;
                     s.ui_language = l[((i + d).rem_euclid(l.len() as i32)) as usize].into();
                 }),
+                Opt("Content country", |s| crate::settings::country_name(&s.content_country), |s, d| {
+                    let l: Vec<&str> = crate::settings::COUNTRIES.iter().map(|(c, _)| *c).collect();
+                    cycle_str(&l, &mut s.content_country, d);
+                }),
+                Opt("Thumbnail picture", |s| crate::settings::thumbnail_frame_label(&s.thumbnail_frame).into(), |s, d| {
+                    cycle_str(crate::settings::THUMBNAIL_FRAMES, &mut s.thumbnail_frame, d)
+                }),
+                Opt("Channels sorting", |s| (if s.channels_alphabetical { "Alphabetically" } else { "Last viewed" }).into(), |s, _| {
+                    s.channels_alphabetical = !s.channels_alphabetical
+                }),
                 Opt("Clock on video lists", |s| on_off(s.clock_on_pages), |s, _| s.clock_on_pages = !s.clock_on_pages),
                 Opt("24-hour clock", |s| on_off(s.time_24h), |s, _| s.time_24h = !s.time_24h),
             Opt("Accent colour", |s| s.accent.clone(), |s, d| {
