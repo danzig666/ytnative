@@ -51,7 +51,8 @@ Everything SmartTube users expect, rebuilt for webOS:
   Movies, Sports, Trending, pinned playlists/channels, channel groups and search (on-screen
   keyboard, suggestions, filters, search history).
 - Hidden sidebar that slides in from the leftmost tile or with BACK; double BACK exits.
-- Titles under thumbnails, configurable card size, OLED black background, accent colours.
+- Titles under thumbnails, configurable card size, OLED black background, accent colours,
+  optional clock on the video lists.
 - Content filters: hide Shorts, watched videos, upcoming streams, mixes; block channels.
 - Multiple accounts and brand accounts, settings PIN, child mode.
 
@@ -61,7 +62,8 @@ Everything SmartTube users expect, rebuilt for webOS:
   used for 4K/VP9/AV1/HDR and live).
 - On-screen controls with previous / play-pause / next, like / dislike, subtitles, comments and
   options, all reachable with the remote's arrow keys or the Magic Remote pointer.
-- Chapters on the seek bar, storyboard previews while seeking, resume where you left off,
+- Chapter selector (a list of the video's chapters, OK jumps there), chapters on the seek bar,
+  storyboard previews while seeking, resume where you left off,
   autoplay / repeat, playback speed (per channel if you like).
 - Subtitles with size, colour, font, bold, outline / shadow / box styles and auto-translate.
 - Comments in a side panel (the video shrinks beside it) with replies.
