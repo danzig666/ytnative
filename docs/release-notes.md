@@ -1,1 +1,1 @@
-- Changed: pages show a spinner instead of the "Loading…" text while they load (also at start-up)
+- Fixed: after a successful sign-in the sign-in page now closes by itself and shows "Signed in as …" (before, you had to press BACK)

@@ -28,12 +28,27 @@ pub struct SignInScreen {
     entry: EntryId,
     qr: Option<(String, QrCode)>,
     started: bool,
+    /// The sign-in this screen started finished and the screen asked to close (once).
+    left: bool,
     state: State,
 }
 
 impl SignInScreen {
     pub fn new(entry: EntryId) -> Self {
-        SignInScreen { entry, qr: None, started: false, state: State("signin".into()) }
+        SignInScreen { entry, qr: None, started: false, left: false, state: State("signin".into()) }
+    }
+
+    /// The sign-in this screen started has finished: say so and go back to where it was opened
+    /// from, without waiting for a key.
+    fn leave_when_done(&mut self, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
+        if self.left || !self.started {
+            return;
+        }
+        if let SignIn::Done(name) = cx.views.signin {
+            self.left = true;
+            fx.push(Fx::App(YtFx::Toast(format!("Signed in as {name}"))));
+            fx.push(Fx::Nav(NavOp::Pop));
+        }
     }
 }
 
@@ -53,11 +68,13 @@ impl Machine<YtHost> for SignInScreen {
                 Handled::Yes
             }
             ScreenEvent::Async(_, YtMsg::SignIn) => {
-                if let SignIn::Done(name) = cx.views.signin {
-                    fx.push(Fx::App(YtFx::Toast(format!("Signed in as {name}"))));
-                    fx.push(Fx::Nav(NavOp::Pop));
-                }
+                self.leave_when_done(cx, fx);
                 fx.invalidate(plx_machine::present::Provenance::Lifecycle);
+                Handled::Yes
+            }
+            // The worker's "done" reply is not always delivered here: the frame it wakes checks too.
+            ScreenEvent::Tick(_) => {
+                self.leave_when_done(cx, fx);
                 Handled::Yes
             }
             ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: Key::Ok, edge: Edge::Down, .. }, .. }) => {
