@@ -1,5 +1,6 @@
 pub mod accounts;
 pub mod browse;
+pub mod chapters;
 pub mod comments;
 pub mod common;
 pub mod feed;

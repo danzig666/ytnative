@@ -555,6 +555,9 @@ impl Screen<YtHost> for BrowseScreen {
         // Page title over a header band, after the content: scrolled rows go under it.
         ui::header_band(p, Rect::new(0.0, 0.0, 1920.0, 118.0));
         ui::text(p, self.section.title(), LEFT, 30.0, 44, ui::WHITE, ui::ALIGN_LEFT, true);
+        if cx.views.store.settings.clock_on_pages {
+            ui::text(p, &common::clock(&cx.views), 1824.0, 34.0, 36, ui::WHITE, ui::ALIGN_RIGHT, false);
+        }
         // The sidebar: hidden; slides in over the content while it has focus (Left from the first
         // tile) or the pointer rests on the screen's left edge, and out again after.
         let open = self.nav_open.get() && cx.focus.current.is_some_and(|k| k.entry == self.entry && k.elem >= NAV_BASE);

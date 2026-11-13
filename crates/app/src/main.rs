@@ -208,6 +208,7 @@ fn main() {
         let mut links: Vec<String> = Vec::new();
         let (mut mouse_down, mut last_wheel) = (false, 0u32);
         let mut input_echo = 0u8;
+        let mut clock_minute = 0u64;
         let mut pointer_at: Option<(f32, f32)> = None;
         let mut edge_step_at = 0u32;
         let (mut cursor_motion_at, mut cursor_hidden) = (0u32, true);
@@ -363,7 +364,7 @@ fn main() {
             if let Some(l) = lounge.as_mut() {
                 rig.store.lounge_code = l.code.lock().unwrap().clone();
                 let top = d.top_screen().map(|s| s.name());
-                let over_player = rig.player.active() && matches!(top, Some("comments" | "menu" | "info"));
+                let over_player = rig.player.active() && matches!(top, Some("comments" | "menu" | "info" | "chapters"));
                 let in_player = top == Some("player") || over_player;
                 match l.poll(&rig.player_view) {
                     lounge::Action::Play { video_id, start_ms, playlist } => {
@@ -421,7 +422,7 @@ fn main() {
                         log(&format!("launch: play {v}"));
                         let arg = YtArg::Player { video_id: v, playlist: None };
                         let top = d.top_screen().map(|s| s.name());
-                        let over_player = rig.player.active() && matches!(top, Some("comments" | "menu" | "info"));
+                        let over_player = rig.player.active() && matches!(top, Some("comments" | "menu" | "info" | "chapters"));
                         if over_player {
                             d.request(MachineId::Nav, NavOp::Pop);
                         }
@@ -491,6 +492,14 @@ fn main() {
                     pointer_at = None;
                 }
             }
+            // The page clock: one redraw when the minute changes (pages are otherwise idle).
+            if rig.store.settings.clock_on_pages {
+                let minute = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() / 60);
+                if minute != clock_minute {
+                    clock_minute = minute;
+                    plx_machine::present::wake_from_worker();
+                }
+            }
             let had_input = !inputs.is_empty();
             if had_input {
                 input_echo = 3;
@@ -514,7 +523,7 @@ fn main() {
                 // Only while the player or one of its overlays is on top: a full page opened from the
                 // player (Search, Settings, a channel) must not be see-through.
                 let top = d.top_screen().map(|s| s.name());
-                let video = (rig.player.active() && matches!(top, Some("player" | "menu" | "comments" | "info")))
+                let video = (rig.player.active() && matches!(top, Some("player" | "menu" | "comments" | "info" | "chapters")))
                     || d.top_screen().map(|s| s.render()) == Some(plx_ui::screen::RenderStrategy::VideoPlane);
                 if video {
                     // Alpha 0: the compositor shows the hardware video plane through the UI plane.

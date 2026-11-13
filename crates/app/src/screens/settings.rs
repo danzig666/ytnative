@@ -222,6 +222,7 @@ fn items(page: SettingsPage) -> Vec<Item> {
                     let i = l.iter().position(|x| *x == s.ui_language).unwrap_or(0) as i32;
                     s.ui_language = l[((i + d).rem_euclid(l.len() as i32)) as usize].into();
                 }),
+                Opt("Clock on video lists", |s| on_off(s.clock_on_pages), |s, _| s.clock_on_pages = !s.clock_on_pages),
                 Opt("24-hour clock", |s| on_off(s.time_24h), |s, _| s.time_24h = !s.time_24h),
             Opt("Accent colour", |s| s.accent.clone(), |s, d| {
                 const C: &[&str] = &["red", "blue", "green", "purple", "orange"];

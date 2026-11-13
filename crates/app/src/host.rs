@@ -49,6 +49,8 @@ pub enum YtArg {
     Replies(String, String),
     /// Video info: description + chapters.
     Info,
+    /// Chapter selector over the player.
+    Chapters,
     /// "Save to playlist" picker for a video: (video id, title).
     PlaylistPicker(String, String),
     Pin(PinPurpose),
@@ -76,6 +78,7 @@ impl ScreenArg for YtArg {
             YtArg::Info => 13,
             YtArg::PlaylistPicker(..) => 14,
             YtArg::Pin(_) => 15,
+            YtArg::Chapters => 16,
         })
     }
     fn title(&self) -> Option<&str> {
@@ -242,6 +245,7 @@ impl Mounter<YtHost> for Mount {
             YtArg::Comments(v) => Box::new(screens::comments::CommentsScreen::new(entry, v.clone(), None)),
             YtArg::Replies(token, author) => Box::new(screens::comments::CommentsScreen::new(entry, token.clone(), Some(author.clone()))),
             YtArg::Info => Box::new(screens::info::InfoScreen::new(entry)),
+            YtArg::Chapters => Box::new(screens::chapters::ChaptersScreen::new(entry)),
             YtArg::Pin(p) => Box::new(screens::pin::PinScreen::new(entry, p.clone())),
             YtArg::PlaylistPicker(v, t) => Box::new(screens::menu::MenuScreen::playlists(entry, v.clone(), t.clone(), cx)),
             YtArg::SearchFilters(q) => Box::new(screens::menu::MenuScreen::filters(entry, q.clone())),

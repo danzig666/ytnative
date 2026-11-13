@@ -641,6 +641,7 @@ pub mod icon {
     const PAUSE: &str = r##"<path d="M6 4h4v16H6z"/><path d="M14 4h4v16h-4z"/>"##;
     const PREV: &str = r##"<path d="M19 20 9 12l10-8z"/><path d="M5 19V5"/>"##;
     const NEXT: &str = r##"<path d="M5 4l10 8-10 8z"/><path d="M19 5v14"/>"##;
+    const LIST: &str = r##"<path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/>"##;
 
     #[derive(Clone, Copy, PartialEq)]
     pub enum Kind {
@@ -653,6 +654,7 @@ pub mod icon {
         Pause,
         Prev,
         Next,
+        List,
     }
 
     fn svg(k: Kind, filled: bool) -> &'static str {
@@ -660,7 +662,7 @@ pub mod icon {
         static S: OnceLock<Vec<String>> = OnceLock::new();
         let all = S.get_or_init(|| {
             let mut v = Vec::new();
-            for body in [THUMB_UP, THUMB_DOWN, CHAT, GEAR, PLAY, PAUSE, PREV, NEXT] {
+            for body in [THUMB_UP, THUMB_DOWN, CHAT, GEAR, PLAY, PAUSE, PREV, NEXT, LIST] {
                 v.push(format!("{HEAD}{body}</svg>"));
                 v.push(format!("{}{body}</svg>", HEAD.replace(r##"fill="none""##, r##"fill="#ffffff""##)));
             }
@@ -675,6 +677,7 @@ pub mod icon {
             Kind::Pause => 10,
             Kind::Prev => 12,
             Kind::Next => 14,
+            Kind::List => 16,
         };
         &all[i + filled as usize]
     }

@@ -47,6 +47,8 @@ pub struct Settings {
     pub resume_playback: bool,
     pub hud_timeout_secs: u32,
     pub show_clock: bool,
+    /// A clock at the top right of the video lists.
+    pub clock_on_pages: bool,
     pub show_ending_time: bool,
     // Subtitles
     pub subtitles: bool,
@@ -143,6 +145,7 @@ impl Default for Settings {
             resume_playback: true,
             hud_timeout_secs: 4,
             show_clock: true,
+            clock_on_pages: false,
             show_ending_time: true,
             subtitles: false,
             subtitle_language: "en".into(),

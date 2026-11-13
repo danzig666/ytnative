@@ -98,8 +98,9 @@ impl PlayerScreen {
 }
 
 /// OSD buttons, left to right: 0 previous, 1 play/pause, 2 next (centred on the bottom row);
-/// 3 like, 4 dislike, 5 subtitles, 6 comments, 7 options (right-aligned).
-const OSD_N: usize = 8;
+/// 3 like, 4 dislike, 5 subtitles, 6 chapters, 7 comments, 8 options (right-aligned).
+const OSD_N: usize = 9;
+const OSD_CHAPTERS: usize = 6;
 const OSD_PLAY: usize = 1;
 const OSD_LIKE: usize = 3;
 const OSD_DISLIKE: usize = 4;
@@ -179,7 +180,15 @@ impl PlayerScreen {
             }
             OSD_LIKE | OSD_DISLIKE => {}
             OSD_CC => fx.push(Fx::App(YtFx::EditSettings(Box::new(|s| s.subtitles = !s.subtitles)))),
-            6 => {
+            OSD_CHAPTERS => {
+                if has_chapters(cx) {
+                    self.osd_sel = None;
+                    fx.push(Fx::Nav(NavOp::Present(YtArg::Chapters)));
+                } else {
+                    fx.push(Fx::App(YtFx::Toast("No chapters".into())));
+                }
+            }
+            7 => {
                 if !st.video_id.is_empty() && !cx.views.store.settings.child_mode {
                     self.osd_sel = None;
                     fx.push(Fx::Nav(NavOp::Present(YtArg::Comments(st.video_id.clone()))));
@@ -659,13 +668,20 @@ impl Screen<YtHost> for PlayerScreen {
         let disliked = matches!(rating, Some(yt_core::watch::LikeStatus::Dislike));
         use ui::icon::Kind;
         let play = if matches!(st.phase, Phase::Paused | Phase::Ended) { Kind::Play } else { Kind::Pause };
-        let kinds = [Kind::Prev, play, Kind::Next, Kind::ThumbUp, Kind::ThumbDown, Kind::Cc, Kind::Chat, Kind::Gear];
+        let kinds = [Kind::Prev, play, Kind::Next, Kind::ThumbUp, Kind::ThumbDown, Kind::Cc, Kind::List, Kind::Chat, Kind::Gear];
+        let chapters = has_chapters(cx);
         for (i, k) in kinds.iter().enumerate() {
             let b = osd_button(i);
             let hot = self.pointer.is_some_and(|(x, y)| b.contains(x, y)) || self.osd_sel == Some(i);
+            // Without chapters the button stays (fixed positions for the keys) but faded.
+            let off = i == OSD_CHAPTERS && !chapters;
             let on = (i == OSD_CC && subs_on) || (i == OSD_LIKE && liked) || (i == OSD_DISLIKE && disliked);
             ui::fill(p, b, b.h / 2.0, if hot { [1.0, 1.0, 1.0, 0.9] } else if on { [1.0, 1.0, 1.0, 0.22] } else { [1.0, 1.0, 1.0, 0.10] });
-            let ink = if hot { [0.0, 0.0, 0.0, 1.0] } else { ui::WHITE };
+            let ink = match (hot, off) {
+                (true, _) => [0.0, 0.0, 0.0, 1.0],
+                (false, true) => [1.0, 1.0, 1.0, 0.3],
+                _ => ui::WHITE,
+            };
             let s = 30.0;
             // Transport icons are solid; thumbs fill when active.
             let filled = i < OSD_LIKE || (on && (i == OSD_LIKE || i == OSD_DISLIKE));
@@ -687,6 +703,11 @@ impl Screen<YtHost> for PlayerScreen {
 
 /// Next video when one ends: the next playlist item (or the first when repeating the list),
 /// else the watch page's autoplay pick.
+/// The playing video has chapters.
+fn has_chapters(cx: &Cx<'_, YtHost>) -> bool {
+    cx.views.player.extras.watch.as_ref().is_some_and(|w| !w.chapters.is_empty())
+}
+
 fn next_video(cx: &Cx<'_, YtHost>, current: &str, repeat_list: bool) -> Option<(String, Option<String>)> {
     let ex = cx.views.player.extras.clone();
     let w = ex.watch.as_ref()?;
