@@ -445,6 +445,8 @@ impl Screen<YtHost> for PlayerScreen {
         if ui::comments_open() {
             return;
         }
+        // Everything below (OSD, toasts) is dimmed over HDR video; the captions above are not.
+        let _dim = ui::HdrDim::begin(ui::hdr_playing(st));
         if !self.hud && st.phase == Phase::Playing {
             common::toast(p, cx);
             return;
@@ -541,7 +543,7 @@ impl Screen<YtHost> for PlayerScreen {
                         let (sw, sh) = (tw, th);
                         // plx's uv is [u, v, width, height] (`Rect::cover_uv`), not two corners.
                         let uv = [fr.x as f32 / sw, fr.y as f32 / sh, fr.w as f32 / sw, fr.h as f32 / sh];
-                        p.tex_uv(tex, uv, r, 8.0, ui::WHITE);
+                        p.tex_uv(tex, uv, r, 8.0, ui::dimmed(ui::WHITE));
                     } else {
                         ui::fill(p, r, 8.0, [0.1, 0.1, 0.12, 1.0]);
                     }

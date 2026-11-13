@@ -636,6 +636,7 @@ impl Screen<YtHost> for MenuScreen {
     fn draw(&mut self, f: &mut DrawFrame<'_, '_, YtHost>) {
         let p = f.painter;
         let cx = f.cx;
+        let _dim = ui::HdrDim::begin(ui::hdr_playing(cx.views.player));
         ui::fill(p, PANEL, 0.0, ui::PANEL);
         ui::text(p, &ui::ellipsize(&self.title, 30), PANEL.x + 52.0, 62.0, 30, ui::WHITE, ui::ALIGN_LEFT, true);
         if let Some(v) = &self.picker_for {

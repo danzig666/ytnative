@@ -275,7 +275,49 @@ pub const ROW_FOCUS: [f32; 4] = [1.0, 1.0, 1.0, 0.16];
 pub const SCRIM: [f32; 4] = [0.0, 0.0, 0.0, 0.62];
 
 /// Draws `s` with its top-left (or anchor edge per `align`) at x,y. Returns the text width.
+thread_local! {
+    /// Brightness of UI ink while it is drawn over HDR video (1 = normal).
+    static UI_DIM: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) };
+}
+
+/// While alive, [`text`], [`fill`] and [`icon::draw`] draw darker: the panel runs at HDR
+/// brightness, so the OSD and the comments over HDR video would glare otherwise.
+pub struct HdrDim(f32);
+
+impl HdrDim {
+    /// Dims when `hdr` (the pipeline reports an HDR type) is on.
+    pub fn begin(hdr: bool) -> HdrDim {
+        let prev = UI_DIM.with(|d| d.replace(if hdr { 0.55 } else { 1.0 }));
+        HdrDim(prev)
+    }
+}
+
+impl Drop for HdrDim {
+    fn drop(&mut self) {
+        UI_DIM.with(|d| d.set(self.0));
+    }
+}
+
+/// The playing video is HDR (as the pipeline reported it).
+pub fn hdr_playing(st: &crate::player::Status) -> bool {
+    !st.hdr.is_empty() && !st.hdr.eq_ignore_ascii_case("none")
+}
+
+/// `col` as drawn under the current [`HdrDim`]: bright ink is scaled down, dark scrims get a
+/// little more opaque.
+pub(crate) fn dimmed(col: [f32; 4]) -> [f32; 4] {
+    let k = UI_DIM.with(|d| d.get());
+    if k >= 1.0 {
+        return col;
+    }
+    if col[0].max(col[1]).max(col[2]) < 0.12 {
+        return [col[0], col[1], col[2], (col[3] * 1.3).min(1.0)];
+    }
+    [col[0] * k, col[1] * k, col[2] * k, col[3]]
+}
+
 pub fn text(p: Painter, s: &str, x: f32, y: f32, size: i32, col: [f32; 4], align: i32, bold: bool) -> f32 {
+    let col = dimmed(col);
     let s = crate::i18n::tr(s);
     let Ok(c) = CString::new(s.replace('\0', "")) else { return 0.0 };
     p.text(c.as_ptr(), x, y, size, col, align, bold as i32)
@@ -284,6 +326,7 @@ pub fn text(p: Painter, s: &str, x: f32, y: f32, size: i32, col: [f32; 4], align
 /// Truncates to roughly `max` characters with an ellipsis (cheap, measure-free).
 /// [`text`] in an extra face (1..=8, the subtitle fonts: 1-4 bold, 5-8 regular).
 pub fn text_face(p: Painter, s: &str, x: f32, y: f32, size: i32, col: [f32; 4], align: i32, face: i32) -> f32 {
+    let col = dimmed(col);
     let Ok(c) = CString::new(s.replace('\0', "")) else { return 0.0 };
     p.text(c.as_ptr(), x, y, size, col, align, (face.clamp(0, 8) << 4) | (face <= 4) as i32)
 }
@@ -299,6 +342,7 @@ pub fn ellipsize(s: &str, max: usize) -> String {
 }
 
 pub fn fill(p: Painter, r: Rect, rad: f32, col: [f32; 4]) {
+    let col = dimmed(col);
     p.rect(r, rad, col, col, 0.0);
 }
 
@@ -624,6 +668,7 @@ pub mod icon {
 
     /// Draws icon `k` in the square `r`, `filled` for an active state.
     pub fn draw(p: Painter, k: Kind, r: Rect, tint: [f32; 4], filled: bool) {
+        let tint = super::dimmed(tint);
         if k == Kind::Cc {
             plx_ui::icons::draw(p, plx_ui::icons::Icon::Cc, r, tint);
             return;

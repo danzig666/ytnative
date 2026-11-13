@@ -320,6 +320,7 @@ impl Screen<YtHost> for CommentsScreen {
     fn draw(&mut self, f: &mut DrawFrame<'_, '_, YtHost>) {
         let p = f.painter;
         let cx = f.cx;
+        let _dim = ui::HdrDim::begin(ui::hdr_playing(cx.views.player));
         // A panel on the right, sliding in with the video's zoom-out; the video, shrunk, plays on
         // the left (the UI plane is clear there).
         // Replies open over the comments panel: no slide, so nothing shows through.
