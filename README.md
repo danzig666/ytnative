@@ -13,14 +13,18 @@ webOS app framework); SmartTube is the feature reference throughout.
 
 ## Screenshots
 
+![The player in 4K with the SmartTube-style controls](docs/screenshots/player-smarttube.jpg)
+
 ![Home: shelves of videos, the focused one raised, a members-only badge](docs/screenshots/home.jpg)
 
 | | |
 |---|---|
 | ![The sidebar slid in over Home](docs/screenshots/sidebar.jpg) | ![Search results for "nasa"](docs/screenshots/search.jpg) |
-| ![Playback settings: 2160p, AV1, HDR](docs/screenshots/settings.jpg) | ![Signing in with a code or a QR code](docs/screenshots/signin.jpg) |
+| ![The player with the YouTube-style controls (Settings > Player style)](docs/screenshots/player-youtube.jpg) | ![Playback settings: 2160p, AV1, HDR](docs/screenshots/settings.jpg) |
+| ![The sign-in screen: a code or a QR code](docs/screenshots/signin.jpg) | |
 
-Taken in the app's Windows simulator, which runs the same UI code as the TV build.
+The player screenshots are from an LG C3; the others are from the app's Windows simulator, which
+runs the same UI code as the TV build.
 
 ## Install
 
