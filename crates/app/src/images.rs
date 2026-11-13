@@ -84,6 +84,11 @@ impl Thumbs {
         }
     }
 
+    /// Thumbnail URLs currently known (diagnostics).
+    pub fn known(&self) -> usize {
+        self.st.lock().unwrap().by_url.len()
+    }
+
     /// Main thread, every frame: hand finished decodes to the render cache.
     pub fn deliver(&self) {
         let done = std::mem::take(&mut self.st.lock().unwrap().done);

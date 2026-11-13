@@ -116,6 +116,47 @@ unsafe fn sim_window() -> *mut std::os::raw::c_void {
     std::process::exit(1);
 }
 
+/// Frame-time statistics, logged once a minute while frames are drawn (slowdowns on the TV show up
+/// in the event log with what was growing).
+#[derive(Default)]
+struct Perf {
+    since: Option<Instant>,
+    steps: u64,
+    step_sum: u64,
+    step_max: u64,
+    draws: u64,
+    draw_sum: u64,
+    draw_max: u64,
+}
+
+impl Perf {
+    fn step(&mut self, us: u64) {
+        let since = *self.since.get_or_insert_with(Instant::now);
+        self.steps += 1;
+        self.step_sum += us;
+        self.step_max = self.step_max.max(us);
+        if since.elapsed().as_secs() >= 60 {
+            if self.draws > 0 {
+                log(&format!(
+                    "perf: {} draws, draw avg {} max {} us; step avg {} max {} us; thumbs known {}",
+                    self.draws,
+                    self.draw_sum / self.draws,
+                    self.draw_max,
+                    self.step_sum / self.steps.max(1),
+                    self.step_max,
+                    images::THUMBS.known()
+                ));
+            }
+            *self = Perf::default();
+        }
+    }
+    fn draw(&mut self, us: u64) {
+        self.draws += 1;
+        self.draw_sum += us;
+        self.draw_max = self.draw_max.max(us);
+    }
+}
+
 pub fn log(s: &str) {
     plx_base::eventlog::log(s);
     eprintln!("{s}");
@@ -209,6 +250,7 @@ fn main() {
         let (mut mouse_down, mut last_wheel) = (false, 0u32);
         let mut input_echo = 0u8;
         let mut clock_minute = 0u64;
+        let mut perf = Perf::default();
         let mut pointer_at: Option<(f32, f32)> = None;
         let mut edge_step_at = 0u32;
         let (mut cursor_motion_at, mut cursor_hidden) = (0u32, true);
@@ -506,7 +548,9 @@ fn main() {
             } else if input_echo > 0 {
                 input_echo -= 1;
             }
+            let step_t0 = Instant::now();
             let r = d.frame_with(&mut rig, tick, inputs, results, &mut NoTap, false);
+            perf.step(step_t0.elapsed().as_micros() as u64);
             d.prune(&r.unmounted);
             plx_ui::tex::note_queued(&mut d.budget);
 
@@ -517,6 +561,12 @@ fn main() {
             if present {
                 let draw_t0 = Instant::now();
                 plx_gfx::text::begin_frame();
+                // plx's per-frame resets that its own app loop makes (ours must too): the card
+                // motion history keeps only the previous and current frame's samples (without this
+                // it grew by every card drawn on every frame and each draw scanned all of it, so
+                // the lists got slower and slower), and the straighten pass's draw ledger.
+                plx_ui::card_motion::begin_frame(now);
+                plx_gfx::gfx::straighten::frame_begin();
                 let (x, y, w, h) = plx_base::surface::viewport();
                 sdl::glViewport(x, y, w, h);
                 // Keep the video plane visible under the player's own overlays and menus.
@@ -541,6 +591,7 @@ fn main() {
                     sdl::SDL_GL_GetDrawableSize(win, &mut dw, &mut dh);
                     r.take_shots(dw, dh);
                 }
+                perf.draw(draw_t0.elapsed().as_micros() as u64);
                 if std::env::var_os("YTNATIVE_FRAME_DEBUG").is_some() {
                     log(&format!("framedbg draw {} us at {}", draw_t0.elapsed().as_micros(), now));
                 }
