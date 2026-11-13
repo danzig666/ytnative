@@ -400,6 +400,12 @@ pub struct Settings {
     pub channels_alphabetical: bool,
     // Remote
     pub lounge_enabled: bool,
+    /// A message when a phone connects / disconnects.
+    pub lounge_connect_notice: bool,
+    /// Leave the player when the phone disconnects.
+    pub lounge_close_on_disconnect: bool,
+    /// Videos started from the phone stay out of the watch history.
+    pub lounge_no_history: bool,
     /// True black background (OLED).
     pub black_background: bool,
     /// Title and channel under every thumbnail (SmartTube style).
@@ -513,6 +519,9 @@ impl Default for Settings {
             thumbnail_frame: "default".into(),
             channels_alphabetical: false,
             lounge_enabled: true,
+            lounge_connect_notice: false,
+            lounge_close_on_disconnect: false,
+            lounge_no_history: false,
             black_background: false,
             titles_under: true,
             ui_scale: 100,

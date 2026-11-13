@@ -355,6 +355,13 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
         }
         SettingsPage::Remote => vec![
             Opt("Link with TV code (after restart)", |s| on_off(s.lounge_enabled), |s, _| s.lounge_enabled = !s.lounge_enabled),
+            Opt("Show a message when a phone connects or disconnects", |s| on_off(s.lounge_connect_notice), |s, _| {
+                s.lounge_connect_notice = !s.lounge_connect_notice
+            }),
+            Opt("Close the player when the phone disconnects", |s| on_off(s.lounge_close_on_disconnect), |s, _| {
+                s.lounge_close_on_disconnect = !s.lounge_close_on_disconnect
+            }),
+            Opt("No watch history for videos started from the phone", |s| on_off(s.lounge_no_history), |s, _| s.lounge_no_history = !s.lounge_no_history),
             Opt("Red button", |s| s.color_keys[0].clone(), |s, d| cycle_key(&mut s.color_keys[0], d)),
             Opt("Green button", |s| s.color_keys[1].clone(), |s, d| cycle_key(&mut s.color_keys[1], d)),
             Opt("Yellow button", |s| s.color_keys[2].clone(), |s, d| cycle_key(&mut s.color_keys[2], d)),

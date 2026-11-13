@@ -27,6 +27,9 @@ pub enum Action {
     Seek(u64),
     Stop,
     Key(DpadKey),
+    /// A phone connected / disconnected (its name).
+    Connected(String),
+    Disconnected(String),
     None,
 }
 
@@ -74,10 +77,15 @@ impl Lounge {
             Command::SeekTo(t) => Action::Seek((t * 1000.0) as u64),
             Command::StopVideo => Action::Stop,
             Command::Dpad(k) => Action::Key(k),
-            Command::GetNowPlaying | Command::RemoteConnected(_) => {
+            Command::GetNowPlaying => {
                 self.report(status, true);
                 Action::None
             }
+            Command::RemoteConnected(d) => {
+                self.report(status, true);
+                Action::Connected(device_name(&d))
+            }
+            Command::RemoteDisconnected(d) => Action::Disconnected(device_name(&d)),
             _ => Action::None,
         }
     }
@@ -114,6 +122,11 @@ impl Lounge {
         }
         let _ = self.events.send(Event::StateChange(st));
     }
+}
+
+/// A phone's name for messages.
+fn device_name(d: &yt_core::lounge::Device) -> String {
+    [&d.name, &d.client_name].into_iter().find(|n| !n.trim().is_empty()).cloned().unwrap_or_else(|| crate::i18n::tr("A phone").to_string())
 }
 
 /// Starts the DIAL server so the TV shows up in the phone's cast menu. A launch carries a pairing

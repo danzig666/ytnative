@@ -348,3 +348,9 @@ Jumped to the highlight	Ugrás a kiemelt részre	Zum Highlight gesprungen	Saltad
 Highlight: press OK to jump there	Kiemelt rész: ugráshoz nyomd meg az OK gombot	Highlight: OK drücken, um hinzuspringen	Momento destacado: pulsa OK para ir	Moment fort : appuyez sur OK pour y aller	Главный момент: нажмите OK для перехода
 SponsorBlock on this channel	SponsorBlock ezen a csatornán	SponsorBlock auf diesem Kanal	SponsorBlock en este canal	SponsorBlock sur cette chaîne	SponsorBlock на этом канале
 Card menu: SponsorBlock on this channel	Kártyamenü: SponsorBlock ezen a csatornán	Kartenmenü: SponsorBlock auf diesem Kanal	Menú de tarjeta: SponsorBlock en este canal	Menu de la carte : SponsorBlock sur cette chaîne	Меню карточки: SponsorBlock на этом канале
+Show a message when a phone connects or disconnects	Üzenet, ha egy telefon csatlakozik vagy leválik	Meldung, wenn sich ein Handy verbindet oder trennt	Mostrar un mensaje cuando un teléfono se conecte o desconecte	Afficher un message quand un téléphone se connecte ou se déconnecte	Сообщать о подключении и отключении телефона
+Close the player when the phone disconnects	A lejátszó bezárása, ha a telefon leválik	Player schließen, wenn sich das Handy trennt	Cerrar el reproductor cuando el teléfono se desconecte	Fermer le lecteur quand le téléphone se déconnecte	Закрывать плеер при отключении телефона
+No watch history for videos started from the phone	Nincs megtekintési előzmény a telefonról indított videóknál	Kein Wiedergabeverlauf für vom Handy gestartete Videos	Sin historial para los vídeos iniciados desde el teléfono	Pas d'historique pour les vidéos lancées depuis le téléphone	Не сохранять в историю видео, запущенные с телефона
+{} connected	{} csatlakozott	{} verbunden	{} conectado	{} connecté	{} подключён
+{} disconnected	{} levált	{} getrennt	{} desconectado	{} déconnecté	{} отключён
+A phone	Egy telefon	Ein Handy	Un teléfono	Un téléphone	Телефон

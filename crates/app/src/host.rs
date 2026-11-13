@@ -325,6 +325,8 @@ pub struct AppRig {
     audio_choice: Option<(String, String)>,
     /// Last key press (ms, frame clock): the sleep timer pauses after a while without one.
     pub last_key_ms: u32,
+    /// The last video a phone started ("no watch history for videos started from the phone").
+    pub phone_video: Option<String>,
 }
 
 impl AppRig {
@@ -363,6 +365,7 @@ impl AppRig {
             pending_rate: None,
             audio_choice: None,
             last_key_ms: 0,
+            phone_video: None,
         };
         rig.refresh_accounts();
         rig.refresh_groups();
@@ -720,8 +723,10 @@ impl AppRig {
     }
 
     /// Whether the playback of `video_id` goes to the watch history (and saves its position).
-    fn history_for(&self, _video_id: &str) -> bool {
-        self.store.settings.watch_history != "off"
+    fn history_for(&self, video_id: &str) -> bool {
+        let s = &self.store.settings;
+        let from_phone = self.phone_video.as_deref() == Some(video_id);
+        s.watch_history != "off" && !(s.lounge_no_history && from_phone)
     }
 
     /// "Subtitles per channel": applies the channel's remembered subtitles when its video starts,
