@@ -65,6 +65,9 @@ impl Default for Prefs {
 
 pub fn resolve(api: &Api, video_id: &str, bearer: Option<&str>) -> Result<Resolved> {
     let mut errors = Vec::new();
+    // Direct URLs, but nothing the TV's DASH player takes (no H.264 + AAC with ranges): kept in
+    // case no later client does better (engine B still plays VP9/AV1).
+    let mut partial: Option<Resolved> = None;
     for profile in crate::clients::active(api.http).ring_profiles() {
         let (client, auth) = (Client::Profile(profile), profile.send_auth);
         match api.player(client, video_id, if auth { bearer } else { None }) {
@@ -77,13 +80,21 @@ pub fn resolve(api: &Api, video_id: &str, bearer: Option<&str>) -> Result<Resolv
                 }
                 let r = build(client, video_id, pr);
                 let direct = r.adaptive.iter().any(|f| f["url"].is_string());
-                if direct || r.hls.is_some() || r.dash_live.is_some() {
+                if r.hls.is_some() || r.dash_live.is_some() || (direct && r.mpd(Default::default()).is_some()) {
                     return Ok(r);
                 }
-                errors.push(format!("{client:?}: no direct formats"));
+                if direct {
+                    errors.push(format!("{client:?}: no H.264 + AAC"));
+                    partial.get_or_insert(r);
+                } else {
+                    errors.push(format!("{client:?}: no direct formats"));
+                }
             }
             Err(e) => errors.push(format!("{client:?}: {e}")),
         }
+    }
+    if let Some(r) = partial {
+        return Ok(r);
     }
     bail!("no client could play {video_id}: {}", errors.join("; "))
 }
@@ -221,6 +232,11 @@ pub fn filter_hls(master: &str, max_height: u64) -> String {
             }
         }
         out.push(l.to_string());
+    }
+    if variants.is_empty() {
+        // Nothing matched (no CODECS attribute, or only taller rungs): the unfiltered master
+        // plays somehow; an empty one never does.
+        return master.to_string();
     }
     for (inf, uri) in variants {
         out.push(inf.to_string());

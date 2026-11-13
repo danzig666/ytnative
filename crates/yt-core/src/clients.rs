@@ -265,7 +265,13 @@ pub fn load_with(cache: &Path, now: SystemTime, fetch: impl FnOnce() -> Result<S
         Err(e) => {
             eprintln!("[clients] remote profiles unavailable: {e:#}");
             match cached {
-                Some(p) => (p, Source::StaleCache),
+                Some(p) => {
+                    // Mark the attempt: the next start uses the cache without a 5 s fetch stall.
+                    if let Ok(f) = std::fs::File::options().append(true).open(cache) {
+                        let _ = f.set_modified(now);
+                    }
+                    (p, Source::StaleCache)
+                }
                 None => (builtin().clone(), Source::Builtin),
             }
         }

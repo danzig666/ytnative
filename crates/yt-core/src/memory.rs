@@ -17,7 +17,7 @@ pub const MAX_POSITIONS: usize = 500;
 pub const MAX_WATCH_DAYS: usize = 90;
 /// Positions this close to the start are not worth resuming.
 pub const MIN_RESUME_SECS: u64 = 10;
-/// Positions this close to the end count as finished (entry dropped).
+/// Positions this close to the end count as finished (stored as 0: start over).
 pub const END_MARGIN_SECS: u64 = 30;
 
 /// A string-keyed map with a capacity, ordered least- to most-recently used (serialized as a

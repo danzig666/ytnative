@@ -81,12 +81,29 @@ fn local_id(t: &Token) -> String {
     format!("local-{}", hex(&d.as_ref()[..6]))
 }
 
+/// Serializes load-modify-save of `accounts.json` across threads (token refreshes from several
+/// sessions at once must not interleave and lose an update).
+static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock() -> std::sync::MutexGuard<'static, ()> {
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 impl Store {
-    /// Reads `accounts.json`, migrating `token.json` if there is no accounts file yet.
+    /// Reads `accounts.json`, migrating `token.json` if there is no accounts file yet. A file that
+    /// does not parse is moved aside to `accounts.json.bad` (the app then starts signed out
+    /// instead of failing every request).
     pub fn load() -> Result<Store> {
         let path = store_file();
         if let Ok(raw) = std::fs::read_to_string(&path) {
-            return serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()));
+            match serde_json::from_str(&raw) {
+                Ok(s) => return Ok(s),
+                Err(e) => {
+                    eprintln!("[accounts] {} is damaged ({e}); moved to .bad, starting signed out", path.display());
+                    let _ = std::fs::rename(&path, path.with_extension("json.bad"));
+                    return Ok(Store::default());
+                }
+            }
         }
         let mut s = Store::default();
         if let Ok(raw) = std::fs::read_to_string(legacy_token_file()) {
@@ -107,11 +124,7 @@ impl Store {
     }
 
     pub fn save(&self) -> Result<()> {
-        let path = store_file();
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
-        std::fs::rename(&tmp, &path)?;
-        Ok(())
+        crate::fsutil::write_atomic(&store_file(), serde_json::to_string_pretty(self)?.as_bytes())
     }
 
     pub fn get(&self, id: &str) -> Option<&Account> {
@@ -180,12 +193,14 @@ pub fn current() -> Result<Option<Account>> {
 }
 
 pub fn switch(id: &str) -> Result<()> {
+    let _g = lock();
     let mut s = Store::load()?;
     s.switch(id)?;
     s.save()
 }
 
 pub fn remove(id: &str) -> Result<bool> {
+    let _g = lock();
     let mut s = Store::load()?;
     let r = s.remove(id);
     s.save()?;
@@ -194,6 +209,7 @@ pub fn remove(id: &str) -> Result<bool> {
 
 /// Sets (Some) or clears (None) the local password of an account.
 pub fn set_password(id: &str, password: Option<&str>) -> Result<()> {
+    let _g = lock();
     let mut s = Store::load()?;
     let a = s.get_mut(id).context("no such account")?;
     a.password = password.map(hash_password);
@@ -202,6 +218,7 @@ pub fn set_password(id: &str, password: Option<&str>) -> Result<()> {
 
 /// Account `id` (or the current one) with a token refreshed if needed (and persisted).
 pub fn resolve(http: &reqwest::blocking::Client, id: Option<&str>) -> Result<Option<Account>> {
+    let _g = lock();
     let mut s = Store::load()?;
     let Some(mut a) = (match id {
         Some(id) => s.get(id).cloned(),
@@ -209,15 +226,23 @@ pub fn resolve(http: &reqwest::blocking::Client, id: Option<&str>) -> Result<Opt
     }) else {
         return Ok(None);
     };
-    if auth::refresh(http, &mut a.token)? {
-        s.update_token(&a.token);
-        s.save()?;
+    match auth::refresh(http, &mut a.token) {
+        Ok(true) => {
+            s.update_token(&a.token);
+            s.save()?;
+        }
+        Ok(false) => {}
+        // Offline, or the grant was revoked: keep going with the old token instead of failing
+        // every call (playback does not need it; personal feeds fail on their own and the next
+        // call tries the refresh again).
+        Err(e) => eprintln!("[accounts] token refresh failed: {e:#}"),
     }
     Ok(Some(a))
 }
 
 /// Legacy `auth::save`: updates the identities using this token, or adds it as a new account.
 pub fn save_token(t: &Token) -> Result<()> {
+    let _g = lock();
     let mut s = Store::load()?;
     if !s.update_token(t) {
         s.upsert(Account {
@@ -318,6 +343,7 @@ fn account_from(i: &Identity, token: Token) -> Account {
 /// makes it current. Without a profile (network error) it is stored under a local id.
 pub fn add(http: &reqwest::blocking::Client, cfg: &TvConfig, token: Token) -> Result<Account> {
     let ids = identities(http, cfg, &token).unwrap_or_default();
+    let _g = lock();
     let mut s = Store::load()?;
     // Drop a placeholder entry for the same token (e.g. a migrated token.json).
     let local = local_id(&token);
@@ -344,6 +370,7 @@ pub fn add(http: &reqwest::blocking::Client, cfg: &TvConfig, token: Token) -> Re
 
 /// Adds another identity (e.g. a brand account) reachable with `base`'s token and makes it current.
 pub fn add_identity(base_id: &str, identity: &Identity) -> Result<Account> {
+    let _g = lock();
     let mut s = Store::load()?;
     let token = s.get(base_id).context("no such account")?.token.clone();
     let a = account_from(identity, token);
@@ -362,6 +389,7 @@ pub fn fill_profile(http: &reqwest::blocking::Client, cfg: &TvConfig, id: &str) 
         None => ids.iter().find(|i| i.page_id.is_none() && i.selected).or(ids.iter().find(|i| i.page_id.is_none())),
     }
     .context("account not in accounts_list")?;
+    let _g = lock();
     let mut s = Store::load()?;
     let was_current = s.current().map(|c| c.id.clone()) == Some(a.id.clone());
     let mut new = account_from(i, a.token.clone());

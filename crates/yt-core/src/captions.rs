@@ -257,7 +257,8 @@ fn decode_entities(s: &str) -> String {
     while let Some(i) = rest.find('&') {
         out.push_str(&rest[..i]);
         let tail = &rest[i..];
-        let Some(semi) = tail[..tail.len().min(12)].find(';') else {
+        // `;` within the first 12 bytes (a byte index of `;` is always a char boundary).
+        let Some(semi) = tail.find(';').filter(|&e| e < 12) else {
             out.push('&');
             rest = &tail[1..];
             continue;
@@ -440,5 +441,14 @@ line &amp; two</p><p t="3000" d="1000"><s>a</s><s> b</s></p></body></timedtext>"
             Err(e) if e.to_string().contains("429") => eprintln!("SKIP translation: {e}"),
             Err(e) => panic!("translation failed: {e}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod entity_tests {
+    #[test]
+    fn non_ascii_after_ampersand_does_not_panic() {
+        assert_eq!(super::decode_entities("トム&amp;ジェリー"), "トム&ジェリー");
+        assert_eq!(super::decode_entities("a & ジェリージェリー"), "a & ジェリージェリー");
     }
 }

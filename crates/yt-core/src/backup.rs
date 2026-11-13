@@ -124,6 +124,7 @@ pub fn validate(b: &Bundle) -> Result<()> {
                 serde_json::from_value::<crate::search_history::SearchHistory>(v.clone()).map(drop)
             }
             crate::memory::FILE_NAME => serde_json::from_value::<crate::memory::PlayerMemory>(v.clone()).map(drop),
+            ACCOUNTS_FILE => serde_json::from_value::<crate::accounts::Store>(v.clone()).map(drop),
             _ => Ok(()),
         };
         ok.with_context(|| format!("{name} in backup is damaged"))?;

@@ -133,11 +133,11 @@ impl Api<'_> {
         }
         let resp = req.send()?;
         let status = resp.status();
-        let v: Value = resp.json()?;
         if !status.is_success() {
+            let v: Value = resp.json().unwrap_or(Value::Null);
             bail!("{endpoint} -> HTTP {status}: {}", v["error"]["message"]);
         }
-        Ok(v)
+        Ok(resp.json()?)
     }
 
     pub fn player(&self, client: Client, video_id: &str, bearer: Option<&str>) -> Result<Value> {
