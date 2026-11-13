@@ -107,12 +107,22 @@ pub fn start(cfg: DialConfig, on_launch: impl Fn(LaunchRequest) + Send + Sync + 
             while !stop.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        // A few clients at a time (the LAN can open thousands of connections).
+                        if CLIENTS.fetch_add(1, Ordering::SeqCst) >= MAX_CLIENTS {
+                            CLIENTS.fetch_sub(1, Ordering::SeqCst);
+                            continue;
+                        }
                         let (state, on_launch) = (state.clone(), on_launch.clone());
-                        let _ = std::thread::Builder::new().name("dial-client".into()).spawn(move || {
-                            if let Some(launch) = handle_client(stream, &state) {
+                        let spawned = std::thread::Builder::new().name("dial-client".into()).stack_size(128 << 10).spawn(move || {
+                            let launch = handle_client(stream, &state);
+                            CLIENTS.fetch_sub(1, Ordering::SeqCst);
+                            if let Some(launch) = launch {
                                 on_launch(launch);
                             }
                         });
+                        if spawned.is_err() {
+                            CLIENTS.fetch_sub(1, Ordering::SeqCst);
+                        }
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(100)),
                     Err(e) => {
@@ -183,12 +193,33 @@ struct Response {
     body: String,
 }
 
+/// Connections being served right now, and the cap.
+static CLIENTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+const MAX_CLIENTS: usize = 8;
+
+/// A reader that gives up once `until` has passed (a client trickling a byte at a time must not
+/// hold a thread for minutes).
+struct Deadline<'a> {
+    s: &'a mut TcpStream,
+    until: std::time::Instant,
+}
+
+impl Read for Deadline<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let left = self.until.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
+        self.s.set_read_timeout(Some(left))?;
+        self.s.read(buf)
+    }
+}
+
 /// Reads one request, answers it, returns the launch request if it was one.
 fn handle_client(mut stream: TcpStream, state: &Shared) -> Option<LaunchRequest> {
     let _ = stream.set_nonblocking(false);
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
     let base = format!("http://{}:{}", stream.local_addr().ok()?.ip(), state.http_port);
-    let (method, path, body) = read_request(&mut stream)?;
+    let (method, path, body) = read_request(&mut Deadline { s: &mut stream, until: std::time::Instant::now() + Duration::from_secs(5) })?;
     let (resp, launch) = route(&method, &path, &body, &base, state);
     let mut head = format!("HTTP/1.1 {}\r\n", resp.status);
     for (k, v) in &resp.headers {

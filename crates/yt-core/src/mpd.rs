@@ -80,7 +80,7 @@ pub fn build_with_audio(
             }
             video += &format!(
                 "<Representation id=\"{itag}\" codecs=\"{c}\" bandwidth=\"{bw}\" width=\"{}\" height=\"{h}\" frameRate=\"{}\">{seg}</Representation>\n",
-                f["width"], f["fps"].as_u64().unwrap_or(30)
+                f["width"].as_u64().unwrap_or(0), f["fps"].as_u64().unwrap_or(30)
             );
             nv += 1;
         } else if mime.starts_with("audio/mp4")

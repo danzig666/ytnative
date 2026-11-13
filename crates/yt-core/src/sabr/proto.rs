@@ -174,7 +174,7 @@ impl<'a> Iterator for Reader<'a> {
                     Val::Fixed64(u64::from_le_bytes(b.try_into().ok()?))
                 }
                 2 => {
-                    let len = read_varint(self.data, &mut self.pos)? as usize;
+                    let len = usize::try_from(read_varint(self.data, &mut self.pos)?).ok()?;
                     let b = self.data.get(self.pos..self.pos.checked_add(len)?)?;
                     self.pos += len;
                     Val::Bytes(b)

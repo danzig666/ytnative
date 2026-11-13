@@ -171,7 +171,7 @@ impl MkvDemuxer {
     fn parse(&mut self) -> Result<()> {
         loop {
             if self.skip > 0 {
-                let n = (self.skip as usize).min(self.buf.len());
+                let n = self.skip.min(self.buf.len() as u64) as usize;
                 self.consume(n);
                 self.skip -= n as u64;
                 if self.skip > 0 {
@@ -183,12 +183,23 @@ impl MkvDemuxer {
                 self.cluster_end = None;
             }
             let Some((id, il)) = read_id(&self.buf) else {
-                if !self.buf.is_empty() && self.buf[0] == 0 {
-                    bail!("mkv: invalid element id at {}", self.pos);
+                // Not enough bytes yet, unless the first byte can never start an id (0x00, or a
+                // length over 4): then the stream is broken and waiting would buffer forever.
+                if self.buf.first().is_some_and(|b| b.leading_zeros() >= 4) {
+                    let at = self.pos;
+                    self.buf.clear();
+                    bail!("mkv: invalid element id at {at}");
                 }
                 return Ok(());
             };
-            let Some((size, sl)) = read_vint(&self.buf[il..]) else { return Ok(()) };
+            let Some((size, sl)) = read_vint(&self.buf[il..]) else {
+                if self.buf.get(il) == Some(&0) {
+                    let at = self.pos;
+                    self.buf.clear();
+                    bail!("mkv: invalid element size at {at}");
+                }
+                return Ok(());
+            };
             let hdr = il + sl;
             match id {
                 ID_EBML => {
@@ -216,7 +227,9 @@ impl MkvDemuxer {
             }
             let Some(size) = size else {
                 // Unknown-size element we do not enter: cannot be delimited.
-                bail!("mkv: unknown-size element {id:#x} at {}", self.pos);
+                let at = self.pos;
+                self.buf.clear();
+                bail!("mkv: unknown-size element {id:#x} at {at}");
             };
             let total = hdr as u64 + size;
             let wanted = match self.level {

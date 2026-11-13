@@ -320,6 +320,7 @@ impl SabrStream {
         }
         self.reemit_init = true;
         self.empty_streak = 0;
+        self.backoff_ms = 0; // a seek does not wait out the old pacing delay
         self.finished = false;
         self.last_seek = Instant::now();
     }
@@ -497,10 +498,22 @@ impl SabrStream {
         }
         let before = out.len();
         let mut redirects = 0;
-        while self.round_trip(&mut out)? {
-            redirects += 1;
-            if redirects > 5 {
-                bail!("SABR: too many redirects");
+        loop {
+            match self.round_trip(&mut out) {
+                Ok(true) => {
+                    redirects += 1;
+                    if redirects > 5 {
+                        bail!("SABR: too many redirects");
+                    }
+                }
+                Ok(false) => break,
+                // Segments parsed before the failure are already recorded as buffered (the next
+                // request tells the server we have them), so they must be delivered, not dropped.
+                Err(e) if out.len() > before => {
+                    eprintln!("[sabr] response failed after {} segments: {e:#}", out.len() - before);
+                    break;
+                }
+                Err(e) => return Err(e),
             }
         }
         if self.tracks().all(TrackState::done) {

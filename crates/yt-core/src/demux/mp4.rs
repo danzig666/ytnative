@@ -75,7 +75,7 @@ impl Mp4Demuxer {
     fn parse(&mut self) -> Result<()> {
         loop {
             if self.skip > 0 {
-                let n = (self.skip as usize).min(self.buf.len());
+                let n = self.skip.min(self.buf.len() as u64) as usize;
                 self.buf.drain(..n);
                 self.pos += n as u64;
                 self.skip -= n as u64;
@@ -90,12 +90,16 @@ impl Mp4Demuxer {
                 None => {
                     if &ty == b"mdat" && !self.pending.is_empty() {
                         let len = self.buf.len() as u64;
-                        self.extract(len)?;
+                        self.extract(len, true)?;
                     }
                     return Ok(());
                 }
             };
             if size < hdr as u64 {
+                // Drop what is buffered: the next push starts clean instead of failing on the
+                // same header forever (a seek re-sends the init segment anyway).
+                self.buf.clear();
+                self.pending.clear();
                 bail!("mp4: box {} has bad size {size}", String::from_utf8_lossy(&ty));
             }
             let interesting = matches!(&ty, b"moov" | b"moof" | b"sidx" | b"mdat");
@@ -118,7 +122,7 @@ impl Mp4Demuxer {
                     let body = self.buf[hdr..size].to_vec();
                     self.parse_moof(&body, start)?;
                 }
-                b"mdat" => self.extract(size as u64)?,
+                b"mdat" => self.extract(size as u64, false)?,
                 _ => {}
             }
             self.buf.drain(..size);
@@ -126,12 +130,18 @@ impl Mp4Demuxer {
         }
     }
 
-    /// Moves every pending sample whose bytes lie in `buf[..avail]` to the output.
-    fn extract(&mut self, avail: u64) -> Result<()> {
+    /// Moves every pending sample whose bytes lie in `buf[..avail]` to the output. `partial`: the
+    /// mdat is still arriving (size 0), so samples past `avail` stay pending.
+    fn extract(&mut self, avail: u64, partial: bool) -> Result<()> {
         let end = self.pos + avail;
         let pending = std::mem::take(&mut self.pending);
         for s in pending {
-            if s.offset < self.pos || s.offset + s.size as u64 > end {
+            let Some(s_end) = s.offset.checked_add(s.size as u64) else { continue };
+            if partial && s.offset >= self.pos && s_end > end {
+                self.pending.push(s);
+                continue;
+            }
+            if s.offset < self.pos || s_end > end {
                 // A sample outside this mdat: data offsets we cannot honour. Drop it rather than
                 // feed garbage.
                 continue;
@@ -259,12 +269,21 @@ impl Mp4Demuxer {
                 let mut r = Rd::new(trun);
                 let vf = r.u32().unwrap_or(0);
                 let (ver, tf) = (vf >> 24, vf & 0xff_ffff);
-                let count = r.u32().unwrap_or(0);
+                let count = r.u32().unwrap_or(0) as u64;
                 if tf & 0x1 != 0 {
                     let off = r.u32().unwrap_or(0) as i32 as i64;
-                    cursor = (base as i64 + off) as u64;
+                    match (base as i64).checked_add(off).filter(|c| *c >= 0) {
+                        Some(c) => cursor = c as u64,
+                        None => continue, // a data offset before the file: skip this run
+                    }
                 }
                 let first_flags = if tf & 0x4 != 0 { r.u32() } else { None };
+                // Never trust the count beyond what the box can hold (a corrupt count would push
+                // billions of samples).
+                let per = 4 * [0x100, 0x200, 0x400, 0x800].iter().filter(|b| tf & **b != 0).count() as u64;
+                let fixed = 8 + if tf & 0x1 != 0 { 4 } else { 0 } + if tf & 0x4 != 0 { 4 } else { 0 };
+                let room = (trun.len() as u64).saturating_sub(fixed);
+                let count = if per > 0 { count.min(room / per) } else { count.min(100_000) };
                 for i in 0..count {
                     let dur = if tf & 0x100 != 0 { r.u32().unwrap_or(d_dur) } else { d_dur };
                     let size = if tf & 0x200 != 0 { r.u32().unwrap_or(d_size) } else { d_size };
@@ -284,7 +303,7 @@ impl Mp4Demuxer {
                     let depends = (sflags >> 24) & 0x3;
                     let key = audio || (!non_sync && depends != 1);
                     self.pending.push(PendingSample { track: ti, offset: cursor, size, dts, cts, duration: dur, key });
-                    cursor += size as u64;
+                    cursor = cursor.saturating_add(size as u64);
                     dts += dur as i64;
                 }
             }

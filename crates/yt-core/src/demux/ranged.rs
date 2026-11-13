@@ -53,7 +53,8 @@ pub fn fetch_range_with(
 }
 
 pub fn fetch_range(http: &reqwest::blocking::Client, url: &str, user_agent: &str, start: u64, end: u64) -> Result<Vec<u8>> {
-    let mut out = Vec::with_capacity((end + 1 - start) as usize);
+    let len = (end + 1).checked_sub(start).filter(|l| *l > 0).with_context(|| format!("bad byte range {start}-{end}"))?;
+    let mut out = Vec::with_capacity(len.min(MAX_RANGE) as usize);
     fetch_range_with(http, url, user_agent, start, end, &mut |d| {
         out.extend_from_slice(d);
         Ok(())
@@ -73,12 +74,14 @@ fn fetch_once(http: &reqwest::blocking::Client, url: &str, user_agent: &str, sta
     if st.as_u16() != 206 && !st.is_success() {
         bail!("range {start}-{end}: HTTP {st}");
     }
-    let mut out = Vec::with_capacity((end + 1 - start) as usize);
-    resp.read_to_end(&mut out).context("range body")?;
     if st.as_u16() == 200 && start > 0 {
         bail!("server ignored the Range header");
     }
-    out.truncate((end + 1 - start) as usize);
+    // Read at most the asked-for bytes: a server answering 200 with the whole file must not
+    // pull hundreds of MB into memory.
+    let want = end + 1 - start;
+    let mut out = Vec::with_capacity(want.min(MAX_RANGE) as usize);
+    (&mut resp).take(want).read_to_end(&mut out).context("range body")?;
     Ok(out)
 }
 
