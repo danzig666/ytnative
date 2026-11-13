@@ -575,7 +575,7 @@ impl Screen<YtHost> for BrowseScreen {
                 view.record_stops(f);
             }
         } else if src.cards.is_empty() {
-            common::empty_state(p, feed, Rect::new(LEFT, 150.0, 1920.0 - 2.0 * LEFT, 800.0));
+            common::empty_state(p, feed, Rect::new(LEFT, 150.0, 1920.0 - 2.0 * LEFT, 800.0), cx.views.now_ms);
         } else {
             ui::reset_focused_caption();
             self.grid.draw(f, p, &src);

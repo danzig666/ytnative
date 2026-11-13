@@ -274,6 +274,20 @@ pub fn set_sidebar_shown(on: bool) {
     SIDEBAR_SHOWN.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// A ring of dots chasing round (loading), centred on `x, y`; keeps frames coming.
+pub fn spinner(p: Painter, now_ms: u32, x: f32, y: f32) {
+    let n = 10;
+    let head = (now_ms / 80) as usize % n;
+    for i in 0..n {
+        let a = i as f32 / n as f32 * std::f32::consts::TAU;
+        let (dx, dy) = (x + 40.0 * a.sin(), y - 40.0 * a.cos());
+        let age = (head + n - i) % n;
+        let alpha = 0.15 + 0.8 * (1.0 - age as f32 / n as f32);
+        fill(p, Rect::new(dx - 6.0, dy - 6.0, 12.0, 12.0), 6.0, [1.0, 1.0, 1.0, alpha]);
+    }
+    animating();
+}
+
 pub fn sidebar_shown() -> bool {
     SIDEBAR_SHOWN.load(std::sync::atomic::Ordering::Relaxed)
 }

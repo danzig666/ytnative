@@ -839,16 +839,7 @@ impl Screen<YtHost> for PlayerScreen {
             ui::fill(p, Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, [0.0, 0.0, 0.0, 1.0]);
             if msg.is_empty() {
                 // Loading / starting: a spinner, no words.
-                let n = 10;
-                let head = (cx.views.now_ms / 80) as usize % n;
-                for i in 0..n {
-                    let a = i as f32 / n as f32 * std::f32::consts::TAU;
-                    let (x, y) = (960.0 + 40.0 * a.sin(), 540.0 - 40.0 * a.cos());
-                    let age = (head + n - i) % n;
-                    let alpha = 0.15 + 0.8 * (1.0 - age as f32 / n as f32);
-                    ui::fill(p, Rect::new(x - 6.0, y - 6.0, 12.0, 12.0), 6.0, [1.0, 1.0, 1.0, alpha]);
-                }
-                ui::animating();
+                ui::spinner(p, cx.views.now_ms, 960.0, 540.0);
             } else {
                 ui::text(p, &msg, 960.0, 510.0, 36, ui::DIM, ui::ALIGN_CENTER, false);
             }

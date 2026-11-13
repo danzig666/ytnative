@@ -195,7 +195,7 @@ impl Screen<YtHost> for FeedScreen {
         let cx = f.cx;
         let src = self.src(cx);
         if src.cards.is_empty() {
-            common::empty_state(p, cx.views.store.feed(&self.key), Rect::new(112.0, 170.0, 1700.0, 800.0));
+            common::empty_state(p, cx.views.store.feed(&self.key), Rect::new(112.0, 170.0, 1700.0, 800.0), cx.views.now_ms);
         } else {
             ui::reset_focused_caption();
             self.grid.draw(f, p, &src);

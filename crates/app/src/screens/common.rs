@@ -68,14 +68,18 @@ pub fn logo(p: Painter, x: f32, y: f32) {
     ui::text(p, "ytnative", x + 68.0, y + 1.0, 32, ui::WHITE, ui::ALIGN_LEFT, true);
 }
 
-/// Loading / error / empty message in place of a grid.
-pub fn empty_state(p: Painter, feed: Option<&Feed>, area: Rect) {
+/// A spinner (loading) or an error / empty message in place of a grid.
+pub fn empty_state(p: Painter, feed: Option<&Feed>, area: Rect, now_ms: u32) {
     let (msg, sub) = match feed {
-        None => ("Loading\u{2026}", ""),
-        Some(f) if f.loading => ("Loading\u{2026}", ""),
+        None => ("", ""),
+        Some(f) if f.loading => ("", ""),
         Some(f) if f.error.is_some() => ("Couldn't load this page", "Press OK on the section to retry."),
         Some(_) => ("Nothing here yet", ""),
     };
+    if msg.is_empty() {
+        ui::spinner(p, now_ms, area.x + area.w / 2.0, area.y + area.h / 2.0 - 20.0);
+        return;
+    }
     ui::text(p, msg, area.x + area.w / 2.0, area.y + area.h / 2.0 - 40.0, 36, ui::DIM, ui::ALIGN_CENTER, false);
     if !sub.is_empty() {
         ui::text(p, sub, area.x + area.w / 2.0, area.y + area.h / 2.0 + 10.0, 26, ui::FAINT, ui::ALIGN_CENTER, false);

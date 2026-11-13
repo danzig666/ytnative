@@ -1,1 +1,1 @@
-- New: on the first start the app reads what the TV supports (4K panel, HDR, AV1 and VP9 decoders) and sets the maximum quality, video codec, HDR and playback engine to match, instead of starting at 1080p H.264 without HDR
+- Changed: pages show a spinner instead of the "Loading…" text while they load (also at start-up)
