@@ -439,11 +439,9 @@ impl Focusable<YtHost> for BrowseScreen {
             return self.neighbour(FocusKey { entry: self.entry, elem: self.nav_last.get() }, dir, cx);
         }
         if self.rows_mode(cx) && key.elem < NAV_BASE {
+            // Left on the leftmost tile stays there: the sidebar opens only with BACK.
             return match self.stack.view(&self.rows).neighbour(key, dir, cx) {
-                Step::Edge if dir == Dir::Left => {
-                    self.nav_open.set(true);
-                    Step::Move(self.nav.key(self.nav_index_of_section(&items)))
-                }
+                Step::Edge if dir == Dir::Left => Step::Move(key),
                 s => s,
             };
         }
@@ -454,10 +452,7 @@ impl Focusable<YtHost> for BrowseScreen {
             return self.nav.neighbour(key, dir, items.len());
         }
         match self.grid.neighbour(&self.src(cx), key, dir) {
-            Step::Edge if dir == Dir::Left => {
-                self.nav_open.set(true);
-                Step::Move(self.nav.key(self.nav_index_of_section(&items)))
-            }
+            Step::Edge if dir == Dir::Left => Step::Move(key),
             s => s,
         }
     }

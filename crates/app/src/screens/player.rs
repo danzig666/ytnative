@@ -339,7 +339,8 @@ impl Machine<YtHost> for PlayerScreen {
                 }
                 match (key, *wcode) {
                     (Key::Back, _) => {
-                        if self.hud && cx.views.player.phase == Phase::Playing {
+                        // BACK hides the controls while playing or paused (a paused video too).
+                        if self.hud && matches!(cx.views.player.phase, Phase::Playing | Phase::Paused) {
                             self.hud = false;
                             fx.invalidate(plx_machine::present::Provenance::Input);
                             Handled::Yes
@@ -519,7 +520,7 @@ impl Screen<YtHost> for PlayerScreen {
         if ui::comments_open() {
             return;
         }
-        if !self.hud && st.phase == Phase::Playing {
+        if !self.hud && matches!(st.phase, Phase::Playing | Phase::Paused) {
             common::toast(p, cx);
             return;
         }

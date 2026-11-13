@@ -37,7 +37,9 @@ Guards:
 
 ## Cutting a release
 
-1. Bump `version` in `crates/app/pkg/appinfo.json` (the workflow refuses a tag that does not match
+1. Write the changelog in `docs/release-notes.md`: only a bullet list, one line per change,
+   each starting with `Fixed:`, `Changed:` or `New:` (it becomes the release text as is).
+   Bump `version` in `crates/app/pkg/appinfo.json` (the workflow refuses a tag that does not match
    it). The Homebrew Channel compares versions as strings for "update available", so always bump.
 2. On the dev PC, with the TV's libraries in `sysroot/`:
    ```bash
