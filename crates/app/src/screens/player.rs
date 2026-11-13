@@ -95,43 +95,83 @@ impl PlayerScreen {
     }
 }
 
-/// The OSD's pointer buttons, right-aligned on the bottom row: 0 Subtitles, 1 Comments, 2 Options.
-/// OSD buttons: 0 like, 1 dislike, 2 subtitles, 3 comments, 4 options.
-const OSD_N: usize = 5;
-const OSD_CC: usize = 2;
+/// OSD buttons, left to right: 0 previous, 1 play/pause, 2 next (centred on the bottom row);
+/// 3 like, 4 dislike, 5 subtitles, 6 comments, 7 options (right-aligned).
+const OSD_N: usize = 8;
+const OSD_PLAY: usize = 1;
+const OSD_LIKE: usize = 3;
+const OSD_DISLIKE: usize = 4;
+const OSD_CC: usize = 5;
 
 fn osd_button(i: usize) -> Rect {
-    const W: [f32; OSD_N] = [84.0; OSD_N];
-    let mut x = 1824.0;
-    for j in (i..OSD_N).rev() {
-        x -= W[j];
-        if j != i {
-            x -= 16.0;
-        }
+    if i < OSD_LIKE {
+        return Rect::new(918.0 + (i as f32 - 1.0) * 100.0, 994.0, 84.0, 46.0);
     }
-    Rect::new(x, 994.0, W[i], 46.0)
+    let from_right = (OSD_N - 1 - i) as f32;
+    Rect::new(1740.0 - from_right * 100.0, 994.0, 84.0, 46.0)
+}
+
+thread_local! {
+    /// Videos played in this run, oldest first (the "previous" button walks back through it).
+    static PLAYED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 impl PlayerScreen {
-    /// OSD button `i` pressed (pointer or OK): 0 subtitles, 1 comments, 2 options.
+    /// Next: the playlist's / YouTube's up-next video, else the next one in the opened list.
+    fn next(&mut self, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
+        match next_video(cx, &self.video_id, false) {
+            Some((v, pl)) => fx.push(Fx::Nav(NavOp::Replace(YtArg::Player { video_id: v, playlist: pl.or(self.playlist.clone()) }))),
+            None => self.step_queue(1, cx, fx),
+        }
+    }
+
+    /// Previous: the playlist's previous video, else the one played before this, else the
+    /// previous one in the opened list.
+    fn prev(&mut self, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
+        if let Some(pl) = cx.views.player.extras.watch.as_ref().and_then(|w| w.playlist.as_ref()) {
+            if let Some(i) = pl.items.iter().position(|it| it.id == self.video_id).filter(|i| *i > 0) {
+                let video_id = pl.items[i - 1].id.clone();
+                fx.push(Fx::Nav(NavOp::Replace(YtArg::Player { video_id, playlist: Some(pl.id.clone()) })));
+                return;
+            }
+        }
+        let before = PLAYED.with(|h| {
+            let mut h = h.borrow_mut();
+            if h.len() >= 2 && h.last() == Some(&self.video_id) {
+                h.pop();
+                h.last().cloned()
+            } else {
+                None
+            }
+        });
+        match before {
+            Some(video_id) => fx.push(Fx::Nav(NavOp::Replace(YtArg::Player { video_id, playlist: None }))),
+            None => self.step_queue(-1, cx, fx),
+        }
+    }
+
+    /// OSD button `i` pressed (pointer or OK); see [`osd_button`] for the order.
     fn press_osd(&mut self, i: usize, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
         let st = cx.views.player;
         match i {
-            0 | 1 if !st.video_id.is_empty() => {
+            0 => self.prev(cx, fx),
+            OSD_PLAY => fx.push(Fx::App(YtFx::TogglePause)),
+            2 => self.next(cx, fx),
+            OSD_LIKE | OSD_DISLIKE if !st.video_id.is_empty() => {
                 use yt_core::actions::Rating;
                 let cur = st.extras.watch.as_ref().map(|w| w.like_status);
                 let liked = matches!(cur, Some(yt_core::watch::LikeStatus::Like));
                 let disliked = matches!(cur, Some(yt_core::watch::LikeStatus::Dislike));
                 let r = match (i, liked, disliked) {
-                    (0, true, _) | (1, _, true) => Rating::None,
-                    (0, ..) => Rating::Like,
+                    (OSD_LIKE, true, _) | (OSD_DISLIKE, _, true) => Rating::None,
+                    (OSD_LIKE, ..) => Rating::Like,
                     _ => Rating::Dislike,
                 };
                 fx.push(Fx::App(YtFx::Act(crate::host::UserAction::Rate(st.video_id.clone(), r))));
             }
-            0 | 1 => {}
-            2 => fx.push(Fx::App(YtFx::EditSettings(Box::new(|s| s.subtitles = !s.subtitles)))),
-            3 => {
+            OSD_LIKE | OSD_DISLIKE => {}
+            OSD_CC => fx.push(Fx::App(YtFx::EditSettings(Box::new(|s| s.subtitles = !s.subtitles)))),
+            6 => {
                 if !st.video_id.is_empty() && !cx.views.store.settings.child_mode {
                     self.osd_sel = None;
                     fx.push(Fx::Nav(NavOp::Present(YtArg::Comments(st.video_id.clone()))));
@@ -150,6 +190,15 @@ impl Machine<YtHost> for PlayerScreen {
     fn step(&mut self, ev: &Self::Ev, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) -> Handled {
         match ev {
             ScreenEvent::Mount => {
+                PLAYED.with(|h| {
+                    let mut h = h.borrow_mut();
+                    if h.last() != Some(&self.video_id) {
+                        h.push(self.video_id.clone());
+                        if h.len() > 100 {
+                            h.remove(0);
+                        }
+                    }
+                });
                 fx.push(Fx::App(YtFx::Play { video_id: self.video_id.clone(), playlist: self.playlist.clone() }));
                 self.show_hud(cx, fx);
                 Handled::Yes
@@ -333,8 +382,8 @@ impl Machine<YtHost> for PlayerScreen {
                         Handled::Yes
                     }
                     (Key::Down, _) => {
-                        // First Down: the OSD buttons (subtitles); Down again: Options.
-                        self.osd_sel = Some(OSD_CC);
+                        // Down: the OSD buttons, starting on play/pause.
+                        self.osd_sel = Some(OSD_PLAY);
                         self.show_hud(cx, fx);
                         Handled::Yes
                     }
@@ -570,16 +619,15 @@ impl Screen<YtHost> for PlayerScreen {
         }
         ui::text(p, &right, 1824.0, 950.0, 30, ui::WHITE, ui::ALIGN_RIGHT, false);
         // State + quality line
-        let state = match st.phase {
-            Phase::Paused => "\u{23F8}  Paused",
-            Phase::Ended => "Ended",
-            _ => "\u{25B6}",
+        // (Playing / paused shows on the play button.)
+        let mut info = match st.phase {
+            Phase::Ended => "Ended   ".to_string(),
+            _ => String::new(),
         };
-        let mut info = state.to_string();
         // Quality, always: the decoder's resolution, else the best the stream offers.
         let h = if st.height > 0 { st.height } else { st.quality_hint };
         if h > 0 {
-            info.push_str(&format!("   {}p{}", h, if st.fps > 30 { st.fps.to_string() } else { String::new() }));
+            info.push_str(&format!("{}p{}", h, if st.fps > 30 { st.fps.to_string() } else { String::new() }));
             if !st.hdr.is_empty() && !st.hdr.eq_ignore_ascii_case("none") {
                 info.push_str(&format!("  {}", st.hdr));
             }
@@ -598,15 +646,19 @@ impl Screen<YtHost> for PlayerScreen {
         let liked = matches!(rating, Some(yt_core::watch::LikeStatus::Like));
         let disliked = matches!(rating, Some(yt_core::watch::LikeStatus::Dislike));
         use ui::icon::Kind;
-        let kinds = [Kind::ThumbUp, Kind::ThumbDown, Kind::Cc, Kind::Chat, Kind::Gear];
+        let play = if matches!(st.phase, Phase::Paused | Phase::Ended) { Kind::Play } else { Kind::Pause };
+        let kinds = [Kind::Prev, play, Kind::Next, Kind::ThumbUp, Kind::ThumbDown, Kind::Cc, Kind::Chat, Kind::Gear];
         for (i, k) in kinds.iter().enumerate() {
             let b = osd_button(i);
             let hot = self.pointer.is_some_and(|(x, y)| b.contains(x, y)) || self.osd_sel == Some(i);
-            let on = (i == OSD_CC && subs_on) || (i == 0 && liked) || (i == 1 && disliked);
+            let on = (i == OSD_CC && subs_on) || (i == OSD_LIKE && liked) || (i == OSD_DISLIKE && disliked);
             ui::fill(p, b, b.h / 2.0, if hot { [1.0, 1.0, 1.0, 0.9] } else if on { [1.0, 1.0, 1.0, 0.22] } else { [1.0, 1.0, 1.0, 0.10] });
             let ink = if hot { [0.0, 0.0, 0.0, 1.0] } else { ui::WHITE };
             let s = 30.0;
-            ui::icon::draw(p, *k, Rect::new(b.x + (b.w - s) / 2.0, b.y + (b.h - s) / 2.0, s, s), ink, on && i < 2);
+            // Transport icons are solid; thumbs fill when active.
+            let filled = i < OSD_LIKE || (on && (i == OSD_LIKE || i == OSD_DISLIKE));
+            let s = if i < OSD_LIKE { 26.0 } else { s };
+            ui::icon::draw(p, *k, Rect::new(b.x + (b.w - s) / 2.0, b.y + (b.h - s) / 2.0, s, s), ink, filled);
             if on {
                 ui::fill(p, Rect::new(b.x + 22.0, b.y + b.h - 6.0, b.w - 44.0, 3.0), 1.5, ui::accent());
             }

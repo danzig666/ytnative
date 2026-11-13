@@ -274,7 +274,6 @@ pub const PANEL: [f32; 4] = [0.06, 0.06, 0.08, 0.92];
 pub const ROW_FOCUS: [f32; 4] = [1.0, 1.0, 1.0, 0.16];
 pub const SCRIM: [f32; 4] = [0.0, 0.0, 0.0, 0.62];
 
-/// Draws `s` with its top-left (or anchor edge per `align`) at x,y. Returns the text width.
 thread_local! {
     /// Brightness of UI ink while it is drawn over HDR video (1 = normal).
     static UI_DIM: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) };
@@ -316,6 +315,7 @@ pub(crate) fn dimmed(col: [f32; 4]) -> [f32; 4] {
     [col[0] * k, col[1] * k, col[2] * k, col[3]]
 }
 
+/// Draws `s` with its top-left (or anchor edge per `align`) at x,y. Returns the text width.
 pub fn text(p: Painter, s: &str, x: f32, y: f32, size: i32, col: [f32; 4], align: i32, bold: bool) -> f32 {
     let col = dimmed(col);
     let s = crate::i18n::tr(s);
@@ -637,6 +637,11 @@ pub mod icon {
     const CHAT: &str = r##"<path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/>"##;
     const GEAR: &str = r##"<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>"##;
 
+    const PLAY: &str = r##"<path d="M6 3l14 9-14 9z"/>"##;
+    const PAUSE: &str = r##"<path d="M6 4h4v16H6z"/><path d="M14 4h4v16h-4z"/>"##;
+    const PREV: &str = r##"<path d="M19 20 9 12l10-8z"/><path d="M5 19V5"/>"##;
+    const NEXT: &str = r##"<path d="M5 4l10 8-10 8z"/><path d="M19 5v14"/>"##;
+
     #[derive(Clone, Copy, PartialEq)]
     pub enum Kind {
         ThumbUp,
@@ -644,6 +649,10 @@ pub mod icon {
         Chat,
         Gear,
         Cc,
+        Play,
+        Pause,
+        Prev,
+        Next,
     }
 
     fn svg(k: Kind, filled: bool) -> &'static str {
@@ -651,7 +660,7 @@ pub mod icon {
         static S: OnceLock<Vec<String>> = OnceLock::new();
         let all = S.get_or_init(|| {
             let mut v = Vec::new();
-            for body in [THUMB_UP, THUMB_DOWN, CHAT, GEAR] {
+            for body in [THUMB_UP, THUMB_DOWN, CHAT, GEAR, PLAY, PAUSE, PREV, NEXT] {
                 v.push(format!("{HEAD}{body}</svg>"));
                 v.push(format!("{}{body}</svg>", HEAD.replace(r##"fill="none""##, r##"fill="#ffffff""##)));
             }
@@ -662,6 +671,10 @@ pub mod icon {
             Kind::ThumbDown => 2,
             Kind::Chat => 4,
             Kind::Gear | Kind::Cc => 6,
+            Kind::Play => 8,
+            Kind::Pause => 10,
+            Kind::Prev => 12,
+            Kind::Next => 14,
         };
         &all[i + filled as usize]
     }
