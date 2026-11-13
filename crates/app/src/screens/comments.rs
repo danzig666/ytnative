@@ -68,18 +68,24 @@ fn comment_h(lines: usize, foot: bool) -> f32 {
     10.0 + 30.0 + lines as f32 * LINE + if foot { 30.0 } else { 0.0 } + 10.0
 }
 
-fn footer(cm: &yt_core::comments::Comment) -> String {
-    let mut foot = String::new();
+/// The footer has something to show (likes or replies).
+fn has_footer(cm: &yt_core::comments::Comment) -> bool {
+    cm.like_count_text.is_some() || cm.reply_count > 0
+}
+
+/// Likes and replies, with the same thumb / chat icons as the player.
+fn draw_footer(p: plx_ui::Painter, cm: &yt_core::comments::Comment, x: f32, y: f32) {
+    let mut x = x;
     if let Some(l) = &cm.like_count_text {
-        foot.push_str(&format!("\u{1F44D} {l}"));
+        ui::icon::draw(p, ui::icon::Kind::ThumbUp, Rect::new(x, y + 2.0, 22.0, 22.0), ui::FAINT, false);
+        x += 30.0;
+        x += ui::text(p, l, x, y, 22, ui::FAINT, ui::ALIGN_LEFT, false) + 28.0;
     }
     if cm.reply_count > 0 {
-        if !foot.is_empty() {
-            foot.push_str("      ");
-        }
-        foot.push_str(&format!("\u{1F4AC} {}", cm.reply_count));
+        ui::icon::draw(p, ui::icon::Kind::Chat, Rect::new(x, y + 2.0, 22.0, 22.0), ui::FAINT, false);
+        x += 30.0;
+        ui::text(p, &cm.reply_count.to_string(), x, y, 22, ui::FAINT, ui::ALIGN_LEFT, false);
     }
-    foot
 }
 
 /// Wrapped lines and positions of the loaded comments (built in `draw`, where text can be
@@ -360,7 +366,7 @@ impl Screen<YtHost> for CommentsScreen {
             let from = l.lines.len();
             for cm in &c.items[from..] {
                 let lines = wrap_px(f.measure, &cm.text, w, TEXT);
-                let h = comment_h(lines.len(), !footer(cm).is_empty());
+                let h = comment_h(lines.len(), has_footer(cm));
                 let t = if l.top.is_empty() { 0.0 } else { l.total() + GAP };
                 l.lines.push(lines);
                 l.top.push(t);
@@ -410,9 +416,8 @@ impl Screen<YtHost> for CommentsScreen {
                 }
                 ui::text(p, line, r.x + 20.0, ly, TEXT, ui::WHITE, ui::ALIGN_LEFT, false);
             }
-            let foot = footer(cm);
-            if !foot.is_empty() {
-                ui::text(p, &foot, r.x + 20.0, r.y + 40.0 + l.lines[i].len() as f32 * LINE + 2.0, 22, ui::FAINT, ui::ALIGN_LEFT, false);
+            if has_footer(cm) {
+                draw_footer(p, cm, r.x + 20.0, r.y + 40.0 + l.lines[i].len() as f32 * LINE + 2.0);
             }
         }
         if c.loading {
