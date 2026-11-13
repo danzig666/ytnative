@@ -11,6 +11,17 @@ webOS app framework); SmartTube is the feature reference throughout.
 
 > Not affiliated with Google, YouTube, LG or the SmartTube project. Use at your own risk.
 
+## Screenshots
+
+![Home: shelves of videos, the focused one raised, a members-only badge](docs/screenshots/home.jpg)
+
+| | |
+|---|---|
+| ![The sidebar slid in over Home](docs/screenshots/sidebar.jpg) | ![Search results for "nasa"](docs/screenshots/search.jpg) |
+| ![Playback settings: 2160p, AV1, HDR](docs/screenshots/settings.jpg) | ![Signing in with a code or a QR code](docs/screenshots/signin.jpg) |
+
+Taken in the app's Windows simulator, which runs the same UI code as the TV build.
+
 ## Install
 
 ### Homebrew Channel (recommended)
