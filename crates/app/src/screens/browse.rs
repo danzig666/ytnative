@@ -250,6 +250,16 @@ impl BrowseScreen {
     fn nav_index_of_section(&self, items: &[NavItem]) -> usize {
         items.iter().position(|i| *i == NavItem::Section(self.section)).unwrap_or(0)
     }
+
+    /// Left past the leftmost tile: into the sidebar when "Left opens the sidebar" is on.
+    fn left_edge(&self, key: FocusKey<u32>, items: &[NavItem], cx: &Cx<'_, YtHost>) -> Step<u32> {
+        if cx.views.store.settings.left_opens_sidebar {
+            self.nav_open.set(true);
+            Step::Move(self.nav.key(self.nav_index_of_section(items)))
+        } else {
+            Step::Move(key)
+        }
+    }
 }
 
 impl Machine<YtHost> for BrowseScreen {
@@ -466,9 +476,10 @@ impl Focusable<YtHost> for BrowseScreen {
             return self.neighbour(FocusKey { entry: self.entry, elem: self.nav_last.get() }, dir, cx);
         }
         if self.rows_mode(cx) && key.elem < NAV_BASE {
-            // Left on the leftmost tile stays there: the sidebar opens only with BACK.
+            // Left on the leftmost tile opens the sidebar when that option is on; otherwise it
+            // stays there and the sidebar opens only with BACK.
             return match self.stack.view(&self.rows).neighbour(key, dir, cx) {
-                Step::Edge if dir == Dir::Left => Step::Move(key),
+                Step::Edge if dir == Dir::Left => self.left_edge(key, &items, cx),
                 s => s,
             };
         }
@@ -479,7 +490,7 @@ impl Focusable<YtHost> for BrowseScreen {
             return self.nav.neighbour(key, dir, items.len());
         }
         match self.grid.neighbour(&self.src(cx), key, dir) {
-            Step::Edge if dir == Dir::Left => Step::Move(key),
+            Step::Edge if dir == Dir::Left => self.left_edge(key, &items, cx),
             s => s,
         }
     }

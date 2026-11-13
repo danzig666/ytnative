@@ -46,3 +46,7 @@ The ytnative simulator (`cargo xtask sim`, `crates/app/src/sim/`) builds these c
   so page-transition snapshots clear to black too.
 - gfx/src/gfx.rs `try_compile`: a fragment shader the driver rejects is retried once with `highp`
   replaced by `mediump` (fragment highp is optional in GLES2), for GPUs without it.
+- gfx/src/text.rs: the font chain gains the television's own script faces after `Sys`
+  (`/usr/share/fonts/LG_Smart_UI_{Devanagari,Bengali,Gujarati,Gurmukhi,Kannada,Malayalam,Oriya,Tamil,Telugu,Amharic}.ttf`,
+  `DroidSansThai-Regular.ttf`, `NotoSans{Sinhala,Khmer,Lao,Myanmar,Georgian,Armenian}-Regular.ttf`), drawn by SDL2_ttf
+  unshaped; `LINKS`, `SCRIPT_FONTS`, `FONTS_SCRIPT`; the test helpers treat links past `Hebrew` as absent.

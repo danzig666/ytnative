@@ -311,6 +311,8 @@ pub struct Settings {
     pub show_clock: bool,
     /// A clock at the top right of the video lists.
     pub clock_on_pages: bool,
+    /// Left on the leftmost tile opens the sidebar (off: only BACK does).
+    pub left_opens_sidebar: bool,
     pub controls_time: ControlsTime,
     pub ok_action: OkAction,
     /// Pause after this many minutes without a key press (0 = off).
@@ -472,6 +474,7 @@ impl Default for Settings {
             hud_timeout_secs: 3,
             show_clock: true,
             clock_on_pages: false,
+            left_opens_sidebar: true,
             controls_time: ControlsTime::Remaining,
             ok_action: OkAction::Controls,
             sleep_timer_mins: 0,

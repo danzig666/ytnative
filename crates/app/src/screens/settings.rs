@@ -301,6 +301,9 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
                     s.channels_alphabetical = !s.channels_alphabetical
                 }),
                 Opt("Clock on video lists", |s| on_off(s.clock_on_pages), |s, _| s.clock_on_pages = !s.clock_on_pages),
+                Opt("Left on the first tile opens the sidebar", |s| on_off(s.left_opens_sidebar), |s, _| {
+                    s.left_opens_sidebar = !s.left_opens_sidebar
+                }),
                 Opt("24-hour clock", |s| on_off(s.time_24h), |s, _| s.time_24h = !s.time_24h),
             Opt("Accent colour", |s| s.accent.clone(), |s, d| {
                 const C: &[&str] = &["red", "blue", "green", "purple", "orange"];

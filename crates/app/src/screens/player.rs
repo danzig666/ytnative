@@ -1,4 +1,4 @@
-//! Full-screen playback with an auto-hiding overlay (HUD).
+﻿//! Full-screen playback with an auto-hiding overlay (HUD).
 //!
 //! Keys: OK shows the HUD, or toggles pause when it is up; Left/Right seek (HUD shows the target);
 //! Up opens the player options; Play/Pause/FF/RW remote keys work directly; BACK hides the HUD
@@ -960,10 +960,13 @@ impl Screen<YtHost> for PlayerScreen {
         if st.phase == Phase::Ended {
             quality = format!("{}  {quality}", crate::i18n::tr("Ended"));
         }
-        ui::text(p, &quality, 1824.0, ROW_A_Y + 2.0, 26, ui::DIM, ui::ALIGN_RIGHT, false);
+        ui::text(p, &quality, 1824.0, ROW_A_Y + 18.0, 26, ui::DIM, ui::ALIGN_RIGHT, false);
         if s.show_clock {
-            let now = format!("{}  {}", common::date_text(), common::clock(&cx.views));
-            ui::text(p, &now, 1824.0, ROW_A_Y + 34.0, 26, ui::DIM, ui::ALIGN_RIGHT, false);
+            // The corner clock of the video pages, in the same place, while the controls show (it
+            // leaves with them, so nothing stays still on the panel). A soft shade keeps it legible
+            // over a bright picture.
+            ui::fill(p, Rect::new(1540.0, 18.0, 312.0, 108.0), 28.0, [0.0, 0.0, 0.0, 0.45]);
+            common::clock_block(p, cx, 1824.0, 30.0);
         }
         // Right of the lower row: remaining time, position / duration (or live).
         if st.live {

@@ -71,7 +71,7 @@ pub fn set_titles_under(on: bool) {
 thread_local! {
     /// The focused card's caption, deferred to the end of the page draw: (card rect on screen,
     /// title, detail).
-    static FOCUSED_CAPTION: std::cell::RefCell<Option<(Rect, String, String)>> = const { std::cell::RefCell::new(None) };
+    static FOCUSED_CAPTION: std::cell::RefCell<Option<(Rect, f32, String, String)>> = const { std::cell::RefCell::new(None) };
     /// Marquee clock: (title it runs for, start).
     static MARQUEE: std::cell::RefCell<(String, Option<std::time::Instant>)> = const { std::cell::RefCell::new((String::new(), None)) };
 }
@@ -117,49 +117,43 @@ pub fn reset_focused_caption() {
     FOCUSED_CAPTION.with(|f| *f.borrow_mut() = None);
 }
 
-/// The selected card's caption, drawn after every card: the title on ONE line in the card's own
-/// width, gliding in a loop when it does not fit (hold, glide to the end, hold, start over), and
-/// the detail line under it. No box and nothing over the neighbours.
+/// The selected card's caption, drawn after every card on a light panel that follows the card's
+/// pop. The text keeps exactly the line breaks the card had before it was focused (they are made
+/// at the card's resting width), so focusing never re-wraps a title; only a title too long for its
+/// two lines glides its second line, and a single word too long for the card glides its first.
 pub fn draw_focused_caption(p: Painter, m: &dyn plx_machine::machine::Measure, _min_x: f32) {
-    let Some((r, title, detail)) = FOCUSED_CAPTION.with(|f| f.borrow_mut().take()) else { return };
+    let Some((r, w0, title, detail)) = FOCUSED_CAPTION.with(|f| f.borrow_mut().take()) else { return };
     if !titles_under() {
         return;
     }
     const SIZE: i32 = 24;
-    // The focused card's panel turns light (SmartTube's focus): it follows the card's pop.
     let panel = Rect::new(r.x, r.y + r.h + PANEL_GAP, r.w, PANEL_H);
     fill(p, panel, PANEL_RAD, PANEL_FOCUS);
     let (ix, iy, w) = (panel.x + PANEL_PAD, panel.y + 12.0, panel.w - 2.0 * PANEL_PAD);
-    let tw = CString::new(title.as_str()).map_or(0.0, |c| m.width(&c, SIZE, true));
-    if tw <= w + 0.5 {
-        text(p, &title, ix, iy, SIZE, PANEL_FOCUS_INK, ALIGN_LEFT, true);
-    } else if let (l1, Some(l2), _) = caption_lines(m, &title, "", w).clone() {
-        // Two lines hold it: show them; only a title longer than that glides on one line.
-        if CString::new(format!("{l1} {l2}")).map_or(0.0, |c| m.width(&c, SIZE, true)) <= 2.0 * w && !l2.ends_with('\u{2026}') {
+    let (l1, l2, d) = caption_lines(m, &title, &detail, w0);
+    match &l2 {
+        Some(l2) if l2.ends_with('\u{2026}') => {
             text(p, &l1, ix, iy, SIZE, PANEL_FOCUS_INK, ALIGN_LEFT, true);
-            text(p, &l2, ix, iy + 31.0, SIZE, PANEL_FOCUS_INK, ALIGN_LEFT, true);
-            if !detail.is_empty() {
-                let d = m.fit_line(&detail, w, 20, false).to_string_lossy().into_owned();
-                text(p, &d, ix, iy + 67.0, 20, PANEL_FOCUS_DIM, ALIGN_LEFT, false);
-            }
-            return;
+            let rest = title.get(l1.len()..).unwrap_or("").trim_start();
+            marquee(p, m, rest, Some(l2), ix, iy + 31.0, w, SIZE);
         }
-        marquee(p, m, &title, ix, iy, w, SIZE);
-    } else {
-        marquee(p, m, &title, ix, iy, w, SIZE);
+        Some(l2) => {
+            text(p, &l1, ix, iy, SIZE, PANEL_FOCUS_INK, ALIGN_LEFT, true);
+            text(p, l2, ix, iy + 31.0, SIZE, PANEL_FOCUS_INK, ALIGN_LEFT, true);
+        }
+        None if l1 != title => marquee(p, m, &title, Some(&l1), ix, iy, w, SIZE),
+        None => {
+            text(p, &l1, ix, iy, SIZE, PANEL_FOCUS_INK, ALIGN_LEFT, true);
+        }
     }
-    if !detail.is_empty() {
-        // Under a one-line title the channel line may take two lines.
-        let (d1, d2) = wrap2(m, &detail, w, 20);
-        text(p, &d1, ix, iy + 36.0, 20, PANEL_FOCUS_DIM, ALIGN_LEFT, false);
-        if let Some(d2) = d2 {
-            text(p, &d2, ix, iy + 62.0, 20, PANEL_FOCUS_DIM, ALIGN_LEFT, false);
-        }
+    if !d.is_empty() {
+        text(p, &d, ix, iy + 67.0, 20, PANEL_FOCUS_DIM, ALIGN_LEFT, false);
     }
 }
 
 /// A title that does not fit, gliding on one line (hold, glide to the end, hold, start over).
-fn marquee(p: Painter, m: &dyn plx_machine::machine::Measure, title: &str, ix: f32, iy: f32, w: f32, size: i32) {
+/// `still` is what shows while it holds at the start (the line as the card had it, with its "…").
+fn marquee(p: Painter, m: &dyn plx_machine::machine::Measure, title: &str, still: Option<&str>, ix: f32, iy: f32, w: f32, size: i32) {
     let tw = CString::new(title).map_or(0.0, |c| m.width(&c, size, true));
     {
         const HOLD: f32 = 1.5;
@@ -174,6 +168,13 @@ fn marquee(p: Painter, m: &dyn plx_machine::machine::Measure, title: &str, ix: f
         });
         let cycle = 2.0 * HOLD + dist / SPEED;
         let off = ((t % cycle - HOLD) * SPEED).clamp(0.0, dist);
+        if off <= 0.0 {
+            if let Some(still) = still {
+                text(p, still, ix, iy, size, PANEL_FOCUS_INK, ALIGN_LEFT, true);
+                animating();
+                return;
+            }
+        }
         {
             let _scope = plx_ui::screen::ClipScope::open_in(p, Rect::new(ix, iy - 4.0, w, 40.0));
             text(p, title, ix - off, iy, size, PANEL_FOCUS_INK, ALIGN_LEFT, true);
@@ -193,7 +194,7 @@ fn caption_lines(m: &dyn plx_machine::machine::Measure, title: &str, detail: &st
     if let Some(v) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
         return v;
     }
-    let (l1, l2) = wrap2(m, title, w, 24);
+    let (l1, l2) = wrap2(m, title, w, 24, true);
     let d = if detail.is_empty() { String::new() } else { m.fit_line(detail, w, 20, false).to_string_lossy().into_owned() };
     let v = (l1, l2, d);
     CACHE.with(|c| {
@@ -207,8 +208,8 @@ fn caption_lines(m: &dyn plx_machine::machine::Measure, title: &str, detail: &st
 }
 
 /// `s` split into at most two lines of `w` px (word wrap; the second line ellipsised).
-fn wrap2(m: &dyn plx_machine::machine::Measure, s: &str, w: f32, size: i32) -> (String, Option<String>) {
-    let width = |t: &str| CString::new(t).map_or(0.0, |c| m.width(&c, size, false));
+fn wrap2(m: &dyn plx_machine::machine::Measure, s: &str, w: f32, size: i32, bold: bool) -> (String, Option<String>) {
+    let width = |t: &str| CString::new(t).map_or(0.0, |c| m.width(&c, size, bold));
     if width(s) <= w {
         return (s.to_string(), None);
     }
@@ -224,10 +225,10 @@ fn wrap2(m: &dyn plx_machine::machine::Measure, s: &str, w: f32, size: i32) -> (
     }
     if first.is_empty() || rest.is_empty() {
         // One long word: hard-cut it.
-        let cut: String = m.fit_line(s, w, size, false).to_string_lossy().into_owned();
+        let cut: String = m.fit_line(s, w, size, bold).to_string_lossy().into_owned();
         return (cut, None);
     }
-    let second = m.fit_line(rest.trim_start(), w, size, false).to_string_lossy().into_owned();
+    let second = m.fit_line(rest.trim_start(), w, size, bold).to_string_lossy().into_owned();
     (first.trim_end().to_string(), Some(second))
 }
 
@@ -445,18 +446,21 @@ impl CardSource<YtHost> for CardsSrc<'_> {
         if titles_under() {
             // Title (two lines) and channel / views / age under every thumbnail, as SmartTube does.
             let (r, c) = (tile.rect, &self.cards[i]);
+            // The text is laid out at the card's RESTING width: the pop (and a press) must not
+            // re-wrap it.
+            let w0 = r.w / tile.scale.max(0.5) - 2.0 * PANEL_PAD;
             if tile.focused {
                 // Drawn last, over the neighbours' captions (`draw_focused_caption`).
                 let screen = p.to_screen(r).0;
-                FOCUSED_CAPTION.with(|f| *f.borrow_mut() = Some((screen, c.title.clone(), c.detail.clone())));
+                FOCUSED_CAPTION.with(|f| *f.borrow_mut() = Some((screen, w0, c.title.clone(), c.detail.clone())));
                 return self.badge(p, i, tile);
             }
             let panel = Rect::new(r.x, r.y + r.h + PANEL_GAP, r.w, PANEL_H);
             fill(p, panel, PANEL_RAD, PANEL_IDLE);
-            let (x, y, w) = (panel.x + PANEL_PAD, panel.y + 12.0, panel.w - 2.0 * PANEL_PAD);
+            let (x, y) = (panel.x + PANEL_PAD, panel.y + 12.0);
             // Wrapping measures a title word by word; done once per (card, width), not per frame
             // (the page is drawn several times a frame, and a scroll draws every frame).
-            let (l1, l2, d) = caption_lines(m, &c.title, &c.detail, w);
+            let (l1, l2, d) = caption_lines(m, &c.title, &c.detail, w0);
             let ink = [1.0, 1.0, 1.0, 0.92];
             text(p, &l1, x, y, 24, ink, ALIGN_LEFT, true);
             if let Some(l2) = &l2 {

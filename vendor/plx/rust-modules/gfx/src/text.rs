@@ -1015,11 +1015,54 @@ enum Link {
     /// The bundled `appfont-hebrew.ttf` / `appfont-hebrew-bold.ttf` (Noto Sans Hebrew), shaped
     /// the same way as [`Link::Arabic`].
     Hebrew = 5,
+    // ytnative: the television's own faces for the scripts no bundled face covers (Indic,
+    // Ethiopic, South-East Asian, Georgian, Armenian). Drawn by SDL2_ttf without shaping, so
+    // conjuncts and reordered vowel signs are approximate, but the letters are there instead of
+    // boxes. Absent files (the simulator) simply leave the link empty.
+    Devanagari = 6,
+    Bengali = 7,
+    Gujarati = 8,
+    Gurmukhi = 9,
+    Kannada = 10,
+    Malayalam = 11,
+    Oriya = 12,
+    Tamil = 13,
+    Telugu = 14,
+    Ethiopic = 15,
+    Thai = 16,
+    Sinhala = 17,
+    Khmer = 18,
+    Lao = 19,
+    Myanmar = 20,
+    Georgian = 21,
+    Armenian = 22,
 }
 /// After `Emoji` on purpose: Noto Kufi maps U+200D, and ahead of the emoji face it would claim the
 /// zero-width joiner inside every emoji sequence, splitting 👨‍👩‍👧 into runs and loading the
 /// shaping library for a string with no Arabic in it.
-const CHAIN: [Link; 6] = [Link::Base, Link::Cjk, Link::Emoji, Link::Arabic, Link::Hebrew, Link::Sys];
+const CHAIN: [Link; LINKS] = [Link::Base, Link::Cjk, Link::Emoji, Link::Arabic, Link::Hebrew, Link::Sys, Link::Devanagari, Link::Bengali, Link::Gujarati, Link::Gurmukhi, Link::Kannada, Link::Malayalam, Link::Oriya, Link::Tamil, Link::Telugu, Link::Ethiopic, Link::Thai, Link::Sinhala, Link::Khmer, Link::Lao, Link::Myanmar, Link::Georgian, Link::Armenian];
+/// How many links there are; sizes [`COV`] and the chain.
+const LINKS: usize = 23;
+/// The script links' files in the television's font directory, in discriminant order from 6.
+const SCRIPT_FONTS: [&str; LINKS - 6] = [
+    "/usr/share/fonts/LG_Smart_UI_Devanagari.ttf",
+    "/usr/share/fonts/LG_Smart_UI_Bengali.ttf",
+    "/usr/share/fonts/LG_Smart_UI_Gujarati.ttf",
+    "/usr/share/fonts/LG_Smart_UI_Gurmukhi.ttf",
+    "/usr/share/fonts/LG_Smart_UI_Kannada.ttf",
+    "/usr/share/fonts/LG_Smart_UI_Malayalam.ttf",
+    "/usr/share/fonts/LG_Smart_UI_Oriya.ttf",
+    "/usr/share/fonts/LG_Smart_UI_Tamil.ttf",
+    "/usr/share/fonts/LG_Smart_UI_Telugu.ttf",
+    "/usr/share/fonts/LG_Smart_UI_Amharic.ttf",
+    "/usr/share/fonts/DroidSansThai-Regular.ttf",
+    "/usr/share/fonts/NotoSansSinhala-Regular.ttf",
+    "/usr/share/fonts/NotoSansKhmer-Regular.ttf",
+    "/usr/share/fonts/NotoSansLao-Regular.ttf",
+    "/usr/share/fonts/NotoSansMyanmar-Regular.ttf",
+    "/usr/share/fonts/NotoSansGeorgian-Regular.ttf",
+    "/usr/share/fonts/NotoSansArmenian-Regular.ttf",
+];
 
 impl Link {
     /// Shaped by [`crate::rtl`] rather than drawn by SDL2_ttf.
@@ -1048,6 +1091,9 @@ static FONTS_SYS: [AtomicPtr<TtfFont>; FONT_SLOTS] =
     [const { AtomicPtr::new(std::ptr::null_mut()) }; FONT_SLOTS];
 static FONTS_EMOJI: [AtomicPtr<TtfFont>; FONT_SLOTS] =
     [const { AtomicPtr::new(std::ptr::null_mut()) }; FONT_SLOTS];
+/// The script links' faces, per link and size.
+static FONTS_SCRIPT: [[AtomicPtr<TtfFont>; FONT_SLOTS]; LINKS - 6] =
+    [const { [const { AtomicPtr::new(std::ptr::null_mut()) }; FONT_SLOTS] }; LINKS - 6];
 /// The shaping library's faces for the right-to-left links, per size, regular and bold: opened on
 /// first need and kept for the process, like every SDL2_ttf face above.
 static FACES_ARABIC: [AtomicPtr<c_void>; FONT_SLOTS] =
@@ -1065,8 +1111,8 @@ static FACES_HEBREW_B: [AtomicPtr<c_void>; FONT_SLOTS] =
 /// load serves every thread (a per-thread table would read the 44k-codepoint cmap once per thread
 /// for nothing), and `get_or_init` runs the load exactly once even when two threads ask for the
 /// same link first.
-static COV: [std::sync::OnceLock<Option<plx_base::fontcov::Coverage>>; 6] =
-    [const { std::sync::OnceLock::new() }; 6];
+static COV: [std::sync::OnceLock<Option<plx_base::fontcov::Coverage>>; LINKS] =
+    [const { std::sync::OnceLock::new() }; LINKS];
 
 /// The ONE place a link's file is named — both the coverage read and the `TTF_OpenFont` go
 /// through it, so the two can never disagree about which file a link is.
@@ -1081,6 +1127,7 @@ fn link_file(link: Link) -> std::path::PathBuf {
         Link::Arabic => plx_base::paths::in_app_dir(ARABIC_FONT),
         Link::Hebrew => plx_base::paths::in_app_dir(HEBREW_FONT),
         Link::Sys => std::path::PathBuf::from(DROIDSANS_FALLBACK),
+        l => std::path::PathBuf::from(SCRIPT_FONTS[l as usize - 6]),
     }
 }
 
@@ -1177,7 +1224,8 @@ unsafe fn link_font(link: Link, sz: c_int, bold: c_int) -> *mut TtfFont {
     let slot = match link {
         Link::Cjk => &FONTS_CJK[sz],
         Link::Emoji => &FONTS_EMOJI[sz],
-        _ => &FONTS_SYS[sz],
+        Link::Sys => &FONTS_SYS[sz],
+        l => &FONTS_SCRIPT[l as usize - 6][sz],
     };
     let mut f = slot.load(Ordering::Relaxed);
     if f.is_null() {
@@ -3326,7 +3374,7 @@ mod tests {
     fn split(s: &str) -> Option<Runs> {
         let cov = chain();
         split_runs_with(s, |link, cp| {
-            cov[link as usize].is_some_and(|c| c.contains(cp))
+            cov.get(link as usize).copied().flatten().is_some_and(|c| c.contains(cp))
         })
     }
 
@@ -3506,7 +3554,7 @@ mod rtl_layout_tests {
             Link::Emoji => "appfont-emoji.ttf",
             Link::Arabic => "appfont-arabic.ttf",
             Link::Hebrew => "appfont-hebrew.ttf",
-            Link::Sys => return false, // absent on a build host, as in `tests::chain`
+            _ => return false, // absent on a build host, as in `tests::chain`
         };
         fontcov::shipped(name).as_ref().is_ok_and(|c| c.contains(cp))
     }
