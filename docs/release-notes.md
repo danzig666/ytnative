@@ -1,1 +1,1 @@
-- New: Settings, Player, "Player style": choose between the SmartTube controls and controls that look like the official YouTube TV app (title at the top, one row of buttons under a thin seek bar, suggestions peeking in at the bottom)
+- Fixed: resting the pointer at the very left edge of the screen now scrolls the shelf back (before, it only worked a little to the right of the edge)

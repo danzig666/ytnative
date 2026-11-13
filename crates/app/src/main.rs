@@ -521,7 +521,8 @@ fn main() {
             // Any input may have moved focus; list screens (settings, menus) don't animate, so
             // nothing else would ask for a present until the next unrelated wake.
             // Pointer edge glide: resting at either edge of the shelf area slides the shelf under it
-            // (`InputKind::Pan`, handled by plx's Stack). Left edge: just right of the sidebar.
+            // (`InputKind::Pan`, handled by plx's Stack). Left edge: right up to the screen's edge
+            // (the sidebar is hidden); not while the sidebar is slid in under the pointer.
             for e in &inputs {
                 use plx_machine::machine::InputKind as K;
                 match e.kind {
@@ -544,7 +545,7 @@ fn main() {
                 }
                 if !mouse_down && top == Some("browse") && (120.0..1056.0).contains(&y) {
                     let speed = 900.0 * dt;
-                    let dx = if x >= 1860.0 { speed } else if (40.0..110.0).contains(&x) { -speed } else { 0.0 };
+                    let dx = if x >= 1860.0 { speed } else if x < 110.0 && !ui::sidebar_shown() { -speed } else { 0.0 };
                     if dx != 0.0 {
                         inputs.push(plx_machine::machine::InputEvent {
                             at: tick,

@@ -267,6 +267,17 @@ pub static PAGE_SCROLLS: std::sync::atomic::AtomicBool = std::sync::atomic::Atom
 /// Option menus open (over the player or a page): the wheel / pointer edges step their rows.
 pub static MENUS_OPEN: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
+static SIDEBAR_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The browse screen's sidebar is (partly) slid in this frame.
+pub fn set_sidebar_shown(on: bool) {
+    SIDEBAR_SHOWN.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn sidebar_shown() -> bool {
+    SIDEBAR_SHOWN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn menu_open() -> bool {
     MENUS_OPEN.load(std::sync::atomic::Ordering::Relaxed) > 0
 }

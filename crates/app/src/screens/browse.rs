@@ -605,6 +605,7 @@ impl Screen<YtHost> for BrowseScreen {
             ui::animating();
         }
         let t = self.nav_t;
+        ui::set_sidebar_shown(t > 0.0);
         if t > 0.0 {
             ui::fill(p, Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, [0.0, 0.0, 0.0, 0.45 * t]);
         }
