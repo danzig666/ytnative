@@ -413,6 +413,8 @@ impl Screen<YtHost> for PlayerScreen {
                 ui::text(p, &msg, 960.0, 510.0, 36, ui::DIM, ui::ALIGN_CENTER, false);
             }
         }
+        // Everything below (captions, OSD, toasts) is dimmed over HDR video.
+        let _dim = ui::HdrDim::begin(ui::hdr_playing(st));
         let ex = st.extras.clone();
         if cx.views.store.settings.subtitles {
             if let Some(cue) = yt_core::captions::cue_at(&ex.cues, st.position_ms) {
@@ -445,8 +447,6 @@ impl Screen<YtHost> for PlayerScreen {
         if ui::comments_open() {
             return;
         }
-        // Everything below (OSD, toasts) is dimmed over HDR video; the captions above are not.
-        let _dim = ui::HdrDim::begin(ui::hdr_playing(st));
         if !self.hud && st.phase == Phase::Playing {
             common::toast(p, cx);
             return;
