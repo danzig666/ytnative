@@ -193,10 +193,12 @@ impl Machine<YtHost> for PlayerScreen {
                         Repeat::Off => self.show_hud(cx, fx),
                     }
                 }
+                // Always keep ticking: the end of the video must be noticed with the controls
+                // hidden too (it used to wait for a key press). Redraw only when something shows.
+                fx.push(Fx::Timer { id: T_TICK, after_ms: 500 });
                 if self.hud || p.phase != Phase::Playing {
-                    fx.push(Fx::Timer { id: T_TICK, after_ms: 500 });
+                    fx.invalidate(plx_machine::present::Provenance::Timer(T_TICK));
                 }
-                fx.invalidate(plx_machine::present::Provenance::Timer(T_TICK));
                 Handled::Yes
             }
             // Magic Remote pointer: moving shows the controls; a click on the seek bar seeks there,
