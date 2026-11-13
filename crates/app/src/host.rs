@@ -152,6 +152,8 @@ pub enum YtFx {
     Load(FeedKey),
     More(FeedKey),
     Play { video_id: String, playlist: Option<String> },
+    /// Play `video_id` again from the start (Repeat one).
+    Replay { video_id: String, playlist: Option<String> },
     Stop,
     TogglePause,
     /// OK in the player: skip an offered SponsorBlock segment, else toggle pause.
@@ -849,9 +851,16 @@ impl Rig<YtHost> for AppRig {
                 }
                 self.player.start(video_id, self.session.clone(), prefs, extras, start);
             }
+            YtFx::Replay { video_id, playlist } => {
+                self.pending_start = Some((video_id.clone(), 0));
+                self.app_fx(from, YtFx::Play { video_id, playlist }, _p, _out);
+            }
             YtFx::Stop => {
                 let v = &self.player_view;
-                if !v.video_id.is_empty() && v.duration_ms > 0 {
+                // Only a video that really played reports where it is (a BACK while resolving would
+                // otherwise store 0 over the resume point).
+                let played = matches!(v.phase, crate::player::Phase::Playing | crate::player::Phase::Paused | crate::player::Phase::Ended);
+                if !v.video_id.is_empty() && v.duration_ms > 0 && played {
                     let mut m = yt_core::memory::PlayerMemory::load();
                     m.set_position(&v.video_id, v.position_ms / 1000, v.duration_ms / 1000);
                     let _ = m.save();

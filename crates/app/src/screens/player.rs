@@ -68,6 +68,8 @@ impl PlayerScreen {
         let secs = cx.views.store.settings.hud_timeout_secs.max(2);
         fx.push(Fx::CancelTimer(T_HIDE));
         fx.push(Fx::Timer { id: T_HIDE, after_ms: secs * 1000 });
+        // One tick chain only: timers are not deduplicated, and every key / pointer move lands here.
+        fx.push(Fx::CancelTimer(T_TICK));
         fx.push(Fx::Timer { id: T_TICK, after_ms: 500 });
         fx.invalidate(plx_machine::present::Provenance::Input);
     }
@@ -131,6 +133,12 @@ impl PlayerScreen {
         if let Some(pl) = cx.views.player.extras.watch.as_ref().and_then(|w| w.playlist.as_ref()) {
             if let Some(i) = pl.items.iter().position(|it| it.id == self.video_id).filter(|i| *i > 0) {
                 let video_id = pl.items[i - 1].id.clone();
+                PLAYED.with(|h| {
+                    let mut h = h.borrow_mut();
+                    if h.last() == Some(&self.video_id) {
+                        h.pop();
+                    }
+                });
                 fx.push(Fx::Nav(NavOp::Replace(YtArg::Player { video_id, playlist: Some(pl.id.clone()) })));
                 return;
             }
@@ -222,12 +230,14 @@ impl Machine<YtHost> for PlayerScreen {
             ScreenEvent::Timer(T_TICK) => {
                 let p = cx.views.player;
                 // End of video: repeat or autoplay according to settings.
+                if p.phase != Phase::Ended {
+                    self.ended_handled = false; // seeking back from the end ends it again later
+                }
                 if p.phase == Phase::Ended && !self.ended_handled {
                     self.ended_handled = true;
                     match cx.views.store.settings.repeat {
                         Repeat::One => {
-                            self.ended_handled = false;
-                            fx.push(Fx::App(YtFx::Play { video_id: self.video_id.clone(), playlist: self.playlist.clone() }));
+                            fx.push(Fx::App(YtFx::Replay { video_id: self.video_id.clone(), playlist: self.playlist.clone() }));
                         }
                         Repeat::Autoplay | Repeat::List => {
                             let repeat_list = cx.views.store.settings.repeat == Repeat::List;
@@ -304,7 +314,9 @@ impl Machine<YtHost> for PlayerScreen {
                 }
                 // OSD buttons selected with the keys: Left/Right between them, OK presses, Down again
                 // opens Options, Up / BACK leave the buttons.
-                if let Some(sel) = self.osd_sel {
+                let transport = [WCODE_PLAY, WCODE_PAUSE, WCODE_PLAYPAUSE, WCODE_RW, WCODE_FF, WCODE_CH_UP, WCODE_CH_DOWN].contains(wcode)
+                    || WCODE_STOP.contains(wcode);
+                if let Some(sel) = self.osd_sel.filter(|_| !transport) {
                     match key {
                         Key::Left => self.osd_sel = Some(sel.saturating_sub(1)),
                         Key::Right => self.osd_sel = Some((sel + 1).min(OSD_N - 1)),
@@ -689,7 +701,7 @@ fn next_video(cx: &Cx<'_, YtHost>, current: &str, repeat_list: bool) -> Option<(
             }
         }
     }
-    let n = w.autoplay_next.as_ref()?;
+    let n = w.autoplay_next.as_ref().filter(|n| n.id != current)?;
     match &n.endpoint {
         Some(yt_core::model::Endpoint::Watch { video_id, playlist_id, .. }) if !video_id.is_empty() => {
             Some((video_id.clone(), playlist_id.clone()))

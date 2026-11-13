@@ -270,7 +270,7 @@ fn items(page: SettingsPage) -> Vec<Item> {
             v
         }
         SettingsPage::Remote => vec![
-            Opt("Link with TV code", |s| on_off(s.lounge_enabled), |s, _| s.lounge_enabled = !s.lounge_enabled),
+            Opt("Link with TV code (after restart)", |s| on_off(s.lounge_enabled), |s, _| s.lounge_enabled = !s.lounge_enabled),
             Opt("Red button", |s| s.color_keys[0].clone(), |s, d| cycle_key(&mut s.color_keys[0], d)),
             Opt("Green button", |s| s.color_keys[1].clone(), |s, d| cycle_key(&mut s.color_keys[1], d)),
             Opt("Yellow button", |s| s.color_keys[2].clone(), |s, d| cycle_key(&mut s.color_keys[2], d)),
@@ -284,7 +284,7 @@ fn items(page: SettingsPage) -> Vec<Item> {
                 let p = &cx.views.store.settings.proxy_url;
                 if p.is_empty() { "none".into() } else { p.clone() }
             }),
-            Opt("Show in the phone's cast menu (DIAL)", |s| on_off(s.dial_enabled), |s, _| s.dial_enabled = !s.dial_enabled),
+            Opt("Show in the phone's cast menu (after restart)", |s| on_off(s.dial_enabled), |s, _| s.dial_enabled = !s.dial_enabled),
             Info("TV code", |cx| match &cx.views.store.lounge_code {
                 Some(c) => c.clone(),
                 None if cx.views.store.settings.lounge_enabled => "getting a code\u{2026}".into(),

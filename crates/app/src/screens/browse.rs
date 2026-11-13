@@ -598,7 +598,7 @@ impl Screen<YtHost> for BrowseScreen {
             self.nav.stops(f, items.len());
         }
 
-        common::toast(p, cx);
+        common::toast(f.painter, cx);
     }
     fn redraw_focused(&self, f: &mut DrawFrame<'_, '_, YtHost>, focus: Option<FocusKey<u32>>) {
         if self.rows_mode(f.cx) {

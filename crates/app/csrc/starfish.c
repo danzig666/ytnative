@@ -411,6 +411,9 @@ char sf_feed(const unsigned char *p, unsigned size, long long pts, int esData) {
     if (logged < 3) { logged++; sf_log("starfish: feed reply=\"%s\"", s ? s : "(null)"); }
     char verdict = !s ? 'e' : strstr(s, "BufferFull") ? 'B' : strstr(s, "Ok") ? 'O' : 'e';
     if (s && L.feed_reply_dtor) L.feed_reply_dtor(ret);
+    /* cxx11 string without a resolved destructor: a reply longer than the SSO buffer (at offset 8
+       on 32-bit libstdc++) was heap-allocated by operator new (malloc); free it. */
+    else if (s && !L.feed_cow && s != (char *)(ret + 8)) free(s);
     return verdict;
 }
 

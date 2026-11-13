@@ -61,6 +61,8 @@ impl Lounge {
         let Ok(cmd) = self.commands.try_recv() else { return Action::None };
         crate::log(&format!("lounge: {cmd:?}"));
         match cmd {
+            // A queue change for the video already playing: keep playing it.
+            Command::UpdatePlaylist(p) if p.video_id == status.video_id => Action::None,
             Command::SetPlaylist(p) | Command::UpdatePlaylist(p) if !p.video_id.is_empty() => Action::Play {
                 video_id: p.video_id,
                 start_ms: p.current_time.map(|t| (t * 1000.0) as u64),

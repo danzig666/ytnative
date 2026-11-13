@@ -362,13 +362,18 @@ fn main() {
 
             if let Some(l) = lounge.as_mut() {
                 rig.store.lounge_code = l.code.lock().unwrap().clone();
-                let in_player = d.top_screen().map(|s| s.name()) == Some("player");
+                let top = d.top_screen().map(|s| s.name());
+                let over_player = rig.player.active() && matches!(top, Some("comments" | "menu" | "info"));
+                let in_player = top == Some("player") || over_player;
                 match l.poll(&rig.player_view) {
                     lounge::Action::Play { video_id, start_ms, playlist } => {
                         if let Some(ms) = start_ms {
                             rig.pending_start = Some((video_id.clone(), ms));
                         }
                         let arg = YtArg::Player { video_id, playlist };
+                        if over_player {
+                            d.request(MachineId::Nav, NavOp::Pop);
+                        }
                         d.request(MachineId::Nav, if in_player { NavOp::Replace(arg) } else { NavOp::Push(arg) });
                         last_input = now;
                     }
@@ -380,6 +385,9 @@ fn main() {
                     }
                     lounge::Action::Seek(ms) => rig.player.seek_to(ms),
                     lounge::Action::Stop => {
+                        if over_player {
+                            d.request(MachineId::Nav, NavOp::Pop);
+                        }
                         if in_player {
                             d.request(MachineId::Nav, NavOp::Pop);
                         }
@@ -412,9 +420,15 @@ fn main() {
                     Some(Link::Video(v)) => {
                         log(&format!("launch: play {v}"));
                         let arg = YtArg::Player { video_id: v, playlist: None };
-                        let in_player = d.top_screen().map(|s| s.name()) == Some("player");
+                        let top = d.top_screen().map(|s| s.name());
+                        let over_player = rig.player.active() && matches!(top, Some("comments" | "menu" | "info"));
+                        if over_player {
+                            d.request(MachineId::Nav, NavOp::Pop);
+                        }
+                        let in_player = top == Some("player") || over_player;
                         d.request(MachineId::Nav, if in_player { NavOp::Replace(arg) } else { NavOp::Push(arg) });
                     }
+                    Some(Link::Search(_)) if rig.store.settings.child_mode => log("launch: search refused (child mode)"),
                     Some(Link::Search(q)) => {
                         log(&format!("launch: search {q}"));
                         d.request(MachineId::Nav, NavOp::Push(YtArg::Feed(store::FeedKey::Search { query: q, params: None })));
@@ -541,8 +555,15 @@ fn main() {
 /// A remapped colour button (settings → Remote control).
 fn color_key(act: &str, rig: &mut AppRig, d: &mut Dispatcher<YtHost>) {
     match act {
+        "search" if rig.store.settings.child_mode => {}
         "search" => d.request(MachineId::Nav, NavOp::Push(YtArg::Search)),
-        "settings" => d.request(MachineId::Nav, NavOp::Push(YtArg::Settings(host::SettingsPage::Root))),
+        "settings" => {
+            let locked = !rig.store.settings.settings_pin.is_empty();
+            d.request(
+                MachineId::Nav,
+                NavOp::Push(if locked { YtArg::Pin(host::PinPurpose::OpenSettings) } else { YtArg::Settings(host::SettingsPage::Root) }),
+            );
+        }
         "accounts" => d.request(MachineId::Nav, NavOp::Push(YtArg::Accounts)),
         "subtitles" => {
             rig.store.settings.subtitles = !rig.store.settings.subtitles;
@@ -613,7 +634,8 @@ fn deeplink(raw: &str) -> Option<Link> {
         let mut i = 0;
         while i < b.len() {
             if b[i] == b'%' && i + 2 < b.len() {
-                if let Ok(x) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                let hex = std::str::from_utf8(&b[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok());
+                if let Some(x) = hex {
                     out.push(x);
                     i += 3;
                     continue;

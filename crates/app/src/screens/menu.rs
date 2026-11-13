@@ -70,6 +70,8 @@ pub struct MenuScreen {
     /// An option's drop-down list, while open.
     choice: Option<ui::ChoiceBox>,
     closed_row: std::cell::Cell<usize>,
+    /// Row to put focus on at the next reconcile (the playlist picker after its list changed).
+    refocus: std::cell::Cell<Option<usize>>,
     state: State,
 }
 
@@ -98,6 +100,7 @@ impl MenuScreen {
             picker_for: None,
             choice: None,
             closed_row: std::cell::Cell::new(0),
+            refocus: std::cell::Cell::new(None),
             state: State(title.clone()),
             title,
             acts,
@@ -151,7 +154,7 @@ impl MenuScreen {
                     tagged.push(("youtube", m.label.clone(), Act::User(UserAction::Menu(m.clone()))));
                 }
             }
-            if let Some(ch) = &card.item.channel {
+            if let Some(ch) = card.item.channel.as_ref().filter(|_| !cx.views.store.settings.child_mode) {
                 tagged.push(("more_from", format!("More from {ch}"), Act::SearchFor(ch.clone())));
                 tagged.push(("block", format!("Block {ch}"), Act::BlockChannel(ch.clone())));
             }
@@ -255,9 +258,9 @@ impl MenuScreen {
                     1 => format!("{:?}", f.kind),
                     2 => format!("{:?}", f.duration),
                     3 => format!("{:?}", f.sort),
-                    4 => (if f.live { "On" } else { "Off" }).into(),
-                    5 => (if f.hd_4k { "On" } else { "Off" }).into(),
-                    6 => (if f.hdr { "On" } else { "Off" }).into(),
+                    4 => crate::i18n::tr(if f.live { "On" } else { "Off" }).to_string(),
+                    5 => crate::i18n::tr(if f.hd_4k { "On" } else { "Off" }).to_string(),
+                    6 => crate::i18n::tr(if f.hdr { "On" } else { "Off" }).to_string(),
                     _ => return None,
                 };
                 let _ = (UploadDate::Any, Kind::Any);
@@ -279,10 +282,10 @@ impl MenuScreen {
             }
             Act::ZoomMode => format!("\u{2039}  {:?}  \u{203A}", cx.views.player.zoom),
             Act::Sleep => match cx.views.store.sleep_minutes {
-                0 => "Off  \u{203A}".to_string(),
+                0 => format!("{}  \u{203A}", crate::i18n::tr("Off")),
                 m => format!("{m} min  \u{203A}"),
             },
-            Act::Subtitles => format!("{}  \u{203A}", if s.subtitles { "On" } else { "Off" }),
+            Act::Subtitles => format!("{}  \u{203A}", crate::i18n::tr(if s.subtitles { "On" } else { "Off" })),
             Act::SubSize => format!("{}  \u{203A}", s.subtitle_size),
             Act::SubColor => format!("{}  \u{203A}", crate::i18n::tr(&s.subtitle_color)),
             Act::SubBold => format!("{}  \u{203A}", crate::i18n::tr(if s.subtitle_bold { "On" } else { "Off" })),
@@ -290,12 +293,12 @@ impl MenuScreen {
             Act::SubStyle => format!("{}  \u{203A}", crate::i18n::tr(&s.subtitle_style)),
             Act::RepeatMode => format!(
                 "{}  \u{203A}",
-                match s.repeat {
+                crate::i18n::tr(match s.repeat {
                     Repeat::Autoplay => "Play next",
                     Repeat::Off => "Stop",
                     Repeat::One => "Repeat",
                     Repeat::List => "Repeat list",
-                }
+                })
             ),
             _ => return None,
         })
@@ -515,10 +518,16 @@ impl Machine<YtHost> for MenuScreen {
             return self.step(&a, cx, fx);
         }
         if let (Some(v), ScreenEvent::Async(..)) = (&self.picker_for, ev) {
+            // The row under focus, by label: it must stay under focus when rows are inserted
+            // above it (an OK right then must not hit a different playlist).
+            let focused_label = self.list.focused(cx, self.acts.len()).and_then(|i| self.acts.get(i)).map(|a| a.0.clone());
             let fresh = Self::playlists(self.list.entry, v.clone(), String::new(), cx);
             // keep the title used for "New playlist"
             let keep_title = self.acts.iter().find_map(|a| if let Act::NewPlaylist(t, _) = &a.1 { Some(t.clone()) } else { None });
             self.acts = fresh.acts;
+            if let Some(l) = focused_label {
+                self.refocus.set(self.acts.iter().position(|a| a.0 == l));
+            }
             if let Some(t) = keep_title {
                 for a in self.acts.iter_mut() {
                     if let Act::NewPlaylist(tt, _) = &mut a.1 {
@@ -611,6 +620,9 @@ impl Focusable<YtHost> for MenuScreen {
         }
         if want.elem >= ui::CHOICE_BASE {
             return self.list.key(self.closed_row.get());
+        }
+        if let Some(i) = self.refocus.take().filter(|i| *i < self.acts.len()) {
+            return self.list.key(i);
         }
         if self.list.index(want.elem, self.acts.len()).is_some() { want } else { self.list.key(0) }
     }

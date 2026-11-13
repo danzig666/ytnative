@@ -298,7 +298,8 @@ pub fn parse_watch(resp: &Value) -> WatchInfo {
     w.suggestions_continuation = page.continuation.or_else(|| first_token(pivot));
 
     // --- autoplay ---
-    w.autoplay_next = autoplay_next(&r["autoplay"]["autoplay"]);
+    let current = r["currentVideoEndpoint"]["watchEndpoint"]["videoId"].as_str().unwrap_or("");
+    w.autoplay_next = autoplay_next(&r["autoplay"]["autoplay"], current);
     w
 }
 
@@ -321,15 +322,24 @@ fn is_queue_shelf(s: &Value, playlist_id: &str) -> bool {
     })
 }
 
-fn autoplay_next(a: &Value) -> Option<Item> {
+/// YouTube's up-next video. `current` is the video playing: for a video in the watch history the
+/// first candidate can be that same video ("watch again"), which is skipped.
+fn autoplay_next(a: &Value, current: &str) -> Option<Item> {
     let set = a["sets"].as_array()?.first()?;
     let nv = &set["nextVideoRenderer"];
-    let src = nv
-        .get("maybeHistoryEndpointRenderer")
-        .or_else(|| nv.get("autoplayEndpointRenderer"))
-        .or_else(|| set["autoplayVideoRenderer"].get("autoplayEndpointRenderer"))
-        .or_else(|| set["autoplayVideoRenderer"].get("autonavEndpointRenderer"))?;
-    let ep = parse::endpoint(&src["endpoint"])?;
+    let candidates = [
+        nv.get("maybeHistoryEndpointRenderer"),
+        nv.get("autoplayEndpointRenderer"),
+        set["autoplayVideoRenderer"].get("autoplayEndpointRenderer"),
+        set["autoplayVideoRenderer"].get("autonavEndpointRenderer"),
+    ];
+    let (src, ep) = candidates.into_iter().flatten().find_map(|src| {
+        let ep = parse::endpoint(&src["endpoint"])?;
+        match &ep {
+            Endpoint::Watch { video_id, .. } if video_id != current => Some((src, ep)),
+            _ => None,
+        }
+    })?;
     let Endpoint::Watch { video_id, .. } = &ep else { return None };
     let preview = &src["item"]["previewButtonRenderer"];
     let byline = text(&preview["byline"]);

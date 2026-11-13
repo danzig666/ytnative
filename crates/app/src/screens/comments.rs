@@ -93,6 +93,8 @@ fn draw_footer(p: plx_ui::Painter, cm: &yt_core::comments::Comment, x: f32, y: f
 #[derive(Default)]
 struct Layout {
     key: String,
+    /// Id of the first comment laid out: a reload with other comments resets the layout.
+    first: String,
     lines: Vec<Vec<String>>,
     top: Vec<f32>,
     h: Vec<f32>,
@@ -360,8 +362,9 @@ impl Screen<YtHost> for CommentsScreen {
         // Lay out what arrived since the last frame.
         {
             let mut l = self.layout.borrow_mut();
-            if l.key != self.video_id || l.lines.len() > c.items.len() {
-                *l = Layout { key: self.video_id.clone(), ..Default::default() };
+            let first = c.items.first().map(|cm| cm.id.clone()).unwrap_or_default();
+            if l.key != self.video_id || l.first != first || l.lines.len() > c.items.len() {
+                *l = Layout { key: self.video_id.clone(), first, ..Default::default() };
             }
             let w = self.list.rect.w - 40.0;
             let from = l.lines.len();

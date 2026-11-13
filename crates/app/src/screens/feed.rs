@@ -101,7 +101,7 @@ impl Machine<YtHost> for FeedScreen {
         })) = (&self.key, ev)
         {
             let src = self.src(cx);
-            let at_top = cx.focus.current.and_then(|k| src.cards.iter().position(|c| c.elem == k.elem)).map_or(true, |i| i < 4);
+            let at_top = cx.focus.current.and_then(|k| src.cards.iter().position(|c| c.elem == k.elem)).map_or(true, |i| i < ui::card_cols());
             if at_top {
                 fx.push(Fx::Nav(NavOp::Present(YtArg::SearchFilters(query.clone()))));
                 return Handled::Yes;

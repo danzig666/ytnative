@@ -128,10 +128,14 @@ pub struct Player {
     feed: crate::feed::FeedPlayer,
     /// A resolved video the worker hands to engine B (started on the main thread in `tick`).
     handoff: Arc<Mutex<Option<Handoff>>>,
+    /// Bumped by every start / stop: a resolve worker whose number is no longer current belongs to
+    /// a video that was left and must not touch the status, load a pipeline or hand off.
+    gen: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[cfg(not(windows))]
 struct Handoff {
+    gen: u64,
     session: Arc<Mutex<Option<yt_core::session::Session>>>,
     video_id: String,
     resolved: yt_core::streams::Resolved,
@@ -164,6 +168,7 @@ impl Player {
             prefer_feed: false,
             feed: crate::feed::FeedPlayer::new(),
             handoff: Default::default(),
+            gen: Default::default(),
         }
     }
 
@@ -194,9 +199,11 @@ impl Player {
         let refused = matches!(&self.status.lock().unwrap().phase, Phase::Failed(e) if e.contains("HTTP 403") || e.contains("HTTP 410"));
         self.stop();
         if refused {
+            // Reset on the worker: the session lock can be held across a network call.
             crate::log("player: the last video's stream was refused; starting from a fresh session");
-            *session.lock().unwrap() = None;
         }
+        let my_gen = self.gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let gen = self.gen.clone();
         *self.status.lock().unwrap() = Status { phase: Phase::Resolving, rate: 1.0, ..Default::default() };
         let Some(create) = sdl_sym::<CreateFn>("SDL_webOSCreateExportedWindow") else {
             self.fail("no SDL exported-window support on this TV");
@@ -222,15 +229,22 @@ impl Player {
         let (status, media_id) = (self.status.clone(), self.media_id.clone());
         let feed = self.feed_prefs.clone().map(|p| (p, self.prefer_feed, self.handoff.clone()));
         let spawned = plx_base::task::spawn("play", move || {
-            match run(luna, &video_id, &window_id, &session, &status, &media_id, prefs, start_ms, feed) {
-                Ok(()) => {
+            let live = || gen.load(std::sync::atomic::Ordering::SeqCst) == my_gen;
+            if refused {
+                *session.lock().unwrap() = None;
+            }
+            match run(luna, &video_id, &window_id, &session, &status, &media_id, prefs, start_ms, feed, &live, my_gen) {
+                Ok(true) => {
                     let (v, s2, st2) = (video_id.clone(), session.clone(), status.clone());
                     let _ = plx_base::task::spawn("track", move || track_history(&v, &s2, &st2));
                     load_extras(&video_id, &session, &status, &extras)
                 }
+                Ok(false) => crate::log(&format!("player: {video_id} was left while starting; dropped")),
                 Err(e) => {
                     crate::log(&format!("player: {e:#}"));
-                    status.lock().unwrap().phase = Phase::Failed(format!("{e:#}"));
+                    if live() {
+                        status.lock().unwrap().phase = Phase::Failed(format!("{e:#}"));
+                    }
                 }
             }
             plx_machine::present::wake_from_worker();
@@ -243,6 +257,7 @@ impl Player {
     /// Main thread, every frame: starts a handed-off engine B session, drives engine B.
     pub fn tick(&mut self) {
         let h = self.handoff.lock().unwrap().take();
+        let h = h.filter(|h| h.gen == self.gen.load(std::sync::atomic::Ordering::SeqCst));
         if let Some(h) = h {
             let prefs = self.feed_prefs.clone().unwrap_or_else(|| crate::feed::Prefs::new(2160, crate::feed::VideoCodec::Vp9));
             self.feed.status = self.status.clone();
@@ -358,14 +373,16 @@ impl Player {
         }
         let Some(luna) = self.luna else { return };
         let Some(mid) = self.media_id.lock().unwrap().clone() else { return };
+        // No duration (a live stream on engine A): no upper clamp, or every seek would go to 0.
+        let clamp = |to: i64, dur: i64| if dur > 0 { to.clamp(0, (dur - 1000).max(0)) } else { to.max(0) };
         let (pos, dur) = {
             let mut s = self.status.lock().unwrap();
-            let to = (s.position_ms as i64 + delta_ms).clamp(0, (s.duration_ms as i64 - 1000).max(0));
+            let to = clamp(s.position_ms as i64 + delta_ms, s.duration_ms as i64);
             let before = s.position_ms as i64;
             s.position_ms = to as u64; // show the target immediately; events correct it
             (before, s.duration_ms as i64)
         };
-        let to = (pos + delta_ms).clamp(0, (dur - 1000).max(0));
+        let to = clamp(pos + delta_ms, dur);
         let payload = format!(r#"{{"mediaId":{},"position":{to}}}"#, json_str(&mid));
         let _ = plx_base::task::spawn("media", move || {
             luna.call("luna://com.webos.media/seek", &payload);
@@ -374,6 +391,7 @@ impl Player {
 
     /// Main thread. Unloads the pipeline (if any) and destroys the video window.
     pub fn stop(&mut self) {
+        self.gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.handoff.lock().unwrap().take();
         if self.feed.active() {
             // Engine B unloads first: the window it renders into is ours.
@@ -411,7 +429,9 @@ fn run(
     prefs: yt_core::streams::Prefs,
     start_ms: Option<u64>,
     feed: Option<(crate::feed::Prefs, bool, Arc<Mutex<Option<Handoff>>>)>,
-) -> anyhow::Result<()> {
+    live: &dyn Fn() -> bool,
+    gen: u64,
+) -> anyhow::Result<bool> {
     let resolved = {
         let mut g = session.lock().unwrap();
         if g.is_none() {
@@ -419,11 +439,16 @@ fn run(
         }
         g.as_mut().unwrap().resolve(video_id)?
     };
+    if !live() {
+        return Ok(false);
+    }
     {
         let mut s = status.lock().unwrap();
         s.title = resolved.title.clone();
         s.author = resolved.author.clone();
         s.duration_ms = resolved.length_secs * 1000;
+        // Where it will start, so a BACK before the first position event saves this, not 0.
+        s.position_ms = start_ms.unwrap_or(0);
         s.phase = Phase::Loading;
     }
     {
@@ -446,7 +471,10 @@ fn run(
     if let Some((fp, prefer, slot)) = feed {
         if wants_feed(&resolved, &fp, prefer) {
             crate::log("player: handing the video to engine B (Feed)");
-            *slot.lock().unwrap() = Some(Handoff { session: session.clone(), video_id: video_id.to_string(), resolved, start_ms });
+            if !live() {
+                return Ok(false);
+            }
+            *slot.lock().unwrap() = Some(Handoff { gen, session: session.clone(), video_id: video_id.to_string(), resolved, start_ms });
             plx_machine::present::wake_from_worker();
             // Let the main thread start it before the extras land in the shared status.
             for _ in 0..60 {
@@ -455,7 +483,7 @@ fn run(
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            return Ok(());
+            return Ok(true);
         }
     }
     std::fs::create_dir_all("/tmp/ytnative")?;
@@ -475,6 +503,9 @@ fn run(
         path
     };
 
+    if !live() {
+        return Ok(false);
+    }
     let app_id = plx_base::paths::app_id();
     let load = format!(
         r#"{{"uri":"file://{path}","type":"media","payload":{{"option":{{"appId":{},"windowId":{}}}}}}}"#,
@@ -485,11 +516,19 @@ fn run(
     crate::log(&format!("player: load -> {r}"));
     let v: serde_json::Value = serde_json::from_str(&r).unwrap_or_default();
     let mid = v["mediaId"].as_str().ok_or_else(|| anyhow::anyhow!("media service refused the load: {r}"))?.to_string();
+    if !live() {
+        // Left while loading: this pipeline is nobody's; unload it here.
+        luna.call("luna://com.webos.media/unload", &format!(r#"{{"mediaId":{}}}"#, json_str(&mid)));
+        return Ok(false);
+    }
     *media_id.lock().unwrap() = Some(mid.clone());
 
-    let st = status.clone();
+    let (st, current, me) = (status.clone(), media_id.clone(), mid.clone());
     luna.subscribe("luna://com.webos.media/subscribe", &format!(r#"{{"mediaId":{},"subscribe":true}}"#, json_str(&mid)), move |msg| {
-        on_event(&st, msg);
+        // Late events of an unloaded pipeline must not touch the next video's status.
+        if current.lock().unwrap().as_deref() == Some(me.as_str()) {
+            on_event(&st, msg);
+        }
     });
     luna.call("luna://com.webos.media/notifyForeground", &format!(r#"{{"connectionId":{}}}"#, json_str(&mid)));
     let r = luna.call("luna://com.webos.media/play", &format!(r#"{{"mediaId":{}}}"#, json_str(&mid)));
@@ -498,7 +537,7 @@ fn run(
         let r = luna.call("luna://com.webos.media/seek", &format!(r#"{{"mediaId":{},"position":{ms}}}"#, json_str(&mid)));
         crate::log(&format!("player: start at {ms} ms -> {r}"));
     }
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(not(windows))]

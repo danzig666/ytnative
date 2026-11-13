@@ -103,7 +103,8 @@ struct Pipe {
 }
 
 impl Pipe {
-    fn open(payload: &str) -> Result<Pipe, String> {
+    /// `stop`: the session is being stopped; the wait for loadCompleted gives up at once.
+    fn open(payload: &str, stop: &AtomicBool) -> Result<Pipe, String> {
         let ev = Events::new();
         let epoch = sys::route(ev.clone());
         let t0 = Instant::now();
@@ -122,6 +123,9 @@ impl Pipe {
             if t0.elapsed() > Duration::from_secs(10) {
                 crate::log("feed: no loadCompleted after 10 s; feeding anyway");
                 break;
+            }
+            if stop.load(Relaxed) {
+                break; // stopping: the caller's loop sees the flag and tears down
             }
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -336,7 +340,7 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
     *sh.place.lock().unwrap() = Some((vt.width, vt.height));
 
     let mut shift = video.peek_pts().unwrap_or(0).max(0);
-    let mut pipe = Pipe::open(&payload)?;
+    let mut pipe = Pipe::open(&payload, &sh.stop)?;
     let mut base = 0i64; // fed-timeline anchor of the current Load/seek
     let mut floor = shift; // content-time: no audio before the video anchor
     let mut vf = LaneFeed::default();
@@ -430,7 +434,7 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
                     native_seek = false;
                 }
                 pipe.close();
-                pipe = Pipe::open(&payload)?;
+                pipe = Pipe::open(&payload, &sh.stop)?;
                 shift = k.max(0);
                 base = 0;
             }
