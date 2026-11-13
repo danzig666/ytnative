@@ -704,6 +704,7 @@ pub mod icon {
     const BELL: &str = r##"<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>"##;
     const INFO: &str = r##"<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>"##;
     const SHIELD: &str = r##"<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M10 9l5 3-5 3z"/>"##;
+    const SCREEN_OFF: &str = r##"<path d="M17 17H4a2 2 0 0 1-2-2V5c0-1.5 1-2 1-2"/><path d="M22 15V5a2 2 0 0 0-2-2H9"/><path d="M8 21h8"/><path d="M12 17v4"/><path d="m2 2 20 20"/>"##;
     const LIST: &str = r##"<path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/>"##;
 
     const HOME: &str = r##"<path d="M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8"/><path d="M3 10a2 2 0 0 1 .709-1.528l7-5.999a2 2 0 0 1 2.582 0l7 5.999A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>"##;
@@ -764,6 +765,7 @@ pub mod icon {
         Bell,
         Info,
         Shield,
+        ScreenOff,
     }
 
     fn svg(k: Kind, filled: bool) -> &'static str {
@@ -774,7 +776,7 @@ pub mod icon {
             for body in [
                 THUMB_UP, THUMB_DOWN, CHAT, GEAR, PLAY, PAUSE, PREV, NEXT, LIST, HOME, FLAME, SUBS, USERS, HISTORY, LIBRARY, MUSIC, GAMEPAD,
                 NEWS, MIC, LIVE, FILM, TROPHY, TRENDING, SEARCH, USER, STAR, FOLDER, REPEAT, REPEAT1, AUTOPLAY, PAUSE_END, GAUGE,
-                LIST_PLUS, BELL, INFO, SHIELD,
+                LIST_PLUS, BELL, INFO, SHIELD, SCREEN_OFF,
             ] {
                 v.push(format!("{HEAD}{body}</svg>"));
                 v.push(format!("{}{body}</svg>", HEAD.replace(r##"fill="none""##, r##"fill="#ffffff""##)));
@@ -818,6 +820,7 @@ pub mod icon {
             Kind::Bell => 66,
             Kind::Info => 68,
             Kind::Shield => 70,
+            Kind::ScreenOff => 72,
         };
         &all[i + filled as usize]
     }

@@ -56,6 +56,9 @@ pub struct PlayerScreen {
     sugg_sel: Option<usize>,
     /// The speed the speed button returns to (it toggles between 1x and this).
     last_rate: f32,
+    /// Screen dimming: the picture is dimmed now, and the last key press (views.now_ms clock).
+    dimmed: bool,
+    last_key_ms: u32,
     /// Pointer jitter guard (see the Pointer event).
     ptr_quiet: bool,
     ptr_anchor: Option<(f32, f32)>,
@@ -80,6 +83,8 @@ impl PlayerScreen {
             osd_sel: None,
             sugg_sel: None,
             last_rate: 1.5,
+            dimmed: false,
+            last_key_ms: 0,
             ptr_quiet: false,
             ptr_anchor: None,
             back_armed: None,
@@ -125,28 +130,29 @@ impl PlayerScreen {
 }
 
 /// OSD buttons in two rows, as SmartTube lays them out.
-/// Above the seek bar: 0 play/pause, 1 previous, 2 next, 3 playback mode, 4 speed, 5 chapters,
-/// 6 comments, 7 search. Below it: 8 options, 9 channel, 10 like, 11 dislike, 12 subtitles,
-/// 13 save to playlist, 14 subscribe, 15 video info, 16 SponsorBlock.
-const OSD_N: usize = 17;
-const OSD_ROW_B: usize = 8;
+/// Above the seek bar: 0 play/pause, 1 previous, 2 next, 3 playback mode, 4 speed, 5 screen
+/// dimming, 6 chapters, 7 comments, 8 search. Below it: 9 options, 10 channel, 11 like,
+/// 12 dislike, 13 subtitles, 14 save to playlist, 15 subscribe, 16 video info, 17 SponsorBlock.
+const OSD_N: usize = 18;
+const OSD_ROW_B: usize = 9;
 const OSD_PLAY: usize = 0;
 const OSD_PREV: usize = 1;
 const OSD_NEXT: usize = 2;
 const OSD_REPEAT: usize = 3;
 const OSD_SPEED: usize = 4;
-const OSD_CHAPTERS: usize = 5;
-const OSD_COMMENTS: usize = 6;
-const OSD_SEARCH: usize = 7;
-const OSD_OPTIONS: usize = 8;
-const OSD_CHANNEL: usize = 9;
-const OSD_LIKE: usize = 10;
-const OSD_DISLIKE: usize = 11;
-const OSD_CC: usize = 12;
-const OSD_SAVE: usize = 13;
-const OSD_SUBSCRIBE: usize = 14;
-const OSD_INFO: usize = 15;
-const OSD_SB: usize = 16;
+const OSD_DIM: usize = 5;
+const OSD_CHAPTERS: usize = 6;
+const OSD_COMMENTS: usize = 7;
+const OSD_SEARCH: usize = 8;
+const OSD_OPTIONS: usize = 9;
+const OSD_CHANNEL: usize = 10;
+const OSD_LIKE: usize = 11;
+const OSD_DISLIKE: usize = 12;
+const OSD_CC: usize = 13;
+const OSD_SAVE: usize = 14;
+const OSD_SUBSCRIBE: usize = 15;
+const OSD_INFO: usize = 16;
+const OSD_SB: usize = 17;
 /// Vertical layout of the controls.
 const ROW_A_Y: f32 = 806.0;
 const BAR_Y: f32 = 900.0;
@@ -326,6 +332,29 @@ impl PlayerScreen {
                 self.osd_sel = None;
                 fx.push(Fx::Nav(NavOp::Push(YtArg::Info)));
             }
+            OSD_DIM => {
+                let s = &cx.views.store.settings;
+                if s.screen_off_timeout_secs == 0 {
+                    // At once: dim now (or lift a partial dim that is on). A partial dim stays on
+                    // while the controls are used and carries over to the next video.
+                    let on = !(self.dimmed || s.screen_off_armed);
+                    let partial = s.screen_off_dimming < 100;
+                    self.dimmed = on;
+                    fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| s.screen_off_armed = on && partial))));
+                    if on {
+                        self.hud = false;
+                        self.osd_sel = None;
+                    }
+                } else {
+                    // A timeout: arm or disarm it; the dimming starts after that long without a key.
+                    let on = !s.screen_off_armed;
+                    self.dimmed = false;
+                    self.last_key_ms = cx.views.now_ms;
+                    fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| s.screen_off_armed = on))));
+                    fx.push(Fx::App(YtFx::Toast(if on { "Screen dimming on".into() } else { "Screen dimming off".into() })));
+                }
+                fx.invalidate(plx_machine::present::Provenance::Input);
+            }
             OSD_SB => {
                 let on = !cx.views.store.settings.sponsorblock;
                 fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| s.sponsorblock = on))));
@@ -383,6 +412,9 @@ impl Machine<YtHost> for PlayerScreen {
                 });
                 fx.push(Fx::App(YtFx::Play { video_id: self.video_id.clone(), playlist: self.playlist.clone() }));
                 self.show_hud(cx, fx);
+                self.last_key_ms = cx.views.now_ms;
+                let s = &cx.views.store.settings;
+                self.dimmed = s.screen_off_armed && s.screen_off_timeout_secs == 0 && s.screen_off_dimming < 100;
                 // A video that follows another starts without the controls unless asked for.
                 if MOVED_ON.with(|m| m.replace(false)) && !cx.views.store.settings.hud_on_next_video {
                     self.hud = false;
@@ -409,6 +441,17 @@ impl Machine<YtHost> for PlayerScreen {
             }
             ScreenEvent::Timer(T_TICK) => {
                 let p = cx.views.player;
+                // Screen dimming after the timeout without a key press (while playing).
+                {
+                    let s = &cx.views.store.settings;
+                    let quiet = cx.views.now_ms.wrapping_sub(self.last_key_ms) / 1000;
+                    if s.screen_off_armed && s.screen_off_timeout_secs > 0 && !self.dimmed && p.phase == Phase::Playing && !self.hud
+                        && quiet >= s.screen_off_timeout_secs
+                    {
+                        self.dimmed = true;
+                        fx.invalidate(plx_machine::present::Provenance::Timer(T_TICK));
+                    }
+                }
                 // End of video: repeat or autoplay according to settings.
                 if p.phase != Phase::Ended {
                     self.ended_handled = false; // seeking back from the end ends it again later
@@ -480,6 +523,17 @@ impl Machine<YtHost> for PlayerScreen {
             ScreenEvent::Input(InputEvent { kind: InputKind::Key { key, sym, wcode, edge, .. }, .. }) => {
                 self.ptr_quiet = true;
                 self.ptr_anchor = None;
+                self.last_key_ms = cx.views.now_ms;
+                // A full dim (or a timed one) is lifted by any key, which does nothing else; a
+                // partial dim at once stays until its button is pressed again.
+                if self.dimmed && *edge == Edge::Down {
+                    let s = &cx.views.store.settings;
+                    if s.screen_off_dimming >= 100 || s.screen_off_timeout_secs > 0 {
+                        self.dimmed = false;
+                        fx.invalidate(plx_machine::present::Provenance::Input);
+                        return Handled::Yes;
+                    }
+                }
                 // Keys take over from the pointer: its last hover no longer highlights a button.
                 self.pointer = None;
                 if *edge == Edge::Up {
@@ -737,6 +791,12 @@ impl Screen<YtHost> for PlayerScreen {
         // Everything below (captions, OSD, toasts) is dimmed over HDR video.
         let _dim = ui::HdrDim::begin(ui::hdr_playing(st));
         let ex = st.extras.clone();
+        // Screen dimming: black over the picture (and its subtitles) at the chosen amount.
+        let dim_alpha = if self.dimmed { cx.views.store.settings.screen_off_dimming.min(100) as f32 / 100.0 } else { 0.0 };
+        if dim_alpha >= 1.0 {
+            ui::fill(p, Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, [0.0, 0.0, 0.0, 1.0]);
+            return; // a switched-off screen shows nothing, not even subtitles
+        }
         if cx.views.store.settings.subtitles {
             if let Some(cue) = yt_core::captions::cue_at(&ex.cues, st.position_ms) {
                 let lift = if self.hud { 480.0 } else { 0.0 }; // above the title and both button rows
@@ -764,6 +824,9 @@ impl Screen<YtHost> for PlayerScreen {
                     draw_caption(p, &cue.text, s.subtitle_size as i32, s.subtitle_bottom_offset as f32 + lift, ink, s.subtitle_background as f32 / 100.0);
                 }
             }
+        }
+        if dim_alpha > 0.0 {
+            ui::fill(p, Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, [0.0, 0.0, 0.0, dim_alpha]);
         }
         if ui::comments_open() {
             return;
@@ -937,6 +1000,7 @@ impl Screen<YtHost> for PlayerScreen {
             Kind::Next,
             repeat_icon,
             Kind::Gauge,
+            Kind::ScreenOff,
             Kind::List,
             Kind::Chat,
             Kind::Search,
@@ -963,6 +1027,7 @@ impl Screen<YtHost> for PlayerScreen {
                 OSD_SB => s.sponsorblock,
                 OSD_SPEED => (st.rate - 1.0).abs() > 0.01 && st.rate > 0.0,
                 OSD_REPEAT => s.playback_mode != PlaybackMode::PlayNext,
+                OSD_DIM => self.dimmed || s.screen_off_armed,
                 _ => false,
             };
             if hot {
@@ -1105,6 +1170,7 @@ fn osd_name(i: usize) -> &'static str {
         OSD_NEXT => "Next video",
         OSD_REPEAT => "Playback mode",
         OSD_SPEED => "Speed",
+        OSD_DIM => "Screen dimming",
         OSD_CHAPTERS => "Chapters",
         OSD_COMMENTS => "Comments",
         OSD_SEARCH => "Search",

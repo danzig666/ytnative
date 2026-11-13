@@ -168,6 +168,12 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
             Opt("Time in the controls", |s| s.controls_time.label().into(), |s, d| s.controls_time = cycle(ControlsTime::ALL, s.controls_time, d)),
             Opt("Clock in player", |s| on_off(s.show_clock), |s, _| s.show_clock = !s.show_clock),
             Opt("Sleep timer", |s| crate::settings::sleep_label(s.sleep_timer_mins), |s, d| s.sleep_timer_mins = cycle(SLEEP_MINS, s.sleep_timer_mins, d)),
+            Opt("Screen dimming amount", |s| format!("{} %", s.screen_off_dimming), |s, d| {
+                s.screen_off_dimming = cycle(crate::settings::DIM_PERCENTS, s.screen_off_dimming, d)
+            }),
+            Opt("Screen dimming timeout", |s| crate::settings::dim_timeout_label(s.screen_off_timeout_secs), |s, d| {
+                s.screen_off_timeout_secs = cycle(crate::settings::DIM_TIMEOUTS, s.screen_off_timeout_secs, d)
+            }),
             Opt("Resume where you left off", |s| on_off(s.resume_playback), |s, _| s.resume_playback = !s.resume_playback),
             Opt("Resume short videos (under 5 minutes)", |s| on_off(s.resume_short_videos), |s, _| s.resume_short_videos = !s.resume_short_videos),
             Opt("Remember live stream position", |s| on_off(s.resume_live), |s, _| s.resume_live = !s.resume_live),

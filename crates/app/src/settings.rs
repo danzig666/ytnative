@@ -236,6 +236,19 @@ pub fn speed_index(r: f32) -> usize {
     (0..SPEEDS.len()).min_by(|a, b| (SPEEDS[*a] - r).abs().total_cmp(&(SPEEDS[*b] - r).abs())).unwrap_or(7)
 }
 
+/// Screen dimming amounts (percent) and timeouts (seconds; 0 = at once), as SmartTube offers them.
+pub const DIM_PERCENTS: &[u32] = &[10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
+pub const DIM_TIMEOUTS: &[u32] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 1800, 3600, 5400, 7200, 9000, 10800];
+
+/// A screen dimming timeout in words.
+pub fn dim_timeout_label(secs: u32) -> String {
+    match secs {
+        0 => crate::i18n::tr("When pressed").to_string(),
+        s if s < 60 => format!("{s} {}", crate::i18n::tr("seconds")),
+        s => format!("{} {}", s / 60, crate::i18n::tr("minutes")),
+    }
+}
+
 /// Sleep timer choices in minutes: off, then half an hour to ten hours in half-hour steps.
 pub const SLEEP_MINS: &[u32] = &[0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330, 360, 390, 420, 450, 480, 510, 540, 570, 600];
 
@@ -302,6 +315,12 @@ pub struct Settings {
     pub ok_action: OkAction,
     /// Pause after this many minutes without a key press (0 = off).
     pub sleep_timer_mins: u32,
+    /// Screen dimming in the player (SmartTube's "Screen off"): how dark, in percent (100 = black).
+    pub screen_off_dimming: u32,
+    /// Seconds without a key press before the armed dimming starts; 0 = the button dims at once.
+    pub screen_off_timeout_secs: u32,
+    /// The dimming button is on (armed timeout, or a partial dim that carries over to the next video).
+    pub screen_off_armed: bool,
     /// In a Shorts list, a Short repeats at its end instead of moving on.
     pub loop_shorts: bool,
     /// Number keys 0..9 seek to 0..90 % of the video.
@@ -456,6 +475,9 @@ impl Default for Settings {
             controls_time: ControlsTime::Remaining,
             ok_action: OkAction::Controls,
             sleep_timer_mins: 0,
+            screen_off_dimming: 100,
+            screen_off_timeout_secs: 0,
+            screen_off_armed: false,
             loop_shorts: true,
             seek_number_keys: true,
             double_back_exit: false,

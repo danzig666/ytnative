@@ -1,19 +1,2 @@
-- New: SmartTube-style look: cards with an info panel (the focused card lights up), a dark background, icons in the sidebar
-- New: player controls in two rows of round buttons around the seek bar (playback mode, speed, chapters, comments, search, channel, save to playlist, subscribe, video info, SponsorBlock), with the quality, date and remaining time on the right
-- New: a suggestions row under the player controls (Down from the lower row)
-- New: rows load more videos as you scroll right, like SmartTube (Recommended was cut short before)
-- New: chapter selector and an optional clock with the date on the video lists
-- New: playback modes: play next, repeat this video, play / repeat / shuffle / reverse the list, pause or close after each video
-- New: speeds from 0.25x to 4x, remember speed per video / per channel / for all videos, speed button toggles 1x and the last speed
-- New: OK button behaviour, controls auto-hide 1 to 15 seconds or never, seek step 1 to 60 seconds, seek with the number keys, ending time in the controls
-- New: sleep timer (pauses after 0.5 to 10 hours without a key press), leave the player with a double BACK, loop Shorts, show the controls on the next video
-- New: resume options for short videos and live streams, preferred audio language, subtitles remembered per channel
-- New: thumbnail picture (start / middle / end), content country, channels sorting
-- New: content filters: hide Shorts everywhere, hide watched / upcoming / streams per section, blocked channels list with unblock, watch history and search history switches
-- New: SponsorBlock: highlight category, markers per category, ignore short segments, exclude a channel, alternative server, paid promotion notice, DeArrow fallback thumbnail
-- New: remote control: connect messages, close the player when the phone disconnects, no history for videos started from the phone
-- New: card menu: play from the start, play without history, subscribe / unsubscribe, comments, unblock
-- Changed: languages, search filters and picture fit are shown by name instead of codes or internal names
-- Fixed: media play / pause keys while comments, a menu or chapters are open
-- Fixed: a player button stayed highlighted after the pointer hid or keys took over
-- Fixed: Next could restart the same video
+- New: screen dimming (SmartTube's "Screen off"): a button in the player controls dims the picture while the sound plays
+- New: screen dimming amount from 10 % to 100 % (100 % switches the screen off) and timeout (when pressed, 1 to 10 seconds, or 30 minutes to 3 hours without a key press) in Settings > Playback
