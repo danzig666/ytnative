@@ -479,7 +479,7 @@ impl AppRig {
         let language_changed = self.store.settings.subtitle_language != self.subtitle_language_was;
         self.subtitle_language_was = self.store.settings.subtitle_language.clone();
         let wanted = (!self.subtitles_were && self.player_view.extras.cues.is_empty()) || (self.subtitles_were && language_changed);
-        if subs && wanted && !self.player_view.video_id.is_empty() {
+        if subs && wanted && !self.player_view.video_id.is_empty() && self.player_view.phase != Phase::Idle {
             let (v, session, status) = (self.player_view.video_id.clone(), self.session.clone(), self.player.status.clone());
             let (lang, tr) = (self.store.settings.subtitle_language.clone(), self.store.settings.subtitle_auto_translate);
             plx_base::task::spawn("captions", move || crate::player::load_captions(&v, &session, &status, &lang, tr));
