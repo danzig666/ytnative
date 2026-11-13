@@ -70,6 +70,8 @@ fn parse(tok: &str) -> Option<Step> {
         "right" => Step::Key(79 | ARROW, 0),
         "ok" | "enter" => Step::Key(13, 0),
         "back" => Step::Key(0, 482),
+        // Any remote key by its webOS code, e.g. wcode:261 (play/pause).
+        t if t.starts_with("wcode:") => Step::Key(0, t[6..].parse().ok()?),
         "exit" => Step::Exit,
         t if t.starts_with("wait:") => Step::Wait(t[5..].parse().ok()?),
         t if t.starts_with("wheel:") => Step::Wheel(t[6..].parse().ok()?),

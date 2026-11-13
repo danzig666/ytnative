@@ -383,6 +383,9 @@ fn main() {
                                 continue;
                             }
                         }
+                        if media_key_over_overlay(wcode, edge == plx_machine::machine::Edge::Down, &mut rig, &d) {
+                            continue;
+                        }
                     }
                     inputs.push(ev);
                 }
@@ -411,7 +414,7 @@ fn main() {
             if let Some(l) = lounge.as_mut() {
                 rig.store.lounge_code = l.code.lock().unwrap().clone();
                 let top = d.top_screen().map(|s| s.name());
-                let over_player = rig.player.active() && matches!(top, Some("comments" | "menu" | "info" | "chapters"));
+                let over_player = rig.player.active() && (ui::comments_open() || ui::menu_open() || matches!(top, Some("comments" | "menu" | "info" | "chapters")));
                 let in_player = top == Some("player") || over_player;
                 match l.poll(&rig.player_view) {
                     lounge::Action::Play { video_id, start_ms, playlist } => {
@@ -469,7 +472,7 @@ fn main() {
                         log(&format!("launch: play {v}"));
                         let arg = YtArg::Player { video_id: v, playlist: None };
                         let top = d.top_screen().map(|s| s.name());
-                        let over_player = rig.player.active() && matches!(top, Some("comments" | "menu" | "info" | "chapters"));
+                        let over_player = rig.player.active() && (ui::comments_open() || ui::menu_open() || matches!(top, Some("comments" | "menu" | "info" | "chapters")));
                         if over_player {
                             d.request(MachineId::Nav, NavOp::Pop);
                         }
@@ -630,7 +633,10 @@ fn media_key_over_overlay(wcode: u32, down: bool, rig: &mut AppRig, d: &Dispatch
     if !matches!(wcode, 450 | 72 | 261) || !rig.player.active() {
         return false;
     }
-    if !matches!(d.top_screen().map(|s| s.name()), Some("comments" | "menu" | "info" | "chapters")) {
+    // Presented overlays (comments, the options menu, chapters) are not the dispatcher's top
+    // page, so they are recognised by the flags they keep; "info" is a pushed page.
+    let overlay = ui::comments_open() || ui::menu_open() || d.top_screen().map(|s| s.name()) == Some("info");
+    if !overlay {
         return false;
     }
     if down {
