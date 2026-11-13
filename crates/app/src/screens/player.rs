@@ -232,6 +232,7 @@ impl Machine<YtHost> for PlayerScreen {
                 if cx.views.player.phase == Phase::Playing {
                     self.hud = false;
                     self.osd_sel = None;
+                    self.pointer = None;
                     fx.invalidate(plx_machine::present::Provenance::Timer(T_HIDE));
                 }
                 Handled::Yes
@@ -315,9 +316,17 @@ impl Machine<YtHost> for PlayerScreen {
                 }
                 Handled::Yes
             }
+            // The pointer went away: nothing stays highlighted where it last was.
+            ScreenEvent::Input(InputEvent { kind: InputKind::PointerHidden, .. }) => {
+                self.pointer = None;
+                fx.invalidate(plx_machine::present::Provenance::Input);
+                Handled::Yes
+            }
             ScreenEvent::Input(InputEvent { kind: InputKind::Key { key, wcode, edge, .. }, .. }) => {
                 self.ptr_quiet = true;
                 self.ptr_anchor = None;
+                // Keys take over from the pointer: its last hover no longer highlights a button.
+                self.pointer = None;
                 if *edge == Edge::Up {
                     return if *key == Key::Back && !self.hud { Handled::No } else { Handled::Yes };
                 }
@@ -342,6 +351,7 @@ impl Machine<YtHost> for PlayerScreen {
                         // BACK hides the controls while playing or paused (a paused video too).
                         if self.hud && matches!(cx.views.player.phase, Phase::Playing | Phase::Paused) {
                             self.hud = false;
+                            self.osd_sel = None;
                             fx.invalidate(plx_machine::present::Provenance::Input);
                             Handled::Yes
                         } else {
@@ -396,6 +406,7 @@ impl Machine<YtHost> for PlayerScreen {
                         // Up shows / hides the on-screen controls.
                         if self.hud {
                             self.hud = false;
+                            self.osd_sel = None;
                             fx.push(Fx::CancelTimer(T_HIDE));
                             fx.invalidate(plx_machine::present::Provenance::Input);
                         } else {

@@ -537,6 +537,12 @@ fn main() {
                     hide_cursor();
                     cursor_hidden = true;
                     pointer_at = None;
+                    // Screens drop their pointer hover (the player's highlighted OSD button).
+                    inputs.push(plx_machine::machine::InputEvent {
+                        at: tick,
+                        source: plx_machine::machine::Source::Sdl,
+                        kind: plx_machine::machine::InputKind::PointerHidden,
+                    });
                 }
             }
             // The page clock: one redraw when the minute changes (pages are otherwise idle).
