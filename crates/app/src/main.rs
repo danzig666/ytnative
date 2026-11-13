@@ -342,6 +342,11 @@ fn main() {
                                 continue;
                             }
                         }
+                        // Play / pause media keys while comments, a menu or chapters cover the
+                        // player: the overlay has focus, so the player screen would never see them.
+                        if media_key_over_overlay(wcode, state & 0xff != 0 && state & 0x100 == 0, &mut rig, &d) {
+                            continue;
+                        }
                         let k = input::key_input(sym, wcode, state, tick);
                         if matches!(k.kind, plx_machine::machine::InputKind::PointerHidden | plx_machine::machine::InputKind::Key { .. }) {
                             pointer_at = None; // a key (or the pointer timing out) puts the pointer away
@@ -613,6 +618,29 @@ fn main() {
 }
 
 /// A remapped colour button (settings → Remote control).
+/// Play (450), pause (72) and play/pause (261) while an overlay sits on the playing video.
+/// Returns true when the key was taken (`down`: the press, not the release or a repeat).
+fn media_key_over_overlay(wcode: u32, down: bool, rig: &mut AppRig, d: &Dispatcher<YtHost>) -> bool {
+    if !matches!(wcode, 450 | 72 | 261) || !rig.player.active() {
+        return false;
+    }
+    if !matches!(d.top_screen().map(|s| s.name()), Some("comments" | "menu" | "info" | "chapters")) {
+        return false;
+    }
+    if down {
+        let paused = rig.player_view.phase == player::Phase::Paused;
+        let toggle = match wcode {
+            450 => paused,
+            72 => !paused,
+            _ => true,
+        };
+        if toggle {
+            rig.player.toggle_pause();
+        }
+    }
+    true
+}
+
 fn color_key(act: &str, rig: &mut AppRig, d: &mut Dispatcher<YtHost>) {
     match act {
         "search" if rig.store.settings.child_mode => {}
