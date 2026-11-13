@@ -254,10 +254,37 @@ impl MenuScreen {
                 use yt_core::search_filters::*;
                 let f = &cx.views.store.search_filters;
                 let v = match i {
-                    0 => format!("{:?}", f.upload_date),
-                    1 => format!("{:?}", f.kind),
-                    2 => format!("{:?}", f.duration),
-                    3 => format!("{:?}", f.sort),
+                    0 => crate::i18n::tr(match f.upload_date {
+                        UploadDate::Any => "Any time",
+                        UploadDate::Hour => "Last hour",
+                        UploadDate::Today => "Today",
+                        UploadDate::Week => "This week",
+                        UploadDate::Month => "This month",
+                        UploadDate::Year => "This year",
+                    })
+                    .to_string(),
+                    1 => crate::i18n::tr(match f.kind {
+                        Kind::Any => "Any type",
+                        Kind::Video => "Videos",
+                        Kind::Channel => "Channels",
+                        Kind::Playlist => "Playlists",
+                        Kind::Movie => "Movies",
+                    })
+                    .to_string(),
+                    2 => crate::i18n::tr(match f.duration {
+                        Duration::Any => "Any length",
+                        Duration::Short => "Under 4 minutes",
+                        Duration::Medium => "4 to 20 minutes",
+                        Duration::Long => "Over 20 minutes",
+                    })
+                    .to_string(),
+                    3 => crate::i18n::tr(match f.sort {
+                        Sort::Relevance => "Relevance",
+                        Sort::Rating => "Rating",
+                        Sort::UploadDate => "Upload date",
+                        Sort::ViewCount => "View count",
+                    })
+                    .to_string(),
                     4 => crate::i18n::tr(if f.live { "On" } else { "Off" }).to_string(),
                     5 => crate::i18n::tr(if f.hd_4k { "On" } else { "Off" }).to_string(),
                     6 => crate::i18n::tr(if f.hdr { "On" } else { "Off" }).to_string(),
@@ -280,7 +307,14 @@ impl MenuScreen {
                 let name = st.audio_tracks.iter().find(|t| Some(&t.0) == cur.as_ref()).map(|t| t.1.clone()).unwrap_or_else(|| "default".into());
                 format!("{}  \u{203A}", ui::ellipsize(&name, 18))
             }
-            Act::ZoomMode => format!("\u{2039}  {:?}  \u{203A}", cx.views.player.zoom),
+            Act::ZoomMode => format!(
+                "\u{2039}  {}  \u{203A}",
+                crate::i18n::tr(match cx.views.player.zoom {
+                    crate::player::Zoom::Fit => "Fit to screen",
+                    crate::player::Zoom::Fill => "Fill the screen",
+                    crate::player::Zoom::Zoom => "Zoom in",
+                })
+            ),
             Act::Sleep => match cx.views.store.sleep_minutes {
                 0 => format!("{}  \u{203A}", crate::i18n::tr("Off")),
                 m => format!("{m} min  \u{203A}"),

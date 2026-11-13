@@ -59,21 +59,8 @@ fn card_item_edit(s: &mut Settings, key: &str, d: i32) {
     }
 }
 
-/// A language code as its own name ("hu" -> "Magyar").
 fn language_name(code: &str) -> String {
-    match code {
-        "system" => crate::i18n::tr("system").to_string(),
-        "en" => "English".into(),
-        "hu" => "Magyar".into(),
-        "de" => "Deutsch".into(),
-        "es" => "Español".into(),
-        "fr" => "Français".into(),
-        "ru" => "Русский".into(),
-        "it" => "Italiano".into(),
-        "pl" => "Polski".into(),
-        "pt" => "Português".into(),
-        other => other.to_string(),
-    }
+    crate::i18n::language_name(code)
 }
 
 fn on_off(b: bool) -> String {
@@ -147,11 +134,16 @@ fn items(page: SettingsPage) -> Vec<Item> {
             Opt("Subtitles", |s| on_off(s.subtitles), |s, _| s.subtitles = !s.subtitles),
             Opt(
                 "Language",
-                |s| s.subtitle_language.clone(),
+                |s| language_name(&s.subtitle_language),
                 |s, d| {
-                    const L: &[&str] = &["en", "hu", "de", "fr", "es", "it", "pt", "ru", "uk", "pl", "ro", "ja", "ko", "zh-Hans"];
-                    let i = L.iter().position(|l| *l == s.subtitle_language).unwrap_or(0) as i32;
-                    s.subtitle_language = L[((i + d).rem_euclid(L.len() as i32)) as usize].into();
+                    // Every listed language once (aliases such as iw / zh-CN are not offered).
+                    let l: Vec<&str> = crate::i18n::LANGUAGES
+                        .iter()
+                        .map(|(c, _)| *c)
+                        .filter(|c| !matches!(*c, "iw" | "tl" | "nb" | "zh-CN" | "zh-TW" | "zh"))
+                        .collect();
+                    let i = l.iter().position(|x| *x == s.subtitle_language).unwrap_or(0) as i32;
+                    s.subtitle_language = l[((i + d).rem_euclid(l.len() as i32)) as usize].into();
                 },
             ),
             Opt("Auto-translate when missing", |s| on_off(s.subtitle_auto_translate), |s, _| s.subtitle_auto_translate = !s.subtitle_auto_translate),

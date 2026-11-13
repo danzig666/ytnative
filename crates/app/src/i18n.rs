@@ -72,3 +72,92 @@ mod tests {
         assert_eq!(tr("Settings"), "Settings");
     }
 }
+
+/// Languages by code with their own names (what the app shows instead of codes), in the order
+/// the subtitle language list offers them.
+pub const LANGUAGES: &[(&str, &str)] = &[
+    ("en", "English"),
+    ("hu", "Magyar"),
+    ("de", "Deutsch"),
+    ("fr", "Français"),
+    ("es", "Español"),
+    ("it", "Italiano"),
+    ("pt", "Português"),
+    ("nl", "Nederlands"),
+    ("pl", "Polski"),
+    ("cs", "Čeština"),
+    ("sk", "Slovenčina"),
+    ("sl", "Slovenščina"),
+    ("hr", "Hrvatski"),
+    ("sr", "Српски"),
+    ("bs", "Bosanski"),
+    ("ro", "Română"),
+    ("bg", "Български"),
+    ("el", "Ελληνικά"),
+    ("tr", "Türkçe"),
+    ("ru", "Русский"),
+    ("uk", "Українська"),
+    ("be", "Беларуская"),
+    ("lt", "Lietuvių"),
+    ("lv", "Latviešu"),
+    ("et", "Eesti"),
+    ("fi", "Suomi"),
+    ("sv", "Svenska"),
+    ("no", "Norsk"),
+    ("nb", "Norsk bokmål"),
+    ("da", "Dansk"),
+    ("is", "Íslenska"),
+    ("ga", "Gaeilge"),
+    ("ca", "Català"),
+    ("eu", "Euskara"),
+    ("gl", "Galego"),
+    ("ar", "العربية"),
+    ("he", "עברית"),
+    ("iw", "עברית"),
+    ("fa", "فارسی"),
+    ("ur", "اردو"),
+    ("hi", "हिन्दी"),
+    ("bn", "বাংলা"),
+    ("pa", "ਪੰਜਾਬੀ"),
+    ("ta", "தமிழ்"),
+    ("te", "తెలుగు"),
+    ("mr", "मराठी"),
+    ("gu", "ગુજરાતી"),
+    ("kn", "ಕನ್ನಡ"),
+    ("ml", "മലയാളം"),
+    ("th", "ไทย"),
+    ("vi", "Tiếng Việt"),
+    ("id", "Bahasa Indonesia"),
+    ("ms", "Bahasa Melayu"),
+    ("fil", "Filipino"),
+    ("tl", "Filipino"),
+    ("ja", "日本語"),
+    ("ko", "한국어"),
+    ("zh-Hans", "中文（简体）"),
+    ("zh-Hant", "中文（繁體）"),
+    ("zh-CN", "中文（简体）"),
+    ("zh-TW", "中文（繁體）"),
+    ("zh", "中文"),
+    ("sw", "Kiswahili"),
+    ("af", "Afrikaans"),
+    ("sq", "Shqip"),
+    ("hy", "Հայերեն"),
+    ("ka", "ქართული"),
+    ("az", "Azərbaycan"),
+    ("kk", "Қазақ"),
+    ("uz", "Oʻzbek"),
+    ("mn", "Монгол"),
+    ("mk", "Македонски"),
+    ("eo", "Esperanto"),
+    ("la", "Latina"),
+];
+
+/// A language code as the language's own name ("hu" -> "Magyar", "pt-BR" -> "Português").
+/// Unknown codes fall back to their base language, then to the code itself.
+pub fn language_name(code: &str) -> String {
+    if code == "system" {
+        return tr("system").to_string();
+    }
+    let find = |c: &str| LANGUAGES.iter().find(|(k, _)| k.eq_ignore_ascii_case(c)).map(|(_, n)| n.to_string());
+    find(code).or_else(|| code.split(['-', '_']).next().and_then(find)).unwrap_or_else(|| code.to_string())
+}
