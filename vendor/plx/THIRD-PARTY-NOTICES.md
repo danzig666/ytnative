@@ -648,3 +648,11 @@ then-current MIT grant. That original grant and Gleb Linnik notice are preserved
 `licenses/PlxNative-historical-MIT.txt`; no ownership transfer is claimed.
 
 The repository carries no copy of the SDL2, GLES2 or KHR headers; `include/` holds only the project's own `ass.h` facade.
+
+## ytnative: `libass-plx.so.0` (native/textshape)
+
+ytnative's build of the text facade contains only plx-native's `src/ass_text.c` and links the
+television's own FreeType, HarfBuzz and FriBidi dynamically; no copy of those libraries is shipped.
+It is compiled against their upstream headers in `third_party/shaping/include` (FreeType 2.11.1,
+FreeType License; HarfBuzz 4.0.1, Old MIT; FriBidi 1.0.11, LGPL-2.1-or-later), whose license texts
+are in `third_party/shaping/licenses`.

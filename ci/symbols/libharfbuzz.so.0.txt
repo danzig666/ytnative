@@ -1,0 +1,19 @@
+# Link-only symbol list (names only, no LG code): the functions native/textshape uses from the TV's
+# own library. Format: `name` = function.
+hb_blob_create_from_file_or_fail
+hb_blob_destroy
+hb_buffer_add_utf8
+hb_buffer_allocation_successful
+hb_buffer_create
+hb_buffer_destroy
+hb_buffer_get_glyph_infos
+hb_buffer_get_glyph_positions
+hb_buffer_guess_segment_properties
+hb_buffer_set_direction
+hb_face_create
+hb_face_destroy
+hb_face_get_glyph_count
+hb_font_create
+hb_font_destroy
+hb_font_set_scale
+hb_shape

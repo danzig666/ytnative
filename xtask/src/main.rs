@@ -239,7 +239,31 @@ fn build() -> Result<()> {
     let size = std::fs::metadata(binary())?.len();
     let dbg = std::fs::metadata(debug_binary())?.len();
     println!("built {} ({} KiB; {} KiB with debug info in ytnative.debug)", binary().display(), size / 1024, dbg / 1024);
-    checks::needed(&binary(), true)
+    checks::needed(&binary(), true)?;
+    build_textshape()
+}
+
+/// The text shaper (`native/textshape`), shipped beside the binary as `libass-plx.so.0`: linked
+/// against the TV's own FreeType, HarfBuzz and FriBidi through the stubs `tools/gen-stubs.py`
+/// wrote into target/stubs during the cargo build.
+fn textshape_lib() -> PathBuf {
+    PathBuf::from(format!("target/{TARGET}/release/dist/libass-plx.so.0"))
+}
+
+fn build_textshape() -> Result<()> {
+    let st = Command::new("python")
+        .args(["-m", "ziglang", "cc", "-target", "arm-linux-gnueabi.2.17", "-mcpu=cortex_a9", "-shared", "-fPIC", "-O2"])
+        .args(["-fvisibility=default", "-Wl,-soname,libass-plx.so.0", "-Wl,--allow-shlib-undefined", "-Wl,--build-id=sha1", "-s"])
+        .args(["-Ithird_party/shaping/include", "native/textshape/ass_text.c", "-Ltarget/stubs"])
+        .args(["-l:libfreetype.so.6", "-l:libharfbuzz.so.0", "-l:libfribidi.so.0", "-o"])
+        .arg(textshape_lib())
+        .status()
+        .context("running zig cc for native/textshape")?;
+    if !st.success() {
+        bail!("building native/textshape failed");
+    }
+    println!("built {} ({} KiB)", textshape_lib().display(), std::fs::metadata(textshape_lib())?.len() / 1024);
+    Ok(())
 }
 
 /// Writes an IPK the way plx-native's ci/mkipk.py does: deterministic tar members with explicit
@@ -262,6 +286,7 @@ fn ipk() -> Result<PathBuf> {
         }
     }
     files.push((main_exe.clone(), std::fs::read(binary())?, 0o755));
+    files.push(("libass-plx.so.0".into(), std::fs::read(textshape_lib())?, 0o644));
     files.sort_by(|a, b| a.0.cmp(&b.0));
 
     let packageinfo = serde_json::to_vec_pretty(&serde_json::json!({

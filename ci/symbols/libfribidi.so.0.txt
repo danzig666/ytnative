@@ -1,0 +1,7 @@
+# Link-only symbol list (names only, no LG code): the functions native/textshape uses from the TV's
+# own library. Format: `name` = function.
+fribidi_get_bidi_types
+fribidi_get_bracket_types
+fribidi_get_par_embedding_levels_ex
+fribidi_reorder_line
+fribidi_shape_mirroring

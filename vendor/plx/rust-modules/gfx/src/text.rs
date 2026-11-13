@@ -1065,9 +1065,15 @@ const SCRIPT_FONTS: [&str; LINKS - 6] = [
 ];
 
 impl Link {
-    /// Shaped by [`crate::rtl`] rather than drawn by SDL2_ttf.
+    /// Shaped by [`crate::rtl`] rather than drawn by SDL2_ttf. ytnative: the television's script
+    /// faces too, when the shaping library loads (conjuncts, reordered vowel signs, stacked
+    /// marks); without it they stay on SDL2_ttf, unshaped but readable.
     fn shaped(self) -> bool {
-        matches!(self, Link::Arabic | Link::Hebrew)
+        match self {
+            Link::Arabic | Link::Hebrew => true,
+            l if l as usize >= 6 => crate::rtl::available(),
+            _ => false,
+        }
     }
 }
 
@@ -1104,6 +1110,9 @@ static FACES_HEBREW: [AtomicPtr<c_void>; FONT_SLOTS] =
     [const { AtomicPtr::new(std::ptr::null_mut()) }; FONT_SLOTS];
 static FACES_HEBREW_B: [AtomicPtr<c_void>; FONT_SLOTS] =
     [const { AtomicPtr::new(std::ptr::null_mut()) }; FONT_SLOTS];
+/// The script links' shaping faces, per link and size (one weight: bold draws regular).
+static FACES_SCRIPT: [[AtomicPtr<c_void>; FONT_SLOTS]; LINKS - 6] =
+    [const { [const { AtomicPtr::new(std::ptr::null_mut()) }; FONT_SLOTS] }; LINKS - 6];
 /// Per-link coverage, read from the file's cmap on FIRST NEED and never again. A slot holding
 /// `None` means the file is absent or unreadable, i.e. the link is empty.
 ///
@@ -1191,8 +1200,10 @@ unsafe fn shaped_face(link: Link, sz: c_int, bold: c_int) -> Option<std::mem::Ma
     let slot = match (link, bold != 0) {
         (Link::Hebrew, false) => &FACES_HEBREW[sz],
         (Link::Hebrew, true) => &FACES_HEBREW_B[sz],
-        (_, false) => &FACES_ARABIC[sz],
-        (_, true) => &FACES_ARABIC_B[sz],
+        (Link::Arabic, false) => &FACES_ARABIC[sz],
+        (Link::Arabic, true) => &FACES_ARABIC_B[sz],
+        (l, _) if l as usize >= 6 => &FACES_SCRIPT[l as usize - 6][sz],
+        _ => return None,
     };
     let mut p = slot.load(Ordering::Relaxed);
     if p.is_null() {

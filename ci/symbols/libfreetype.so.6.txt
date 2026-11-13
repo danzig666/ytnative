@@ -1,0 +1,10 @@
+# Link-only symbol list (names only, no LG code): the functions native/textshape uses from the TV's
+# own library. Format: `name` = function.
+FT_Done_Face
+FT_Done_Glyph
+FT_Get_Glyph
+FT_Glyph_To_Bitmap
+FT_Init_FreeType
+FT_Load_Glyph
+FT_New_Face
+FT_Set_Char_Size

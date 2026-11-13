@@ -50,3 +50,7 @@ The ytnative simulator (`cargo xtask sim`, `crates/app/src/sim/`) builds these c
   (`/usr/share/fonts/LG_Smart_UI_{Devanagari,Bengali,Gujarati,Gurmukhi,Kannada,Malayalam,Oriya,Tamil,Telugu,Amharic}.ttf`,
   `DroidSansThai-Regular.ttf`, `NotoSans{Sinhala,Khmer,Lao,Myanmar,Georgian,Armenian}-Regular.ttf`), drawn by SDL2_ttf
   unshaped; `LINKS`, `SCRIPT_FONTS`, `FONTS_SCRIPT`; the test helpers treat links past `Hebrew` as absent.
+- gfx/src/text.rs: the script links are `shaped()` when `rtl::available()` (HarfBuzz conjuncts and
+  reordering for Indic and South-East Asian scripts), with their own `FACES_SCRIPT` slots; without
+  the library they stay on SDL2_ttf. The shaping library itself is built from plx-native's
+  `src/ass_text.c` in `native/textshape/` against the TV's FreeType/HarfBuzz/FriBidi.

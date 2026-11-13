@@ -1,1 +1,2 @@
-- Changed: the date in the player is back beside the controls; only the time sits in the top right corner
+- New: proper text shaping for Arabic, Hebrew, Hindi and the other Indian scripts, Thai, Khmer, Lao and Myanmar: letters join and vowel signs sit in the right place (uses the TV's own HarfBuzz, FreeType and FriBidi)
+- Fixed: Arabic and Hebrew titles showed as boxes on the TV
