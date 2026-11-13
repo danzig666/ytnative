@@ -475,6 +475,8 @@ pub struct Settings {
     // Parental
     pub child_mode: bool,
     pub settings_pin: String,
+    /// The TV's capabilities were read once (first start) and the playback settings set from them.
+    pub device_checked: bool,
 }
 
 impl Default for Settings {
@@ -584,6 +586,7 @@ impl Default for Settings {
             device_name: "ytnative".into(),
             child_mode: false,
             settings_pin: String::new(),
+            device_checked: false,
         }
     }
 }

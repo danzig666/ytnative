@@ -1,1 +1,1 @@
-- Fixed: resting the pointer at the very left edge of the screen now scrolls the shelf back (before, it only worked a little to the right of the edge)
+- New: on the first start the app reads what the TV supports (4K panel, HDR, AV1 and VP9 decoders) and sets the maximum quality, video codec, HDR and playback engine to match, instead of starting at 1080p H.264 without HDR

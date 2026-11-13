@@ -336,7 +336,9 @@ pub struct AppRig {
 
 impl AppRig {
     pub fn new() -> Self {
-        let store = Store::new(Settings::load());
+        let mut settings = Settings::load();
+        crate::device::apply_once(&mut settings);
+        let store = Store::new(settings);
         let mut rig = AppRig {
             video_target: [0.0, 0.0, 1920.0, 1080.0],
             video_now: [0.0, 0.0, 1920.0, 1080.0],
