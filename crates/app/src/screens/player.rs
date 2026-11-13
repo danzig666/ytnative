@@ -960,13 +960,16 @@ impl Screen<YtHost> for PlayerScreen {
         if st.phase == Phase::Ended {
             quality = format!("{}  {quality}", crate::i18n::tr("Ended"));
         }
-        ui::text(p, &quality, 1824.0, ROW_A_Y + 18.0, 26, ui::DIM, ui::ALIGN_RIGHT, false);
+        ui::text(p, &quality, 1824.0, ROW_A_Y + 2.0, 26, ui::DIM, ui::ALIGN_RIGHT, false);
         if s.show_clock {
-            // The corner clock of the video pages, in the same place, while the controls show (it
-            // leaves with them, so nothing stays still on the panel). A soft shade keeps it legible
-            // over a bright picture.
-            ui::fill(p, Rect::new(1540.0, 18.0, 312.0, 108.0), 28.0, [0.0, 0.0, 0.0, 0.45]);
-            common::clock_block(p, cx, 1824.0, 30.0);
+            // The date where it always was, beside the controls; the time in the top right corner
+            // like on the video pages. Both leave with the controls, so nothing stays still on the
+            // panel. A soft shade keeps the time legible over a bright picture.
+            ui::text(p, &common::date_text(), 1824.0, ROW_A_Y + 34.0, 26, ui::DIM, ui::ALIGN_RIGHT, false);
+            let time = common::clock(&cx.views);
+            let w = 25.0 * time.chars().count() as f32 + 60.0;
+            ui::fill(p, Rect::new(1852.0 - w, 22.0, w, 76.0), 24.0, [0.0, 0.0, 0.0, 0.45]);
+            ui::text(p, &time, 1824.0, 34.0, 40, ui::WHITE, ui::ALIGN_RIGHT, true);
         }
         // Right of the lower row: remaining time, position / duration (or live).
         if st.live {

@@ -1,4 +1,1 @@
-- Fixed: focusing a video tile no longer re-wraps its title; a title too long for two lines glides its second line instead
-- Fixed: the clock in the player now shows in the top right corner, with the date, while the controls are visible
-- Fixed: Indian scripts (Hindi, Bengali, Tamil, Telugu and others), Thai, Khmer, Lao, Myanmar, Sinhala, Amharic, Georgian and Armenian text now shows instead of boxes, using the TV's own fonts
-- New: option "Left on the first tile opens the sidebar" (on by default)
+- Changed: the date in the player is back beside the controls; only the time sits in the top right corner
