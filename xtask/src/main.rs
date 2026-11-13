@@ -308,21 +308,25 @@ fn ipk() -> Result<PathBuf> {
         entries.push((format!("{app_prefix}/{name}"), Some((data.clone(), *mode))));
     }
     entries.push((format!("{pkg_prefix}/packageinfo.json"), Some((packageinfo, 0o644))));
-    let installed_kib: u64 = entries.iter().filter_map(|e| e.1.as_ref()).map(|(d, _)| d.len() as u64).sum::<u64>().div_ceil(1024);
-    let data_tgz = targz(&entries)?;
+    // Installed-Size in BYTES, as ares-package writes it: webOS 5's installer checks it against
+    // what the package unpacks to and refuses a smaller figure ("-5: ipk verified failed").
+    let installed_bytes: u64 = entries.iter().filter_map(|e| e.1.as_ref()).map(|(d, _)| d.len() as u64).sum();
+    // A real timestamp (the commit's, so the package stays reproducible), not 1970.
+    let mtime = source_epoch();
+    let data_tgz = targz(&entries, mtime)?;
 
     let control = format!(
         "Package: {id}\nVersion: {version}\nSection: misc\nPriority: optional\nArchitecture: arm\n\
-         Installed-Size: {installed_kib}\nMaintainer: {}\nHomepage: https://github.com/danzig666/ytnative\n\
-         License: GPL-3.0-or-later\nDescription: {}\nwebOS-Package-Format-Version: 2\nwebOS-Packager-Version: ytnative-xtask/1\n",
+         Installed-Size: {installed_bytes}\nMaintainer: {}\nDescription: {}\nwebOS-Package-Format-Version: 2\n\
+         webOS-Packager-Version: x.y.x\n",
         info["vendor"].as_str().unwrap_or("ytnative"),
         info["title"].as_str().unwrap_or("ytnative"),
     );
-    let control_tgz = targz(&[("control".into(), Some((control.into_bytes(), 0o644)))])?;
+    let control_tgz = targz(&[("control".into(), Some((control.into_bytes(), 0o644)))], mtime)?;
 
     let mut ar = b"!<arch>\n".to_vec();
     for (name, blob) in [("debian-binary", b"2.0\n".to_vec()), ("control.tar.gz", control_tgz), ("data.tar.gz", data_tgz)] {
-        ar.extend(format!("{name:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n", 0, 0, 0, "100644", blob.len()).as_bytes());
+        ar.extend(format!("{name:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n", mtime, 0, 0, "100644", blob.len()).as_bytes());
         ar.extend(&blob);
         if blob.len() % 2 == 1 {
             ar.push(b'\n');
@@ -331,11 +335,23 @@ fn ipk() -> Result<PathBuf> {
     std::fs::create_dir_all("target/ipk")?;
     let out = PathBuf::from(format!("target/ipk/{id}_{version}_arm.ipk"));
     std::fs::write(&out, ar)?;
-    println!("wrote {} ({} KiB, Installed-Size {installed_kib} KiB)", out.display(), std::fs::metadata(&out)?.len() / 1024);
+    println!("wrote {} ({} KiB, Installed-Size {} KiB)", out.display(), std::fs::metadata(&out)?.len() / 1024, installed_bytes / 1024);
     Ok(out)
 }
 
-fn targz(entries: &[(String, Option<(Vec<u8>, u32)>)]) -> Result<Vec<u8>> {
+/// The package's timestamp: SOURCE_DATE_EPOCH, else the HEAD commit's time, else now.
+fn source_epoch() -> u64 {
+    if let Some(t) = std::env::var("SOURCE_DATE_EPOCH").ok().and_then(|v| v.trim().parse().ok()) {
+        return t;
+    }
+    let git = Command::new("git").args(["log", "-1", "--format=%ct"]).output();
+    if let Some(t) = git.ok().and_then(|o| String::from_utf8(o.stdout).ok()).and_then(|s| s.trim().parse().ok()) {
+        return t;
+    }
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_secs())
+}
+
+fn targz(entries: &[(String, Option<(Vec<u8>, u32)>)], mtime: u64) -> Result<Vec<u8>> {
     let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
     let mut tb = tar::Builder::new(gz);
     tb.mode(tar::HeaderMode::Deterministic);
@@ -345,7 +361,7 @@ fn targz(entries: &[(String, Option<(Vec<u8>, u32)>)]) -> Result<Vec<u8>> {
         h.set_gid(0);
         h.set_username("root")?;
         h.set_groupname("root")?;
-        h.set_mtime(0);
+        h.set_mtime(mtime);
         match content {
             None => {
                 h.set_entry_type(tar::EntryType::Directory);

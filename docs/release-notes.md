@@ -1,1 +1,1 @@
-- Fixed: after a successful sign-in the sign-in page now closes by itself and shows "Signed in as …" (before, you had to press BACK)
+- Fixed: the package installs on webOS 5 TVs (it was refused with "ipk verified failed"): the package size is now given in bytes and the files carry a real date
