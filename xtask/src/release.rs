@@ -28,7 +28,7 @@ pub fn manifest(ipk_url: Option<&str>, out: Option<&str>) -> Result<()> {
         "version": version,
         "type": info["type"].as_str().unwrap_or("native"),
         "title": info["title"],
-        "appDescription": "Native YouTube client for LG webOS TVs",
+        "appDescription": "SmartTube ported to LG webOS: a native (Rust) YouTube client for the TV, without ads",
         "iconUri": icon,
         "sourceUrl": REPO_URL,
         "rootRequired": false,
@@ -43,15 +43,22 @@ pub fn manifest(ipk_url: Option<&str>, out: Option<&str>) -> Result<()> {
     std::fs::write(&out, serde_json::to_string_pretty(&m)? + "\n")?;
     println!("wrote {} (ipk sha256 {sha})", out.display());
 
-    // Custom-repository index (Homebrew Channel > Settings > Add repository takes its URL): one
-    // package whose manifestUrl always names the newest release's manifest.
-    let repo = serde_json::json!({ "packages": [{
-        "id": id,
-        "title": info["title"],
-        "shortDescription": "Native YouTube client for LG webOS TVs",
-        "iconUri": icon,
-        "manifestUrl": format!("{REPO_URL}/releases/latest/download/{manifest_name}"),
-    }]});
+    // Custom-repository index (Homebrew Channel > Settings > Add repository takes its URL), in the
+    // same shape as repo.webosbrew.org/api/apps.json: paging + packages, each with its manifest
+    // embedded (the Channel reads the version from it for "update available"). It is regenerated
+    // and republished with every release, so the manifest URL is pinned to this tag.
+    let repo = serde_json::json!({
+        "paging": { "page": 1, "count": 1, "maxPage": 1, "itemsTotal": 1, "prevUrl": null, "nextUrl": null },
+        "packages": [{
+            "id": id,
+            "title": info["title"],
+            "iconUri": icon,
+            "manifestUrl": format!("{REPO_URL}/releases/download/v{version}/{manifest_name}"),
+            "manifest": m,
+            "pool": "main",
+            "shortDescription": "SmartTube for LG webOS: a native YouTube client without ads",
+        }],
+    });
     let repo_out = out.with_file_name("repo.json");
     std::fs::write(&repo_out, serde_json::to_string_pretty(&repo)? + "\n")?;
     println!("wrote {}", repo_out.display());

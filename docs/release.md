@@ -8,7 +8,7 @@ A GitHub release `vX.Y.Z` with four files, all produced by `.github/workflows/re
 |---|---|
 | `io.github.danzig666.ytnative_X.Y.Z_arm.ipk` | the package (stripped binary + `crates/app/pkg/*`) |
 | `io.github.danzig666.ytnative.manifest.json` | webOS Homebrew Channel package manifest (id, version, `type: native`, title, `iconUri`, `sourceUrl`, `rootRequired: false`, `ipkUrl`, `ipkHash.sha256`, `ipkSize`) |
-| `repo.json` | a one-package custom-repository index pointing at the newest manifest |
+| `repo.json` | the one-package Homebrew Channel repository index (also published on GitHub Pages as `api/apps.json`) |
 | `ytnative-X.Y.Z.debug` | the unstripped twin of the shipped binary, for symbolizing crash logs (docs/debugging.md) |
 | `SHA256SUMS` | checksums of the above |
 
@@ -73,12 +73,14 @@ Custom repository (works today, no review needed):
 1. Install the [webOS Homebrew Channel](https://github.com/webosbrew/webos-homebrew-channel)
    (it needs Developer Mode or root).
 2. Homebrew Channel > Settings > **Add repository**, URL
-   `https://github.com/danzig666/ytnative/releases/latest/download/repo.json`.
+   `https://danzig666.github.io/ytnative/api/apps.json`.
 3. ytnative appears in the list; install it. Updates appear when a newer release is published.
 
-Not yet verified on a TV: that the Channel follows GitHub's redirect from `releases/latest/download/`
-to the asset host. If it does not, host `repo.json` (and optionally the manifest) on GitHub Pages
-and add that URL instead; the manifest's `ipkUrl` is absolute, so it can live anywhere.
+The repository is published by the `pages` job of the release workflow (GitHub Pages, source
+"GitHub Actions"). `api/apps.json` (also served as `repo.json`) has the same shape as
+`repo.webosbrew.org/api/apps.json`: `paging` plus `packages`, each with the full manifest embedded;
+the manifest's `ipkUrl` is absolute and tag-pinned. The same `repo.json` is attached to the
+release too (`releases/latest/download/repo.json`).
 
 Official listing (later): fork `webosbrew/apps-repo`, add `packages/io.github.danzig666.ytnative.yml`
 (title, iconUri, `manifestUrl: https://github.com/danzig666/ytnative/releases/latest/download/io.github.danzig666.ytnative.manifest.json`,
