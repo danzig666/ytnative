@@ -62,14 +62,23 @@ Everything SmartTube users expect, rebuilt for webOS:
 - No ads. Up to 4K60, VP9 and AV1, **HDR10** (AV1), live streams.
 - Two playback engines: the TV's own DASH player, and a direct hardware-decoder feed (the one
   used for 4K/VP9/AV1/HDR and live).
-- On-screen controls with previous / play-pause / next, like / dislike, subtitles, comments and
-  options, all reachable with the remote's arrow keys or the Magic Remote pointer.
+- SmartTube's two rows of on-screen controls (playback mode, speed, chapters, comments, search,
+  channel, like / dislike, subtitles, save to playlist, subscribe, video info, SponsorBlock) and a
+  suggestions row, all reachable with the arrow keys or the Magic Remote pointer.
 - Chapter selector (a list of the video's chapters, OK jumps there), chapters on the seek bar,
   storyboard previews while seeking, resume where you left off,
   autoplay / repeat, playback speed (per channel if you like).
 - Subtitles with size, colour, font, bold, outline / shadow / box styles and auto-translate.
 - Comments in a side panel (the video shrinks beside it) with replies.
 - OSD, comments and subtitles are dimmed automatically over HDR video.
+
+**Options (SmartTube's, adapted to webOS)**
+- Playback modes (play next, repeat, list once / repeat / shuffle / reverse, pause or close after
+  each video), remembered speed (per video, per channel, for all), OK button behaviour, auto-hide,
+  seek step, number-key seeking, ending time, sleep timer, resume rules, preferred audio language.
+- Subtitles per channel, thumbnail picture, content country, channels sorting.
+- Content filters per section (Shorts, watched, upcoming, streams), blocked channels, watch and
+  search history switches.
 
 **Extras**
 - **SponsorBlock** (per-category skip / ask / off, segment markers on the seek bar),

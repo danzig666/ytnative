@@ -87,9 +87,14 @@ pub fn empty_state(p: Painter, feed: Option<&Feed>, area: Rect) {
 
 /// A transient message at the bottom of the screen.
 pub fn toast(p: Painter, cx: &Cx<'_, YtHost>) {
+    toast_at(p, cx, 960.0);
+}
+
+/// [`toast`] with its top at `y` (the player raises it above its controls).
+pub fn toast_at(p: Painter, cx: &Cx<'_, YtHost>, y: f32) {
     let Some((msg, _)) = &cx.views.store.toast else { return };
     let w = 22.0 * crate::i18n::tr(msg).chars().count() as f32 * 0.62 + 80.0;
-    let r = Rect::new((1920.0 - w) / 2.0, 960.0, w, 70.0);
+    let r = Rect::new((1920.0 - w) / 2.0, y, w, 70.0);
     ui::fill(p, r, 35.0, [0.08, 0.08, 0.1, 0.94]);
     ui::text(p, msg, 960.0, r.y + 19.0, 28, ui::WHITE, ui::ALIGN_CENTER, false);
 }

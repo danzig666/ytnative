@@ -1001,7 +1001,7 @@ impl Screen<YtHost> for PlayerScreen {
         if !suggestions(cx).is_empty() && self.osd_sel.is_some_and(|i| i >= OSD_ROW_B) {
             ui::text(p, &format!("\u{25BC}  {}", crate::i18n::tr("Suggestions")), 960.0, 1030.0, 24, ui::DIM, ui::ALIGN_CENTER, false);
         }
-        common::toast(p, cx);
+        common::toast_at(p, cx, 540.0); // above the title and the controls
     }
     fn render(&self) -> RenderStrategy {
         RenderStrategy::VideoPlane
