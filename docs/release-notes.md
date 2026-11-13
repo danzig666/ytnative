@@ -1,2 +1,2 @@
-- New: screen dimming (SmartTube's "Screen off"): a button in the player controls dims the picture while the sound plays
-- New: screen dimming amount from 10 % to 100 % (100 % switches the screen off) and timeout (when pressed, 1 to 10 seconds, or 30 minutes to 3 hours without a key press) in Settings > Playback
+- Fixed: an empty tile could stay at the end of a row on Home
+- Fixed: the Library's top row (History, Watch later, Playlists, Music) had no pictures; its tiles now show matching icons
