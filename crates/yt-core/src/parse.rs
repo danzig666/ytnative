@@ -193,6 +193,7 @@ fn tile(t: &Value) -> Option<Item> {
         thumbnail: best_thumb(&header["thumbnail"]["thumbnails"]),
         badge,
         progress,
+        members_only: members_only(t),
         endpoint,
         menu: crate::actions::menu_actions(t),
     })
@@ -259,9 +260,22 @@ fn lockup(l: &Value) -> Option<Item> {
         thumbnail: img["image"]["sources"].as_array().and_then(|s| pick_largest(s)),
         badge,
         progress,
+        members_only: members_only(l),
         endpoint,
         menu: crate::actions::menu_actions(l),
     })
+}
+
+/// The item carries YouTube's members-only badge anywhere in it: a TV tile puts it in a metadata
+/// line (`metadataBadgeRenderer.style` `BADGE_STYLE_TYPE_MEMBERS_ONLY`), a lockup in its own
+/// badge view model (`BADGE_MEMBERS_ONLY`).
+fn members_only(v: &Value) -> bool {
+    match v {
+        Value::String(s) => s.ends_with("MEMBERS_ONLY"),
+        Value::Array(a) => a.iter().any(members_only),
+        Value::Object(o) => o.iter().any(|(k, v)| k != "menu" && members_only(v)),
+        _ => false,
+    }
 }
 
 /// Endpoint from any command object (`onSelectCommand`, `navigationEndpoint`, `innertubeCommand`).
@@ -405,5 +419,26 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod members_only_tests {
+    use super::members_only;
+    use serde_json::json;
+
+    #[test]
+    fn tile_metadata_badge_marks_members_only() {
+        let tile = json!({"metadata": {"tileMetadataRenderer": {"lines": [{"lineRenderer": {"items": [
+            {"lineItemRenderer": {"badge": {"metadataBadgeRenderer": {"label": "Members only", "style": "BADGE_STYLE_TYPE_MEMBERS_ONLY"}}}}
+        ]}}]}}});
+        assert!(members_only(&tile));
+    }
+
+    #[test]
+    fn other_badges_and_menus_do_not() {
+        let tile = json!({"metadata": {"badge": {"metadataBadgeRenderer": {"style": "BADGE_STYLE_TYPE_PROMOTED"}}},
+            "menu": {"text": "BADGE_STYLE_TYPE_MEMBERS_ONLY"}});
+        assert!(!members_only(&tile));
     }
 }

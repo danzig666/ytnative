@@ -824,7 +824,7 @@ impl Screen<YtHost> for PlayerScreen {
         // Status in the middle while there is no picture yet / on failure.
         let centre = match &st.phase {
             Phase::Idle | Phase::Resolving | Phase::Loading => Some(String::new()),
-            Phase::Failed(e) => Some(format!("Can't play this video: {}", ui::ellipsize(e, 80))),
+            Phase::Failed(e) => Some(e.clone()),
             _ => None,
         };
         // Windows simulator: no media pipeline and no video plane; mark where the picture would be.
@@ -841,7 +841,14 @@ impl Screen<YtHost> for PlayerScreen {
                 // Loading / starting: a spinner, no words.
                 ui::spinner(p, cx.views.now_ms, 960.0, 540.0);
             } else {
-                ui::text(p, &msg, 960.0, 510.0, 36, ui::DIM, ui::ALIGN_CENTER, false);
+                // The failure: a headline, YouTube's (or our) reason under it in full; a members-only
+                // video just says so.
+                ui::text(p, "Can't play this video", 960.0, 440.0, 40, ui::WHITE, ui::ALIGN_CENTER, true);
+                let members = msg.contains("available to this channel's members");
+                let msg = if members { crate::i18n::tr("Only this channel's members can watch it.").to_string() } else { msg };
+                for (i, line) in wrap_lines(f.measure, &msg, 1300.0, 28, false, 4).iter().enumerate() {
+                    ui::text(p, line, 960.0, 510.0 + i as f32 * 42.0, 28, ui::DIM, ui::ALIGN_CENTER, false);
+                }
             }
         }
         // Everything below (captions, OSD, toasts) is dimmed over HDR video.

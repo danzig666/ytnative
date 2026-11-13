@@ -68,6 +68,9 @@ impl Default for Prefs {
 
 pub fn resolve(api: &Api, video_id: &str, bearer: Option<&str>) -> Result<Resolved> {
     let mut errors = Vec::new();
+    // YouTube's own reasons for refusing (members only, private, removed...): when every client
+    // gives the same one, that is the whole story and what the viewer is told.
+    let mut refusals: Vec<String> = Vec::new();
     // Direct URLs, but nothing the TV's DASH player takes (no H.264 + AAC with ranges): kept in
     // case no later client does better (engine B still plays VP9/AV1).
     let mut partial: Option<Resolved> = None;
@@ -79,6 +82,7 @@ pub fn resolve(api: &Api, video_id: &str, bearer: Option<&str>) -> Result<Resolv
                 if status != "OK" {
                     let reason = pr["playabilityStatus"]["reason"].as_str().unwrap_or("").to_string();
                     errors.push(format!("{client:?}: {status} {reason}"));
+                    refusals.push(reason);
                     continue;
                 }
                 let r = build(client, video_id, pr);
@@ -99,7 +103,19 @@ pub fn resolve(api: &Api, video_id: &str, bearer: Option<&str>) -> Result<Resolv
     if let Some(r) = partial {
         return Ok(r);
     }
+    if let Some(reason) = same_reason(&refusals, errors.len()) {
+        bail!("{reason}");
+    }
     bail!("no client could play {video_id}: {}", errors.join("; "))
+}
+
+/// The one reason every client refused with (`tried` clients in all), if they all agree. Only the
+/// first sentence counts: clients word the "join this channel" tail differently.
+fn same_reason(refusals: &[String], tried: usize) -> Option<String> {
+    let first = |r: &str| r.split(". ").next().unwrap_or(r).trim().trim_end_matches('.').to_string();
+    let one = refusals.first().filter(|r| !r.trim().is_empty())?;
+    let key = first(one);
+    (refusals.len() == tried && refusals.iter().all(|r| first(r) == key)).then(|| one.trim().to_string())
 }
 
 fn build(client: Client, video_id: &str, pr: Value) -> Resolved {
@@ -282,5 +298,31 @@ vp9
         assert!(f.contains("GROUP-ID=\"a1\"") && !f.contains("GROUP-ID=\"a2\""));
         let f = super::filter_hls(m, 720);
         assert!(f.contains("v720") && !f.contains("v1080"));
+    }
+}
+
+#[cfg(test)]
+mod reason_tests {
+    use super::same_reason;
+
+    #[test]
+    fn members_only_refusal_is_told_once() {
+        let r = |s: &str| s.to_string();
+        let refusals = [
+            r("This video is available to this channel's members on level: Seriously (or any higher level). Join this YouTube channel from your computer or mobile app."),
+            r("This video is available to this channel's members on level: Seriously (or any higher level). Join this YouTube channel from your computer or mobile app."),
+            r("This video is available to this channel's members on level: Seriously (or any higher level). Join this channel to get access to members-only content and other exclusive perks."),
+        ];
+        let got = same_reason(&refusals, 3).unwrap();
+        assert!(got.starts_with("This video is available to this channel's members"));
+    }
+
+    #[test]
+    fn different_reasons_or_other_failures_keep_the_full_report() {
+        let r = |s: &str| s.to_string();
+        assert_eq!(same_reason(&[r("Video unavailable"), r("Sign in to confirm your age")], 2), None);
+        // A client that failed some other way (network, no formats) is not a refusal.
+        assert_eq!(same_reason(&[r("Video unavailable")], 2), None);
+        assert_eq!(same_reason(&[r(""), r("")], 2), None);
     }
 }

@@ -38,6 +38,9 @@ pub struct Item {
     pub badge: Option<String>,
     /// 0..=100 when the user has partially watched it.
     pub progress: Option<u8>,
+    /// Only the channel's members can watch it (YouTube's "Members only" badge).
+    #[serde(default)]
+    pub members_only: bool,
     pub endpoint: Option<Endpoint>,
     /// The card's own menu (Watch later, Not interested, Remove from history...), as YouTube
     /// sent it. Home tiles often carry only a lazy "More" entry resolved with `menu_panel`.

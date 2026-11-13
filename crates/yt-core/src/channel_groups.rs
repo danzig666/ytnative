@@ -667,6 +667,7 @@ pub fn entry_item(e: &FeedEntry, now: u64) -> Item {
         ),
         badge: e.short.then(|| "SHORTS".to_string()),
         progress: None,
+        members_only: false,
         endpoint: Some(Endpoint::Watch { video_id: e.video_id.clone(), playlist_id: None, params: None }),
         menu: Vec::new(),
     }

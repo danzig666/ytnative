@@ -1,3 +1,3 @@
-- Fixed: with the sidebar open, moving the pointer over a thumbnail behind it no longer makes the thumbnail grow and shrink rapidly
-- Changed: clicking beside the open sidebar closes it and goes back to the thumbnail you were on
-- Changed: the README lists the LG BX (webOS 5.5) as a tested TV
+- New: members-only videos show a star and "Members only" on their thumbnail
+- Changed: when a video cannot be played, the player says "Can't play this video" with YouTube's reason in full underneath, instead of a cut-off technical message
+- Changed: a members-only video you are not a member of just says that only the channel's members can watch it

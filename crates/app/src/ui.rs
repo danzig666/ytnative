@@ -540,6 +540,16 @@ impl CardsSrc<'_> {
             fill(p, badge, 6.0, if live { accent() } else { [0.0, 0.0, 0.0, 0.78] });
             text(p, b, badge.x + w / 2.0, badge.y + 4.0, 22, WHITE, ALIGN_CENTER, true);
         }
+        // Members only: a star and the words in the bottom-left corner.
+        if self.cards[i].item.members_only {
+            let r = tile.rect;
+            let label = crate::i18n::tr("Members only");
+            let w = 13.5 * label.chars().count() as f32 + 62.0;
+            let pill = Rect::new(r.x + 10.0, r.y + r.h - 44.0, w, 34.0);
+            fill(p, pill, 6.0, [0.0, 0.0, 0.0, 0.78]);
+            icon::draw(p, icon::Kind::Star, Rect::new(pill.x + 8.0, pill.y + 5.0, 24.0, 24.0), [1.0, 0.82, 0.25, 1.0], true);
+            text(p, &label, pill.x + 38.0, pill.y + 4.0, 22, WHITE, ALIGN_LEFT, true);
+        }
     }
 }
 
