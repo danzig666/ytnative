@@ -1,26 +1,2 @@
-- Fixed: a speed the 4K engine refused no longer carries over to the next video you open
-- Fixed: "Play next" no longer overrides the "Pause at the end" and "Leave the player" playback modes
-- Fixed: updating no longer replaces the quality, codec and player you chose with the TV's best; only a first install is set up from the TV
-- Fixed: autoplay no longer replays the video you just watched
-- Fixed: vertical videos and Shorts play at the quality you set instead of 480p
-- Fixed: a SponsorBlock category you turned off no longer hides a sponsor segment inside it
-- Fixed: the video position stays right after changing speed or pausing on the 4K engine
-- Fixed: a thumbnail that fails to load is no longer downloaded again and again
-- Fixed: switching accounts no longer freezes the screen or shows the previous account's Home
-- Fixed: a damaged settings, accounts, channel groups or Cast pairing file no longer wipes everything; it is kept aside as a .bad file
-- Fixed: one unreadable setting no longer resets all the others
-- Fixed: a revoked or offline sign-in no longer slows every request down
-- Fixed: subtitles switched on while a video starts now appear, and a channel's subtitle choice no longer becomes the global one
-- Fixed: changing the audio track keeps the playlist
-- Fixed: after an autoplayed video, Left/Right seek again with the YouTube-style controls
-- Fixed: focus no longer gets lost after switching sections from the sidebar
-- Fixed: the sign-in screen says when you are already signed in
-- Fixed: long titles, menu rows and video info no longer run over other text
-- Fixed: settings lists such as the codec keep their order
-- Fixed: the 4K engine recovers from broken media, expired live links and failed downloads instead of stalling, and stops faster when you leave a live stream
-- Fixed: backups keep the newest one even when the TV's clock is wrong
-- Fixed: a slow or blocked DNS-over-HTTPS server no longer delays every connection
-- Changed: YouTube's common reasons for not playing a video (private, removed, age, country, members only) are shown in your language
-- Changed: the whole interface is translated, including sign-in, loading messages, menus and toasts; counts and the clock are written in full, without abbreviations
-- Changed: the members-only badge shows just a star on small cards
-- New: the screen goes black after 2 minutes without input when no video is playing (protects OLED screens); any key wakes it
+- Fixed: playback speed on the 4K engine: the app now checks that the TV really plays faster, and if it does not (the LG C3 accepts the speed but ignores it) the video continues at that speed on the system player
+- Fixed: with SponsorBlock's "skip again" on, a skipped segment no longer skips over and over (the skip lands on a keyframe just before the segment's end)

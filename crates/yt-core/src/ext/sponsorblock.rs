@@ -275,7 +275,13 @@ pub struct SkipTracker {
     pub min_duration_ms: u64,
     done: HashSet<String>,
     inside: Option<String>,
+    /// The segment last returned (uuid, end): a skip lands on the keyframe before its end, still
+    /// inside it, which must not count as entering it again (that skipped in a loop).
+    last: Option<(String, u64)>,
 }
+
+/// How far before a skipped segment's end the landing keyframe may be.
+const LANDING_SLACK_MS: u64 = 10_000;
 
 impl SkipTracker {
     pub fn new(skip_again: bool) -> Self {
@@ -286,6 +292,7 @@ impl SkipTracker {
     pub fn reset(&mut self) {
         self.done.clear();
         self.inside = None;
+        self.last = None;
     }
 
     /// The segment to act on at `pos_ms`, at most once per entry.
@@ -310,8 +317,14 @@ impl SkipTracker {
             return None;
         }
         self.inside = Some(seg.uuid.clone());
+        // Near the end: at most half the segment (a short one seeked back into still counts).
+        let slack = LANDING_SLACK_MS.min(seg.duration_ms() / 2);
+        if self.last.as_ref().is_some_and(|(u, end)| *u == seg.uuid && pos_ms + slack >= *end) {
+            return None; // landed just before the end of the segment we skipped
+        }
         let first_time = self.done.insert(seg.uuid.clone());
         if first_time || self.skip_again {
+            self.last = Some((seg.uuid.clone(), seg.end_ms));
             Some(seg)
         } else {
             None
@@ -395,6 +408,19 @@ mod tests {
         let mut t = SkipTracker::new(false);
         let seg = t.check_where(&s, 40_000, |x| x.category != Category::Filler).unwrap();
         assert_eq!(seg.uuid, "s");
+    }
+
+    #[test]
+    fn landing_before_the_end_of_a_skipped_segment_does_not_skip_again() {
+        let s = parse_segments(r#"[{"category":"sponsor","actionType":"skip","segment":[60,103.555],"UUID":"s"}]"#).unwrap();
+        let mut t = SkipTracker::new(true); // "skip again" on
+        assert!(t.check(&s, 61_000).is_some());
+        // Skipped to 103.555 s: the position shows the target, then the keyframe at 101.234 s.
+        assert!(t.check(&s, 103_555).is_none());
+        assert!(t.check(&s, 101_234).is_none());
+        // Seeking far back into it does skip again.
+        assert!(t.check(&s, 200_000).is_none());
+        assert!(t.check(&s, 70_000).is_some());
     }
 
     #[test]

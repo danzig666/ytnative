@@ -34,6 +34,8 @@ const BLIND_AHEAD_NS: i64 = 4_000_000_000;
 const LANE_SLICE: Duration = Duration::from_millis(3);
 /// How long a seek may wait for the first video unit of its generation (slow networks included).
 const SEEK_LANDING_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long playback is timed after a speed change to see whether the TV applied it.
+const RATE_PROBE: Duration = Duration::from_secs(4);
 /// Firmware number for "decoder taken back by policy" (plx-native, webOS 4.10).
 const DECODER_REVOKED: i64 = 600;
 
@@ -389,6 +391,10 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
     // Playback speed asked for; applied once playing and again after every Play (a reload or a
     // seek that rebuilds the pipeline starts at normal speed).
     let mut rate: f32 = 1.0;
+    // Some TVs accept SetPlayRate and keep playing at normal speed: after a speed change the
+    // reported position is timed against the clock, and a speed that did not take is refused.
+    let mut probe_rate = false;
+    let mut rate_probe: Option<(Instant, i64)> = None;
     let mut eos_pushed = false;
     let mut seeking: Option<i64> = None;
     let mut gen = 0u64;
@@ -417,6 +423,7 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
         for c in cmds {
             match c {
                 Cmd::Pause => {
+                    rate_probe = None;
                     reanchor(&mut base, &mut play_at, rate, false);
                     user_paused = true;
                     if !priming && seeking.is_none() {
@@ -444,6 +451,8 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
                         if ok || (r - 1.0).abs() <= 0.01 {
                             reanchor(&mut base, &mut play_at, rate, true);
                             rate = r;
+                            probe_rate = (r - 1.0).abs() > 0.01;
+                            rate_probe = None;
                         } else {
                             // Still playing at the old speed; the host restarts on the system player.
                             sh.status.lock().unwrap().rate_refused = true;
@@ -477,6 +486,7 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
             play_at = None;
             seeking = Some(t);
             seek_started = Instant::now();
+            rate_probe = None;
             let mut s = sh.status.lock().unwrap();
             s.position_ms = t as u64 / 1_000_000;
             if !matches!(s.phase, Phase::Paused | Phase::Failed(_)) {
@@ -536,6 +546,23 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
             }
             if num == DECODER_REVOKED {
                 break Err("the TV took the video decoder back".into());
+            }
+        }
+        if pres != PRES_NONE && probe_rate && !priming && !user_paused && seeking.is_none() {
+            match rate_probe {
+                None => rate_probe = Some((Instant::now(), pres)),
+                Some((t0, p0)) if t0.elapsed() >= RATE_PROBE => {
+                    let ratio = (pres - p0) as f64 / t0.elapsed().as_nanos() as f64;
+                    let took = (ratio - 1.0).abs() >= (rate as f64 - 1.0).abs() / 2.0;
+                    crate::log(&format!("feed: speed {rate}: playing at {ratio:.2}x ({})", if took { "applied" } else { "not applied" }));
+                    if !took {
+                        rate = 1.0;
+                        sh.status.lock().unwrap().rate_refused = true;
+                    }
+                    probe_rate = false;
+                    rate_probe = None;
+                }
+                Some(_) => {}
             }
         }
         if pres != PRES_NONE {
@@ -614,6 +641,9 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
                     if !ok {
                         sh.status.lock().unwrap().rate_refused = true;
                         rate = 1.0;
+                    } else {
+                        probe_rate = true;
+                        rate_probe = None;
                     }
                 }
                 play_at = Some(Instant::now());
