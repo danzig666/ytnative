@@ -5,7 +5,10 @@
 linker = "tools/zig-cc-armv7.cmd"
 rustflags = ["-C", "target-cpu=cortex-a9", "-C", "target-feature=-neon,-soft-float", "-C", "force-frame-pointers=yes",
     # GNU build id: the crash tracer logs it, `cargo xtask crash` matches it against ytnative.debug.
-    "-C", "link-arg=-Wl,--build-id=sha1"]
+    "-C", "link-arg=-Wl,--build-id=sha1",
+    # getrandom by raw syscall: webOS 4's glibc 2.24 has no getrandom(), and the fallback polls
+    # /dev/random, which the Developer Mode jail does not have (uuid panics: "OS Error: 2").
+    "--cfg", "getrandom_backend=\"linux_raw\""]
 
 [alias]
 xtask = "run -q -p xtask --"
