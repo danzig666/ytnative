@@ -132,7 +132,9 @@ fn vtt_time(s: &str) -> Option<u64> {
     for p in hms.split(':') {
         total = total * 60 + p.trim().parse::<u64>().ok()?;
     }
-    let ms: u64 = format!("{:0<3}", &ms[..ms.len().min(3)]).parse().ok()?;
+    // Up to three digits (characters, not bytes: a malformed cue must not panic).
+    let ms: String = ms.trim().chars().take(3).collect();
+    let ms: u64 = format!("{ms:0<3}").parse().ok()?;
     Some(total * 1000 + ms)
 }
 

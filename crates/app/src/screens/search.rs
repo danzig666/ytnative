@@ -242,8 +242,18 @@ impl Screen<YtHost> for SearchScreen {
         // Query field
         let field = Rect::new(100.0, 150.0, 1720.0, 100.0);
         ui::fill(p, field, 18.0, [1.0, 1.0, 1.0, 0.08]);
-        let shown = if self.query.is_empty() { "Type with the keyboard below\u{2026}".to_string() } else { format!("{}|", self.query) };
-        ui::text(p, &shown, field.x + 36.0, field.y + 26.0, 40, if self.query.is_empty() { ui::FAINT } else { ui::WHITE }, ui::ALIGN_LEFT, false);
+        // The query as typed (its end, with the cursor, when it is longer than the field).
+        let room = field.w - 72.0;
+        let shown = if self.query.is_empty() {
+            crate::i18n::tr("Type with the keyboard below\u{2026}").to_string()
+        } else {
+            let mut q: String = format!("{}|", self.query);
+            while f.measure.width_str(&q, 40, false) > room && q.chars().count() > 2 {
+                q = format!("\u{2026}{}", q.chars().skip(2).collect::<String>());
+            }
+            q
+        };
+        ui::text_raw(p, &shown, field.x + 36.0, field.y + 26.0, 40, if self.query.is_empty() { ui::FAINT } else { ui::WHITE }, ui::ALIGN_LEFT, false);
         // Keyboard
         let focused = cx.focus.current.filter(|k| k.entry == self.entry).map(|k| k.elem);
         for (i, k) in keys().into_iter().enumerate() {
@@ -258,8 +268,8 @@ impl Screen<YtHost> for SearchScreen {
         // Suggestions
         let sugs = self.suggestions(cx);
         if !sugs.is_empty() {
-            let rows: Vec<Row> = sugs.iter().map(|s| Row::new(format!("\u{1F50D}  {s}"))).collect();
-            self.sug.draw(p, &rows, self.sug.focused(cx, sugs.len()));
+            let rows: Vec<Row> = sugs.iter().map(|s| Row::new(s.clone()).icon(ui::icon::Kind::Search).raw()).collect();
+            self.sug.draw(p, f.measure, &rows, self.sug.focused(cx, sugs.len()));
             self.sug.stops(f, sugs.len());
         } else {
             ui::text(p, "Suggestions appear here as you type.", 1000.0, 310.0, 28, ui::FAINT, ui::ALIGN_LEFT, false);

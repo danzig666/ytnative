@@ -273,10 +273,13 @@ enum Work {
     /// DeArrow replacements: (video id, title, thumbnail url).
     Branding(Vec<(String, Option<String>, Option<String>)>),
     Comments { video_id: String, page: Option<yt_core::comments::CommentsPage>, append: bool },
-    Page { key: FeedKey, page: yt_core::model::Page, append: bool, failed: Option<String> },
-    Shelf { key: FeedKey, row: usize, token: String, result: Result<(Vec<yt_core::model::Item>, Option<String>), String> },
+    /// `epoch`: `AppRig::feeds_epoch` when asked; a page of an older epoch (asked before the feeds
+    /// were cleared: another account or region) is dropped.
+    Page { epoch: u64, key: FeedKey, page: yt_core::model::Page, append: bool, failed: Option<String> },
+    Shelf { epoch: u64, key: FeedKey, row: usize, token: String, result: Result<(Vec<yt_core::model::Item>, Option<String>), String> },
     Suggestions(Vec<String>),
-    SignIn(SignIn),
+    /// A sign-in worker's progress: (its run number, state). Only the latest run's count.
+    SignIn(u32, SignIn),
 }
 
 pub struct AppRig {
@@ -307,7 +310,11 @@ pub struct AppRig {
     measure: plx_gfx::text::TtfMeasure,
     pub session: Arc<Mutex<Option<yt_core::session::Session>>>,
     done: Arc<Mutex<Vec<Done>>>,
+    /// The running sign-in's cancel flag (a new one per run) and its run number.
     signin_cancel: Arc<std::sync::atomic::AtomicBool>,
+    signin_run: u32,
+    /// Bumped whenever the feeds are cleared (see `Work::Page`).
+    feeds_epoch: u64,
     next_req: u32,
     pub player: Player,
     sb: yt_core::ext::sponsorblock::SkipTracker,
@@ -336,8 +343,10 @@ pub struct AppRig {
     feed_no_rate: bool,
     /// The video to start again on the system player (refused speed), for the frame loop.
     pub system_restart: Option<(String, Option<String>)>,
-    /// The speed that restart keeps.
-    restart_rate: Option<f32>,
+    /// The speed that restart keeps, for that video only.
+    restart_rate: Option<(String, f32)>,
+    /// The account's missing name was looked up again once this run (see Work::Page).
+    name_refreshed: bool,
     /// The playlist the current video was started with.
     current_playlist: Option<String>,
     /// "Play without history": asked for the next Play of this video / the one playing so.
@@ -371,6 +380,8 @@ impl AppRig {
             session: Default::default(),
             done: Default::default(),
             signin_cancel: Default::default(),
+            signin_run: 0,
+            feeds_epoch: 0,
             next_req: 0,
             player: Player::new(),
             sb: Default::default(),
@@ -384,6 +395,7 @@ impl AppRig {
             feed_no_rate: false,
             system_restart: None,
             restart_rate: None,
+            name_refreshed: false,
             current_playlist: None,
             audio_choice: None,
             last_key_ms: 0,
@@ -418,6 +430,27 @@ impl AppRig {
             .collect();
         self.store.signed_in = current.is_some();
         self.store.account = current.map(|c| c.name);
+    }
+
+    /// Drops every loaded list (another account or region); answers still on their way for the
+    /// old lists are ignored when they arrive.
+    fn clear_feeds(&mut self) {
+        self.store.feeds.clear();
+        self.feeds_epoch += 1;
+    }
+
+    /// Saves the settings, with the global subtitle state in place of a channel's remembered one
+    /// ("Subtitles per channel" applies that only while the channel's video plays).
+    pub fn save_settings(&self) {
+        match &self.subs_global {
+            Some((on, lang)) => {
+                let mut s = self.store.settings.clone();
+                s.subtitles = *on;
+                s.subtitle_language = lang.clone();
+                s.save();
+            }
+            None => self.store.settings.save(),
+        }
     }
 
     fn next_addr(&mut self, to: MachineId) -> Addr {
@@ -457,7 +490,7 @@ impl AppRig {
             yt_core::innertube::set_content_country(&self.store.settings.content_country);
             // Another region: the lists reload with its content.
             if self.applied_country.is_some() {
-                self.store.feeds.clear();
+                self.clear_feeds();
             }
             self.applied_country = Some(self.store.settings.content_country.clone());
         }
@@ -489,7 +522,7 @@ impl AppRig {
             if !v.is_empty() {
                 crate::log(&format!("speed {}x refused by engine B; restarting {v} on the system player", self.player_view.rate));
                 self.feed_no_rate = true;
-                self.restart_rate = Some(self.player_view.rate);
+                self.restart_rate = Some((v.clone(), self.player_view.rate));
                 self.pending_start = Some((v.clone(), self.player_view.position_ms));
                 self.system_restart = Some((v, self.current_playlist.clone()));
                 self.store.toast("This speed needs the system player: switching", now_ms);
@@ -507,14 +540,21 @@ impl AppRig {
         self.channel_subtitles();
         let subs = self.store.settings.subtitles;
         let language_changed = self.store.settings.subtitle_language != self.subtitle_language_was;
-        self.subtitle_language_was = self.store.settings.subtitle_language.clone();
         let wanted = (!self.subtitles_were && self.player_view.extras.cues.is_empty()) || (self.subtitles_were && language_changed);
-        if subs && wanted && !self.player_view.video_id.is_empty() && self.player_view.phase != Phase::Idle {
+        // The caption tracks are known once the video is resolved (Loading on).
+        let can_load = !self.player_view.video_id.is_empty() && !matches!(self.player_view.phase, Phase::Idle | Phase::Resolving | Phase::Failed(_));
+        if subs && wanted && can_load {
             let (v, session, status) = (self.player_view.video_id.clone(), self.session.clone(), self.player.status.clone());
             let (lang, tr) = (self.store.settings.subtitle_language.clone(), self.store.settings.subtitle_auto_translate);
             plx_base::task::spawn("captions", move || crate::player::load_captions(&v, &session, &status, &lang, tr));
         }
-        self.subtitles_were = subs;
+        // Switched on (or another language) while a video is still starting: keep the change
+        // pending until the video is known, so its captions load then.
+        let starting = subs && wanted && !can_load && !matches!(self.player_view.phase, Phase::Idle | Phase::Failed(_));
+        if !starting {
+            self.subtitles_were = subs;
+            self.subtitle_language_was = self.store.settings.subtitle_language.clone();
+        }
         if let Some((_, until)) = &self.store.toast {
             if now_ms > *until {
                 self.store.toast = None;
@@ -538,7 +578,10 @@ impl AppRig {
         let mut out = Vec::new();
         for (addr, work) in done {
             match work {
-                Work::Page { key, page, append, failed } => {
+                Work::Page { epoch, .. } | Work::Shelf { epoch, .. } if epoch != self.feeds_epoch => {
+                    crate::log("feed: an answer for lists cleared since was dropped");
+                }
+                Work::Page { key, page, append, failed, .. } => {
                     if let Some(e) = failed {
                         crate::log(&format!("feed {key:?} failed: {e}"));
                         self.store.fail(&key, e.clone());
@@ -546,7 +589,8 @@ impl AppRig {
                     } else {
                         // The session may just have filled in the account's name (a placeholder
                         // account): pick it up for the sidebar and the Accounts page.
-                        if self.store.signed_in && self.store.account.as_deref().is_none_or(|n| n.trim().is_empty()) {
+                        if !self.name_refreshed && self.store.signed_in && self.store.account.as_deref().is_none_or(|n| n.trim().is_empty()) {
+                            self.name_refreshed = true;
                             self.refresh_accounts();
                         }
                         let before = if append { self.store.cards(&key).len() } else { 0 };
@@ -557,7 +601,7 @@ impl AppRig {
                         out.push((addr, YtMsg::Loaded(key)));
                     }
                 }
-                Work::Shelf { key, row, token, result } => match result {
+                Work::Shelf { key, row, token, result, .. } => match result {
                     Ok((items, next)) => {
                         let added = self.store.apply_shelf(&key, row, &token, items, next);
                         crate::log(&format!("feed {key:?} row {row}: +{} cards", added.len()));
@@ -573,8 +617,8 @@ impl AppRig {
                     self.store.toast(msg, now_ms);
                     self.refresh_groups();
                     if accounts_changed {
-                        self.store.feeds.clear();
-                        *self.session.lock().unwrap() = None;
+                        self.clear_feeds();
+                        reset_session();
                         self.refresh_accounts();
                     }
                     out.push((addr, YtMsg::Acted));
@@ -626,14 +670,17 @@ impl AppRig {
                     self.store.suggestions = s;
                     out.push((addr, YtMsg::Suggestions));
                 }
-                Work::SignIn(s) => {
+                Work::SignIn(run, s) => {
                     if let SignIn::Done(_) = &s {
-                        self.store.feeds.clear();
-                        *self.session.lock().unwrap() = None;
+                        self.clear_feeds();
+                        reset_session();
                         self.refresh_accounts();
                     }
-                    self.signin = s;
-                    out.push((addr, YtMsg::SignIn));
+                    // A cancelled run's late news must not overwrite the current run's screen.
+                    if run == self.signin_run {
+                        self.signin = s;
+                        out.push((addr, YtMsg::SignIn));
+                    }
                 }
             }
         }
@@ -678,17 +725,21 @@ impl AppRig {
                 }
             }
         }
-        let Some(seg) = self.sb.check(&ex.segments, pos).cloned() else { return };
+        // Only the categories acted on: a longer overlapping segment of a category that is off
+        // must not hide one inside it.
+        let settings = &self.store.settings;
+        let Some(seg) = self.sb.check_where(&ex.segments, pos, |s| sb_action(settings, &s.category) != SbAction::Off).cloned() else { return };
         let label = seg.category.label().to_string();
+        let shown = crate::i18n::tr(&label).to_string();
         match sb_action(&self.store.settings, &seg.category) {
             SbAction::Off => {}
             SbAction::Skip => self.player.seek_to(seg.end_ms),
             SbAction::SkipWithToast => {
                 self.player.seek_to(seg.end_ms);
-                self.store.toast(format!("Skipped: {label}"), now_ms);
+                self.store.toast(crate::i18n::tr("Skipped: {}").replace("{}", &shown), now_ms);
             }
             SbAction::Ask => {
-                self.store.toast(format!("{label} \u{2014} press OK to skip"), now_ms);
+                self.store.toast(crate::i18n::tr("{} \u{2014} press OK to skip").replace("{}", &shown), now_ms);
                 self.sb_offer = Some((seg.end_ms, label, seg.end_ms));
             }
         }
@@ -816,7 +867,7 @@ impl AppRig {
         if let Some((on, lang)) = self.subs_global.take() {
             self.store.settings.subtitles = on;
             self.store.settings.subtitle_language = lang;
-            self.store.settings.save();
+            self.save_settings();
         }
     }
 
@@ -840,7 +891,7 @@ impl AppRig {
             }
             _ => {}
         }
-        s.save();
+        self.save_settings();
     }
 
     /// OK during an "Ask" segment skips it. Returns true when it did.
@@ -1000,13 +1051,29 @@ pub fn with_session<T>(
     f: impl FnOnce(&mut yt_core::session::Session) -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
     let mut g = session.lock().unwrap();
+    take_reset(&mut g);
     if g.is_none() {
         *g = Some(yt_core::session::Session::new()?);
     }
     f(g.as_mut().unwrap())
 }
 
-fn load_page(session: &Mutex<Option<yt_core::session::Session>>, key: &FeedKey, continuation: Option<String>) -> Work {
+/// Another account / signed out: the shared session is dropped by its next user. The main thread
+/// never takes the session lock itself, since workers hold it across network calls.
+static SESSION_RESET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn reset_session() {
+    SESSION_RESET.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// With the session lock held: applies a pending [`reset_session`].
+pub fn take_reset(g: &mut Option<yt_core::session::Session>) {
+    if SESSION_RESET.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        *g = None;
+    }
+}
+
+fn load_page(session: &Mutex<Option<yt_core::session::Session>>, epoch: u64, key: &FeedKey, continuation: Option<String>) -> Work {
     let r = with_session(session, |s| match (&continuation, key) {
         (Some(c), k) => s.more(k.endpoint(), c),
         (None, FeedKey::Section(sec)) => s.browse(sec.browse_id(), None),
@@ -1020,8 +1087,8 @@ fn load_page(session: &Mutex<Option<yt_core::session::Session>>, key: &FeedKey, 
         }
     });
     match r {
-        Ok(page) => Work::Page { key: key.clone(), page, append: continuation.is_some(), failed: None },
-        Err(e) => Work::Page { key: key.clone(), page: Default::default(), append: false, failed: Some(format!("{e:#}")) },
+        Ok(page) => Work::Page { epoch, key: key.clone(), page, append: continuation.is_some(), failed: None },
+        Err(e) => Work::Page { epoch, key: key.clone(), page: Default::default(), append: false, failed: Some(format!("{e:#}")) },
     }
 }
 
@@ -1044,14 +1111,16 @@ impl Rig<YtHost> for AppRig {
                     return;
                 }
                 self.store.mark_loading(&key);
-                self.spawn(from, "feed", move |s| load_page(s, &key, None));
+                let epoch = self.feeds_epoch;
+                self.spawn(from, "feed", move |s| load_page(s, epoch, &key, None));
             }
             YtFx::MoreShelf { key, row } => {
                 let Some(token) = self.store.begin_shelf(&key, row) else { return };
                 let endpoint = if matches!(key, FeedKey::Related(_)) { "next" } else { "browse" };
+                let epoch = self.feeds_epoch;
                 self.spawn(from, "shelf", move |s| {
                     let result = crate::host::with_session(s, |se| se.shelf_more(endpoint, &token)).map_err(|e| format!("{e:#}"));
-                    Work::Shelf { key, row, token, result }
+                    Work::Shelf { epoch, key, row, token, result }
                 });
             }
             YtFx::More(key) => {
@@ -1061,7 +1130,8 @@ impl Rig<YtHost> for AppRig {
                 }
                 let Some(c) = f.continuation.clone() else { return };
                 self.store.mark_loading(&key);
-                self.spawn(from, "more", move |s| load_page(s, &key, Some(c)));
+                let epoch = self.feeds_epoch;
+                self.spawn(from, "more", move |s| load_page(s, epoch, &key, Some(c)));
             }
             YtFx::PlayOptions { video_id, from_start, no_history } => {
                 if from_start {
@@ -1113,7 +1183,7 @@ impl Rig<YtHost> for AppRig {
                     _ => None,
                 }
                 .unwrap_or(s.speed);
-                let speed = self.restart_rate.take().unwrap_or(speed);
+                let speed = self.restart_rate.take().filter(|(v, _)| *v == video_id).map_or(speed, |(_, r)| r);
                 self.pending_rate = ((speed - 1.0).abs() > 0.01).then_some(speed);
                 self.current_playlist = playlist.clone();
                 // Resume: not for short videos (under 5 minutes) or live streams unless allowed.
@@ -1187,12 +1257,13 @@ impl Rig<YtHost> for AppRig {
                 // The chosen language becomes the preferred one (the original track: no preference).
                 let original = self.player_view.audio_tracks.iter().any(|x| x.0 == t && x.2);
                 self.store.settings.audio_language = if original { String::new() } else { t.split('.').next().unwrap_or("").to_string() };
-                self.store.settings.save();
+                self.save_settings();
                 if !v.is_empty() {
                     self.audio_choice = Some((v.clone(), t));
                     self.pending_start = Some((v.clone(), self.player_view.position_ms));
                     // Restart this video with the new audio track at the same position.
-                    self.app_fx(from, YtFx::Play { video_id: v, playlist: None }, _p, _out);
+                    let playlist = self.current_playlist.clone();
+                    self.app_fx(from, YtFx::Play { video_id: v, playlist }, _p, _out);
                 }
             }
             YtFx::SetZoom(z) => self.player.set_zoom(z),
@@ -1202,17 +1273,21 @@ impl Rig<YtHost> for AppRig {
             }
             YtFx::EditSettings(f) => {
                 f(&mut self.store.settings);
-                self.store.settings.save();
+                self.save_settings();
             }
             YtFx::SignInStart => {
                 self.signin = SignIn::Starting;
-                self.signin_cancel.store(false, std::sync::atomic::Ordering::SeqCst);
-                let cancel = self.signin_cancel.clone();
+                // A run still going (cancelled while in a network call) stops for good: each run
+                // has its own flag, and its news is told apart by its number.
+                self.signin_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                self.signin_cancel = Default::default();
+                self.signin_run += 1;
+                let (cancel, run) = (self.signin_cancel.clone(), self.signin_run);
                 let done = self.done.clone();
                 let addr = self.next_addr(from);
                 let _ = plx_base::task::spawn("signin", move || {
                     let post = |state: SignIn| {
-                        done.lock().unwrap().push((addr, Work::SignIn(state)));
+                        done.lock().unwrap().push((addr, Work::SignIn(run, state)));
                         plx_machine::present::wake_from_worker();
                     };
                     if let Err(e) = crate::signin::run(&cancel, &post) {
@@ -1226,8 +1301,8 @@ impl Rig<YtHost> for AppRig {
                     let _ = yt_core::accounts::remove(&cur.id);
                 }
                 let _ = std::fs::remove_file(yt_core::paths::data_file("token.json"));
-                self.store.feeds.clear();
-                *self.session.lock().unwrap() = None;
+                self.clear_feeds();
+                reset_session();
                 self.signin = SignIn::Idle;
                 self.refresh_accounts();
             }

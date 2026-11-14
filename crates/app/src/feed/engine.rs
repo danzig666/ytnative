@@ -32,6 +32,8 @@ pub const PRIME_VIDEO_MAX_NS: i64 = 2_500_000_000;
 const BLIND_AHEAD_NS: i64 = 4_000_000_000;
 /// Per-lane wall-clock budget per tick once the lane is healthy.
 const LANE_SLICE: Duration = Duration::from_millis(3);
+/// How long a seek may wait for the first video unit of its generation (slow networks included).
+const SEEK_LANDING_TIMEOUT: Duration = Duration::from_secs(30);
 /// Firmware number for "decoder taken back by policy" (plx-native, webOS 4.10).
 const DECODER_REVOKED: i64 = 600;
 
@@ -168,6 +170,8 @@ fn feed_lane(lane: &Lane, lf: &mut LaneFeed, es: i32, shift: i64, floor: i64, li
         }
         match sys::feed(&u.data, fed, es) {
             FeedReply::Ok => {
+                // The limit below is for consecutive failures, not for sporadic ones over a long video.
+                lf.errors = 0;
                 lf.fed_max = Some(lf.fed_max.map_or(fed, |m| m.max(fed)));
                 n += 1;
             }
@@ -217,15 +221,38 @@ pub fn run(sh: Arc<Shared>, plan: Plan) {
     let edge = Arc::new(AtomicI64::new(0));
     let mut start_ns = plan.start_ms as i64 * 1_000_000;
     if matches!(plan.transport, Transport::Live) {
-        // Start a little behind the newest segment, on the stream's own timeline.
-        let http = reqwest::blocking::Client::builder().timeout(Duration::from_secs(15)).build().unwrap_or_default();
-        match plan.video_fmt["url"].as_str().map(|u| source::live_head(&http, u, &plan.user_agent)) {
+        // Start a little behind the newest segment, on the stream's own timeline. The head request
+        // runs on a helper thread so that a stop (the main thread joins this one) is not held up
+        // by a slow network; an abandoned request simply finishes in the background.
+        let Some(url) = plan.video_fmt["url"].as_str().map(str::to_string) else {
+            return fail(&sh, "live: format without url".into());
+        };
+        let ua = plan.user_agent.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new().name("feed-head".into()).stack_size(512 << 10).spawn(move || {
+            let http = reqwest::blocking::Client::builder().timeout(Duration::from_secs(15)).build().unwrap_or_default();
+            let _ = tx.send(source::live_head(&http, &url, &ua));
+        });
+        if spawned.is_err() {
+            return fail(&sh, "live: could not start the head request".into());
+        }
+        let head = loop {
+            if sh.stop.load(Relaxed) {
+                return;
+            }
+            match rx.recv_timeout(Duration::from_millis(20)) {
+                Ok(r) => break Some(r),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break None,
+            }
+        };
+        match head {
             Some(Ok((_, head_ns))) => {
                 edge.store(head_ns, Relaxed);
                 start_ns = (head_ns - source::LIVE_DELAY_NS).max(0);
             }
             Some(Err(e)) => return fail(&sh, format!("live: {e:#}")),
-            None => return fail(&sh, "live: format without url".into()),
+            None => return fail(&sh, "live: the head request ended without an answer".into()),
         }
         let mut s = sh.status.lock().unwrap();
         s.live = true;
@@ -248,8 +275,18 @@ pub fn run(sh: Arc<Shared>, plan: Plan) {
 }
 
 fn spawn_fetchers(plan: &Plan, video: &Arc<Lane>, audio: &Arc<Lane>, ctl: &Arc<SourceCtl>, edge: &Arc<AtomicI64>) {
+    // A fetcher that panics would otherwise leave its lane silent and the engine waiting for
+    // media forever: the panic is turned into a lane error, which ends the session as a failure.
     let spawn = |name: &str, f: Box<dyn FnOnce() + Send>| {
-        if std::thread::Builder::new().name(name.into()).stack_size(512 << 10).spawn(f).is_err() {
+        let (v, a, n) = (video.clone(), audio.clone(), name.to_string());
+        let body = move || {
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err() {
+                crate::log(&format!("feed: {n} panicked"));
+                v.fail(format!("{n} stopped unexpectedly"));
+                a.fail(format!("{n} stopped unexpectedly"));
+            }
+        };
+        if std::thread::Builder::new().name(name.into()).stack_size(512 << 10).spawn(body).is_err() {
             crate::log(&format!("feed: could not spawn {name}"));
         }
     };
@@ -357,6 +394,7 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
     let mut gen = 0u64;
     let mut native_seek = true;
     let mut play_at: Option<Instant> = None;
+    let mut seek_started = Instant::now();
     let duration_ns = plan.duration_ms as i64 * 1_000_000;
 
     let result = loop {
@@ -366,9 +404,20 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
         // ---- commands ----
         let cmds: Vec<Cmd> = sh.cmds.lock().unwrap().drain(..).collect();
         let mut seek_to = None;
+        // The wall-clock estimate (below) counts from `base` at `play_at` at the current speed:
+        // move that anchor to now before the speed changes or the clock stops (pause).
+        let reanchor = |base: &mut i64, play_at: &mut Option<Instant>, rate: f32, running: bool| {
+            if let Some(t) = play_at.take() {
+                *base += (t.elapsed().as_nanos() as f64 * rate as f64) as i64;
+                if running {
+                    *play_at = Some(Instant::now());
+                }
+            }
+        };
         for c in cmds {
             match c {
                 Cmd::Pause => {
+                    reanchor(&mut base, &mut play_at, rate, false);
                     user_paused = true;
                     if !priming && seeking.is_none() {
                         sys::pause();
@@ -387,11 +436,16 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
                     sys::set_volume(v);
                 }
                 Cmd::Rate(r) => {
-                    rate = r;
-                    if !priming {
+                    if priming {
+                        rate = r; // applied with Play
+                    } else {
                         let ok = sys::set_play_rate(r);
                         crate::log(&format!("feed: SetPlayRate {r} -> {ok}"));
-                        if !ok && (r - 1.0).abs() > 0.01 {
+                        if ok || (r - 1.0).abs() <= 0.01 {
+                            reanchor(&mut base, &mut play_at, rate, true);
+                            rate = r;
+                        } else {
+                            // Still playing at the old speed; the host restarts on the system player.
                             sh.status.lock().unwrap().rate_refused = true;
                         }
                     }
@@ -422,6 +476,7 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
             priming = true;
             play_at = None;
             seeking = Some(t);
+            seek_started = Instant::now();
             let mut s = sh.status.lock().unwrap();
             s.position_ms = t as u64 / 1_000_000;
             if !matches!(s.phase, Phase::Paused | Phase::Failed(_)) {
@@ -436,11 +491,23 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
                 break Err(e);
             }
             let Some(k) = video.peek_pts() else {
+                // Without a deadline a generation that never yields a video unit (its fetcher
+                // finished empty-handed, or keeps waiting for a segment) would leave the player
+                // loading forever.
+                if video.drained() {
+                    break Err("no video after the seek target".into());
+                }
+                if seek_started.elapsed() > SEEK_LANDING_TIMEOUT {
+                    break Err("timed out waiting for media after a seek".into());
+                }
                 std::thread::sleep(Duration::from_millis(5));
                 continue;
             };
             let landed = native_seek && sys::seek_ms(k.max(0) / 1_000_000);
             if landed {
+                // A position report that arrived between the seek command and this Seek belongs
+                // to the old timeline (and the old shift): drop it.
+                pipe.ev.pres_fed_ns.store(PRES_NONE, Relaxed);
                 shift = 0;
                 base = k.max(0);
             } else {
@@ -546,6 +613,7 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
                     crate::log(&format!("feed: SetPlayRate {rate} -> {ok}"));
                     if !ok {
                         sh.status.lock().unwrap().rate_refused = true;
+                        rate = 1.0;
                     }
                 }
                 play_at = Some(Instant::now());

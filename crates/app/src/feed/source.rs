@@ -54,9 +54,15 @@ impl Lane {
         Arc::new(Lane::default())
     }
 
+    /// The lane state. A fetcher that panicked while holding the lock must not take the engine
+    /// down with it, so a poisoned lock is used as it is.
+    fn state(&self) -> std::sync::MutexGuard<'_, LaneState> {
+        self.st.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Fetcher side: false when `gen` is stale (unit dropped).
     fn push(&self, gen: u64, u: Unit) -> bool {
-        let mut s = self.st.lock().unwrap();
+        let mut s = self.state();
         if s.gen != gen {
             return false;
         }
@@ -68,7 +74,7 @@ impl Lane {
     }
 
     pub fn pop(&self) -> Option<Unit> {
-        let mut s = self.st.lock().unwrap();
+        let mut s = self.state();
         let u = s.q.pop_front()?;
         s.bytes -= u.data.len();
         self.cv.notify_all();
@@ -76,13 +82,13 @@ impl Lane {
     }
 
     pub fn peek_pts(&self) -> Option<i64> {
-        self.st.lock().unwrap().q.front().map(|u| u.pts_ns)
+        self.state().q.front().map(|u| u.pts_ns)
     }
 
     /// Engine side, on a seek: drop everything and expect generation `gen`. Must be called
     /// before the generation is published in [`SourceCtl::gen`].
     pub fn reset(&self, gen: u64) {
-        let mut s = self.st.lock().unwrap();
+        let mut s = self.state();
         s.q.clear();
         s.bytes = 0;
         s.gen = gen;
@@ -92,45 +98,45 @@ impl Lane {
     }
 
     fn set_track(&self, t: TrackInfo) {
-        self.st.lock().unwrap().track = Some(t);
+        self.state().track = Some(t);
         self.cv.notify_all();
     }
 
     pub fn track(&self) -> Option<TrackInfo> {
-        self.st.lock().unwrap().track.clone()
+        self.state().track.clone()
     }
 
     fn finish(&self, gen: u64) {
-        let mut s = self.st.lock().unwrap();
+        let mut s = self.state();
         if s.gen == gen {
             s.finished = true;
         }
         self.cv.notify_all();
     }
 
-    fn fail(&self, e: String) {
-        let mut s = self.st.lock().unwrap();
+    pub fn fail(&self, e: String) {
+        let mut s = self.state();
         s.error.get_or_insert(e);
         self.cv.notify_all();
     }
 
     pub fn error(&self) -> Option<String> {
-        self.st.lock().unwrap().error.clone()
+        self.state().error.clone()
     }
 
     /// All units of the current generation were delivered and consumed.
     pub fn drained(&self) -> bool {
-        let s = self.st.lock().unwrap();
+        let s = self.state();
         s.finished && s.q.is_empty()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.st.lock().unwrap().q.is_empty()
+        self.state().q.is_empty()
     }
 
     /// Fetcher side: true when there is room; otherwise blocks (≤ 200 ms) and returns false.
     fn wait_room(&self, ctl: &SourceCtl, max_bytes: usize) -> bool {
-        let s = self.st.lock().unwrap();
+        let s = self.state();
         let ahead = s.end_ns - ctl.playhead_ns.load(Relaxed);
         if s.bytes < max_bytes && (s.q.is_empty() || ahead < READ_AHEAD_NS) {
             return true;
@@ -265,9 +271,13 @@ pub fn run_ranged(fmt: serde_json::Value, ua: String, lane: Arc<Lane>, ctl: Arc<
         if !lane.wait_room(&ctl, max_bytes) {
             continue;
         }
-        match track.fetch_segment(seg) {
+        // Give up between two ranges when the session stops or a seek starts a new generation.
+        let abort = || ctl.stop.load(Relaxed) || ctl.gen.load(Acquire) != gen;
+        match track.fetch_segment_abortable(seg, &abort) {
+            Err(e) if e.is::<yt_core::demux::ranged::Aborted>() => continue,
             Ok(aus) => {
                 failures = 0;
+                renewals = 0;
                 if ctl.gen.load(Acquire) != gen {
                     continue;
                 }
@@ -422,7 +432,12 @@ pub fn run_live(fmt: serde_json::Value, ua: String, lane: Arc<Lane>, ctl: Arc<So
     };
     let Some(url) = fmt["url"].as_str().map(str::to_string) else { return lane.fail("live format without url".into()) };
     let itag = fmt["itag"].as_i64().unwrap_or(0);
-    let seg_ns = (fmt["targetDurationSec"].as_f64().unwrap_or(5.0) * 1e9) as i64;
+    // A missing, zero or nonsensical target duration falls back to YouTube's usual 5 s (the
+    // sequence arithmetic below divides by it).
+    let seg_ns = match fmt["targetDurationSec"].as_f64() {
+        Some(s) if (0.1..=60.0).contains(&s) => (s * 1e9) as i64,
+        _ => 5_000_000_000,
+    };
     let (mut head, mut head_ns) = match live_head(&http, &url, &ua) {
         Ok(h) => h,
         Err(e) => return lane.fail(format!("itag {itag}: {e:#}")),
@@ -439,6 +454,8 @@ pub fn run_live(fmt: serde_json::Value, ua: String, lane: Arc<Lane>, ctl: Arc<So
     let mut trim = Trim { target: Some(target) };
     let mut framer: Option<Framer> = None;
     let mut failures = 0u32;
+    // Consecutive answers with an HTTP error status other than "not published yet".
+    let mut http_failures = 0u32;
     let mut idle_since: Option<std::time::Instant> = None;
     while !ctl.stop.load(Relaxed) {
         let (g, t) = ctl.current();
@@ -473,7 +490,19 @@ pub fn run_live(fmt: serde_json::Value, ua: String, lane: Arc<Lane>, ctl: Arc<So
             edge.fetch_max(head_ns, Relaxed);
         }
         let status = resp.status();
-        if !status.is_success() || status.as_u16() == 204 {
+        let code = status.as_u16();
+        if !status.is_success() && !matches!(code, 404 | 204) {
+            // A refused or expired URL (403/410) or a server error: these do not heal by waiting
+            // for the head, so they count as failures (generously, as the server may recover).
+            http_failures += 1;
+            let limit = if matches!(code, 403 | 410) { 10 } else { 60 };
+            if http_failures >= limit {
+                return lane.fail(format!("live itag {itag} sq {seq}: HTTP {status}"));
+            }
+        } else if status.is_success() && code != 204 {
+            http_failures = 0;
+        }
+        if !status.is_success() || code == 204 {
             // Not published yet (ahead of the head), or the stream ended.
             let since = *idle_since.get_or_insert_with(std::time::Instant::now);
             if seq > head && since.elapsed() > Duration::from_secs(60) {

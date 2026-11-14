@@ -125,8 +125,8 @@ fn n(f: &Value, k: &str) -> u64 {
 pub fn best_video(adaptive: &[Value], codec: VideoCodec, max_height: u32) -> Option<&Value> {
     adaptive
         .iter()
-        .filter(|f| video_codec(f) == Some(codec) && !is_hdr(f) && n(f, "height") <= max_height as u64)
-        .max_by_key(|f| (n(f, "height"), n(f, "fps"), n(f, "bitrate")))
+        .filter(|f| video_codec(f) == Some(codec) && !is_hdr(f) && crate::mpd::rung(f) <= max_height as u64)
+        .max_by_key(|f| (crate::mpd::rung(f), n(f, "fps"), n(f, "bitrate")))
 }
 
 /// Best audio of `codec`: non-DRC, the default (original) language track when tracks are labelled,

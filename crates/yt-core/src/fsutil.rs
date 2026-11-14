@@ -37,9 +37,27 @@ pub fn save_json<T: Serialize>(path: &Path, v: &T) -> Result<()> {
     write_atomic(path, &serde_json::to_vec_pretty(v)?)
 }
 
-/// Loads JSON from `path`; a missing or unreadable/corrupt file yields `T::default()`.
+/// Loads JSON from `path`; a missing or unreadable/corrupt file yields `T::default()`. A file that
+/// was read but does not parse is first moved aside to `<name>.bad`, so the next save does not
+/// destroy data a newer or older app version could still read.
 pub fn load_json_or_default<T: DeserializeOwned + Default>(path: &Path) -> T {
-    std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    let Ok(bytes) = std::fs::read(path) else { return T::default() };
+    match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            let bad = bad_path(path);
+            eprintln!("[fsutil] {} is damaged ({e}); moved to {}", path.display(), bad.display());
+            let _ = std::fs::rename(path, &bad);
+            T::default()
+        }
+    }
+}
+
+/// `<path>.bad`, where an unreadable file is kept for inspection.
+pub fn bad_path(path: &Path) -> PathBuf {
+    let mut p = path.as_os_str().to_owned();
+    p.push(".bad");
+    PathBuf::from(p)
 }
 
 /// The directory `crate::paths::data_file` resolves into ("." when none was set).
@@ -117,6 +135,18 @@ mod tests {
         assert!(!d.join("sub/x.json.tmp").exists());
         let missing: Vec<i32> = load_json_or_default(&d.join("nope.json"));
         assert!(missing.is_empty());
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn damaged_file_is_moved_aside() {
+        let d = temp_dir("fsutil-bad");
+        let p = d.join("x.json");
+        std::fs::write(&p, b"{not json").unwrap();
+        let v: Vec<i32> = load_json_or_default(&p);
+        assert!(v.is_empty());
+        assert!(!p.exists());
+        assert_eq!(std::fs::read(d.join("x.json.bad")).unwrap(), b"{not json");
         std::fs::remove_dir_all(d).unwrap();
     }
 }

@@ -40,7 +40,7 @@ fn card_item_status(s: &Settings, key: &str) -> String {
         return "hidden".into();
     }
     match s.card_menu.iter().position(|k| k == key) {
-        Some(i) => format!("#{}", i + 1),
+        Some(i) => crate::i18n::tr("position {}").replace("{}", &(i + 1).to_string()),
         None => "shown".into(),
     }
 }
@@ -381,22 +381,27 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
             Opt("Green button", |s| s.color_keys[1].clone(), |s, d| cycle_key(&mut s.color_keys[1], d)),
             Opt("Yellow button", |s| s.color_keys[2].clone(), |s, d| cycle_key(&mut s.color_keys[2], d)),
             Opt("Blue button", |s| s.color_keys[3].clone(), |s, d| cycle_key(&mut s.color_keys[3], d)),
-            Opt("DNS over HTTPS (after restart)", |s| s.doh.clone(), |s, d| {
+            Opt("DNS over HTTPS (after restart)", |s| match s.doh.as_str() {
+                "cloudflare" => "Cloudflare".into(),
+                "google" => "Google".into(),
+                "quad9" => "Quad9".into(),
+                o => o.into(),
+            }, |s, d| {
                 const D: &[&str] = &["off", "cloudflare", "google", "quad9"];
                 let i = D.iter().position(|x| *x == s.doh).unwrap_or(0) as i32;
                 s.doh = D[((i + d).rem_euclid(D.len() as i32)) as usize].into();
             }),
             Info("Proxy (proxy_url in settings.json)", |cx| {
                 let p = &cx.views.store.settings.proxy_url;
-                if p.is_empty() { "none".into() } else { p.clone() }
+                if p.is_empty() { crate::i18n::tr("none").into() } else { p.clone() }
             }),
             Opt("Show in the phone's cast menu (after restart)", |s| on_off(s.dial_enabled), |s, _| s.dial_enabled = !s.dial_enabled),
             Info("TV code", |cx| match &cx.views.store.lounge_code {
                 Some(c) => c.clone(),
-                None if cx.views.store.settings.lounge_enabled => "getting a code\u{2026}".into(),
-                None => "off".into(),
+                None if cx.views.store.settings.lounge_enabled => crate::i18n::tr("getting a code\u{2026}").into(),
+                None => crate::i18n::tr("off").into(),
             }),
-            Info("On your phone", |_| "YouTube \u{203A} Cast \u{203A} Link with TV code".into()),
+            Info("On your phone", |_| crate::i18n::tr("YouTube \u{203A} Cast \u{203A} Link with TV code").into()),
         ],
         SettingsPage::About => vec![
             Action("Accounts (switch, add, remove)", |fx| fx.push(Fx::Nav(NavOp::Push(YtArg::Accounts)))),
@@ -475,7 +480,13 @@ impl SettingsScreen {
             v.push(x);
         }
         // Numbers (qualities, speeds, sizes, minutes) in ascending order; others in cycle order.
-        let num = |x: &str| x.chars().filter(|c| c.is_ascii_digit() || *c == '.').collect::<String>().parse::<f64>().ok();
+        let num = |x: &str| {
+            let lead: String = x.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+            if lead.is_empty() || lead.starts_with('.') {
+                return None;
+            }
+            lead.parse::<f64>().ok()
+        };
         if v.len() > 2 && v.iter().all(|x| num(x).is_some()) {
             v.sort_by(|a, b| num(a).partial_cmp(&num(b)).unwrap_or(std::cmp::Ordering::Equal));
         }
@@ -634,14 +645,15 @@ impl Screen<YtHost> for SettingsScreen {
         let rows: Vec<Row> = items(self.page, s)
             .iter()
             .map(|it| match it {
-                Item::Blocked(i) => Row::new(s.blocked_channels.get(*i).cloned().unwrap_or_default()).value(crate::i18n::tr("Unblock")),
+                Item::Blocked(i) => Row::new(s.blocked_channels.get(*i).cloned().unwrap_or_default()).value(crate::i18n::tr("Unblock")).raw(),
                 Item::Page(l, _) => Row::new(*l).value("\u{203A}"),
                 Item::Opt(l, get, _) => Row::new(*l).value(format!("{}  \u{203A}", crate::i18n::tr(&get(s)))),
                 Item::Action(l, _) => Row::new(*l),
-                Item::Info(l, get) => Row::new(*l).value(get(cx)),
+                // The value is content (a code, an address, a version) or translated where made.
+                Item::Info(l, get) => Row::new(crate::i18n::tr(l)).value(get(cx)).raw(),
             })
             .collect();
-        self.list.draw(p, &rows, self.list.focused(cx, rows.len()));
+        self.list.draw(p, f.measure, &rows, self.list.focused(cx, rows.len()));
         if let Some(c) = &self.choice {
             c.draw(f);
         } else {

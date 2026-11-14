@@ -196,8 +196,9 @@ impl tex::Source for Thumbs {
         self.st.lock().unwrap().by_url.get(path).is_some_and(|e| e.1 == Status::Failed)
     }
     fn unresident(&self, key: PosterKey, _refused: bool) {
-        // Forget it so a later draw fetches again.
-        self.st.lock().unwrap().by_url.retain(|_, v| v.0 != key);
+        // Evicted: forget it so a later draw fetches again. A failed fetch stays known as failed
+        // (forgetting it would download it again on every draw, forever).
+        self.st.lock().unwrap().by_url.retain(|_, v| v.0 != key || v.1 == Status::Failed);
     }
     fn idle(&self) -> bool {
         let st = self.st.lock().unwrap();

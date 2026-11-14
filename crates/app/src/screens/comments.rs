@@ -79,12 +79,12 @@ fn draw_footer(p: plx_ui::Painter, cm: &yt_core::comments::Comment, x: f32, y: f
     if let Some(l) = &cm.like_count_text {
         ui::icon::draw(p, ui::icon::Kind::ThumbUp, Rect::new(x, y + 2.0, 22.0, 22.0), ui::FAINT, false);
         x += 30.0;
-        x += ui::text(p, l, x, y, 22, ui::FAINT, ui::ALIGN_LEFT, false) + 28.0;
+        x += ui::text_raw(p, l, x, y, 22, ui::FAINT, ui::ALIGN_LEFT, false) + 28.0;
     }
     if cm.reply_count > 0 {
         ui::icon::draw(p, ui::icon::Kind::Chat, Rect::new(x, y + 2.0, 22.0, 22.0), ui::FAINT, false);
         x += 30.0;
-        ui::text(p, &cm.reply_count.to_string(), x, y, 22, ui::FAINT, ui::ALIGN_LEFT, false);
+        ui::text_raw(p, &ui::full_count(cm.reply_count as u64), x, y, 22, ui::FAINT, ui::ALIGN_LEFT, false);
     }
 }
 
@@ -134,7 +134,8 @@ pub struct CommentsScreen {
     layout: std::cell::RefCell<Layout>,
     /// When the panel opened (it slides in from the right).
     opened_ms: u32,
-    /// Already gave the video back (BACK, then Unmount).
+    /// Nothing to give back: the video was given back already (BACK, then Unmount), or the panel
+    /// is not over a playing video (opened from a card's menu on a list page).
     released: bool,
     /// BACK pressed at: the panel slides out quickly (ahead of the overlay's own fade).
     closing_at: Option<u32>,
@@ -152,7 +153,7 @@ impl CommentsScreen {
             scroll_to: 0.0,
             layout: Default::default(),
             opened_ms: 0,
-            released: false,
+            released: true,
             closing_at: None,
         }
     }
@@ -198,6 +199,12 @@ impl CommentsScreen {
     }
 }
 
+/// A video is up in the player (the page under this panel): not idle, not failed.
+fn over_player(cx: &Cx<'_, YtHost>) -> bool {
+    let st = cx.views.player;
+    !st.video_id.is_empty() && !matches!(st.phase, crate::player::Phase::Idle | crate::player::Phase::Failed(_))
+}
+
 impl Machine<YtHost> for CommentsScreen {
     type Ev = ScreenEvent<YtHost>;
     fn step(&mut self, ev: &Self::Ev, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) -> Handled {
@@ -208,12 +215,18 @@ impl Machine<YtHost> for CommentsScreen {
             ScreenEvent::Mount => {
                 let continuation = self.replies_to.as_ref().map(|_| self.video_id.clone());
                 fx.push(Fx::App(YtFx::LoadComments { key: self.video_id.clone(), continuation, append: false }));
-                fx.push(Fx::App(YtFx::VideoRect(Some(VIDEO))));
-                ui::COMMENTS_OPEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // Over the player only: the video shrinks beside the panel.
+                if over_player(cx) {
+                    self.released = false;
+                    fx.push(Fx::App(YtFx::VideoRect(Some(VIDEO))));
+                    ui::COMMENTS_OPEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 self.opened_ms = cx.views.now_ms;
             }
             ScreenEvent::Uncover => {
-                fx.push(Fx::App(YtFx::VideoRect(Some(VIDEO))));
+                if !self.released {
+                    fx.push(Fx::App(YtFx::VideoRect(Some(VIDEO))));
+                }
                 fx.invalidate(plx_machine::present::Provenance::Nav);
             }
             ScreenEvent::Unmount => self.release(fx),
@@ -346,17 +359,17 @@ impl Screen<YtHost> for CommentsScreen {
         let p = p.translate(PANEL.w * (1.0 - ease + out), 0.0);
         ui::fill(p, PANEL, 0.0, [0.06, 0.06, 0.08, 1.0]);
         let title = match &self.replies_to {
-            Some(a) => format!("Replies to {a}"),
-            None => "Comments".into(),
+            Some(a) => crate::i18n::tr("Replies to {}").replace("{}", a),
+            None => crate::i18n::tr("Comments").to_string(),
         };
-        ui::text(p, &title, PANEL.x + 40.0, 36.0, 34, ui::WHITE, ui::ALIGN_LEFT, true);
+        ui::text_raw(p, &f.measure.fit_line(&title, PANEL.w - 80.0, 34, true).to_string_lossy(), PANEL.x + 40.0, 36.0, 34, ui::WHITE, ui::ALIGN_LEFT, true);
         let Some(c) = cx.views.store.comments.get(&self.video_id) else {
             ui::text(p, "Loading\u{2026}", PANEL.x + PANEL.w / 2.0, 500.0, 30, ui::DIM, ui::ALIGN_CENTER, false);
             return;
         };
         if c.items.is_empty() {
-            let msg = c.error.clone().unwrap_or_else(|| if c.loading { "Loading\u{2026}".into() } else { "No comments".into() });
-            ui::text(p, &msg, PANEL.x + PANEL.w / 2.0, 500.0, 30, ui::DIM, ui::ALIGN_CENTER, false);
+            let msg = c.error.clone().unwrap_or_else(|| crate::i18n::tr(if c.loading { "Loading\u{2026}" } else { "No comments" }).to_string());
+            ui::text_raw(p, &f.measure.fit_line(&msg, PANEL.w - 80.0, 30, false).to_string_lossy(), PANEL.x + PANEL.w / 2.0, 500.0, 30, ui::DIM, ui::ALIGN_CENTER, false);
             return;
         }
         // Lay out what arrived since the last frame.
@@ -410,15 +423,15 @@ impl Screen<YtHost> for CommentsScreen {
                 head.push_str(&format!("  \u{2022}  {}", cm.published_text));
             }
             if cm.is_pinned {
-                head.push_str("  \u{2022}  Pinned");
+                head.push_str(&format!("  \u{2022}  {}", crate::i18n::tr("Pinned comment")));
             }
-            ui::text(p, &ui::ellipsize(&head, 52), r.x + 20.0, r.y + 10.0, 22, ui::DIM, ui::ALIGN_LEFT, true);
+            ui::text_raw(p, &f.measure.fit_line(&head, r.w - 40.0, 22, true).to_string_lossy(), r.x + 20.0, r.y + 10.0, 22, ui::DIM, ui::ALIGN_LEFT, true);
             for (j, line) in l.lines[i].iter().enumerate() {
                 let ly = r.y + 40.0 + j as f32 * LINE;
                 if ly + LINE < y0 - 8.0 || ly > y0 + view {
                     continue;
                 }
-                ui::text(p, line, r.x + 20.0, ly, TEXT, ui::WHITE, ui::ALIGN_LEFT, false);
+                ui::text_raw(p, line, r.x + 20.0, ly, TEXT, ui::WHITE, ui::ALIGN_LEFT, false);
             }
             if has_footer(cm) {
                 draw_footer(p, cm, r.x + 20.0, r.y + 40.0 + l.lines[i].len() as f32 * LINE + 2.0);

@@ -138,6 +138,16 @@ fn field<'a>(json: &'a str, key: &str) -> Option<&'a str> {
     Some(&rest[..rest.find('"')?])
 }
 
+/// At most `n` bytes of `s`, cut at a character boundary (slicing inside a multi-byte character
+/// panics, and a panic inside the luna callback aborts the whole process).
+fn prefix(s: &str, n: usize) -> &str {
+    let mut end = s.len().min(n);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 fn resolve_url(arg: &str) -> String {
     // "@path[:line]" reads the URL from a file (URLs are too long and too quote-heavy for argv
     // round-trips through appinfo/luna params).
@@ -147,7 +157,7 @@ fn resolve_url(arg: &str) -> String {
             _ => (spec, 1usize),
         };
         let text = std::fs::read_to_string(path).unwrap_or_default();
-        return text.lines().nth(line - 1).unwrap_or("").trim().to_string();
+        return text.lines().nth(line.saturating_sub(1)).unwrap_or("").trim().to_string();
     }
     arg.to_string()
 }
@@ -169,7 +179,7 @@ fn main() {
     };
     let url = resolve_url(&url_arg);
     let app_id = std::env::var("APPID").unwrap_or_else(|_| "io.github.danzig666.ytnative".into());
-    log!("=== tvplay start: appId={app_id} secs={secs} url={}...", &url[..url.len().min(90)]);
+    log!("=== tvplay start: appId={app_id} secs={secs} url={}...", prefix(&url, 90));
     if url.is_empty() {
         log!("no URL");
         return;
@@ -268,7 +278,7 @@ fn main() {
                         }
                         last_time_log = Instant::now();
                     }
-                    log!("event {}", &l[..l.len().min(400)]);
+                    log!("event {}", prefix(l, 400));
                     if l.contains("\"endOfStream\"") || l.contains("\"error\"") {
                         ended.store(true, Ordering::SeqCst);
                     }

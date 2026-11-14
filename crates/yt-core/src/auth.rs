@@ -151,6 +151,16 @@ pub fn device_login(http: &reqwest::blocking::Client, cfg: &TvConfig) -> Result<
     }
 }
 
+/// The refresh token was revoked or has expired (`invalid_grant`): only a new sign-in helps.
+#[derive(Debug)]
+pub struct GrantRevoked;
+impl std::fmt::Display for GrantRevoked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the sign-in was revoked or has expired (invalid_grant)")
+    }
+}
+impl std::error::Error for GrantRevoked {}
+
 /// Refreshes `t` in place when it is about to expire. Returns true if it changed.
 pub fn refresh(http: &reqwest::blocking::Client, t: &mut Token) -> Result<bool> {
     if !t.needs_refresh() {
@@ -166,6 +176,9 @@ pub fn refresh(http: &reqwest::blocking::Client, t: &mut Token) -> Result<bool> 
         }))
         .send()?
         .json()?;
+    if r["error"].as_str() == Some("invalid_grant") {
+        return Err(GrantRevoked.into());
+    }
     t.access_token = r["access_token"].as_str().context(format!("refresh failed: {r}"))?.into();
     t.expires_at = now() + r["expires_in"].as_u64().unwrap_or(3600);
     Ok(true)

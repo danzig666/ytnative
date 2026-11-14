@@ -40,7 +40,7 @@ fn run() -> Result<()> {
     eprintln!(
         "[bootstrap] TVHTML5 {} | oauth client {} ({}) | visitorData: {}",
         cfg.tv_client_version,
-        &cfg.client_id[..12],
+        cfg.client_id.get(..12).unwrap_or(&cfg.client_id),
         if cfg.scraped { "scraped" } else { "fallback" },
         if cfg.visitor_data.is_some() { "yes" } else { "no" },
     );
@@ -62,7 +62,7 @@ fn run() -> Result<()> {
             println!("{} - {} ({}s) via {:?} live={} formats={} hls={} sabr={} expires={}h",
                 r.title, r.author, r.length_secs, r.client, r.is_live, r.adaptive.len(), r.hls.is_some(), r.sabr.is_some(), r.expires_secs / 3600);
             println!("captions: {}", r.captions.iter().map(|c| format!("{}{}", c.language, if c.auto { "(auto)" } else { "" })).collect::<Vec<_>>().join(", "));
-            println!("translations: {} languages; storyboard: {}", r.translations.len(), r.storyboard_spec.as_deref().map(|s| &s[..s.len().min(60)]).unwrap_or("none"));
+            println!("translations: {} languages; storyboard: {}", r.translations.len(), r.storyboard_spec.as_deref().map(|s| truncate(s, 60)).unwrap_or("none"));
             for f in &r.adaptive {
                 println!(
                     "  itag {:>3} {:>5}p{:<3} {:<40} {}{}",

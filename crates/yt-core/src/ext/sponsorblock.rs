@@ -290,10 +290,17 @@ impl SkipTracker {
 
     /// The segment to act on at `pos_ms`, at most once per entry.
     pub fn check<'a>(&mut self, segments: &'a [Segment], pos_ms: u64) -> Option<&'a Segment> {
+        self.check_where(segments, pos_ms, |_| true)
+    }
+
+    /// As [`check`](Self::check), among the segments `wanted` accepts only (the categories the
+    /// viewer acts on): a longer overlapping segment of a category that is off must not hide a
+    /// sponsor inside it.
+    pub fn check_where<'a>(&mut self, segments: &'a [Segment], pos_ms: u64, wanted: impl Fn(&Segment) -> bool) -> Option<&'a Segment> {
         let min = self.min_duration_ms;
         let seg = segments
             .iter()
-            .filter(|s| s.is_ranged() && s.duration_ms() >= min && s.start_ms <= pos_ms && pos_ms < s.end_ms)
+            .filter(|s| s.is_ranged() && s.duration_ms() >= min && s.start_ms <= pos_ms && pos_ms < s.end_ms && wanted(s))
             .max_by_key(|s| s.end_ms);
         let Some(seg) = seg else {
             self.inside = None;
@@ -378,6 +385,16 @@ mod tests {
         assert!(short.check(&s, 1_000).is_none());
         t.reset();
         assert!(t.check(&s, 1_000).is_some());
+    }
+
+    #[test]
+    fn an_ignored_category_does_not_hide_an_overlapping_one() {
+        let s = parse_segments(r#"[
+          {"category":"sponsor","actionType":"skip","segment":[30,60],"UUID":"s"},
+          {"category":"filler","actionType":"skip","segment":[20,90],"UUID":"f"}]"#).unwrap();
+        let mut t = SkipTracker::new(false);
+        let seg = t.check_where(&s, 40_000, |x| x.category != Category::Filler).unwrap();
+        assert_eq!(seg.uuid, "s");
     }
 
     #[test]

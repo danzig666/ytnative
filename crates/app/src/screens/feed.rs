@@ -66,18 +66,77 @@ impl FeedScreen {
         }
     }
 
+    /// The page title, ready to draw: the app's own words translated, a channel's name and the
+    /// query as they are.
     fn title(&self, cx: &Cx<'_, YtHost>) -> String {
+        use crate::i18n::tr;
         if let Some(t) = cx.views.store.feed(&self.key).map(|f| f.title.clone()).filter(|t| !t.is_empty()) {
-            return t;
+            // YouTube's own pages come back with English names ("History", "Watch later"), which
+            // the table translates; a channel's name is shown as it is.
+            return if self.channel().is_some() { t } else { tr(&t).to_string() };
         }
         match &self.key {
-            FeedKey::Search { query, .. } => format!("Results for \u{201C}{query}\u{201D}"),
-            FeedKey::Browse { id, .. } if id.starts_with("VL") => "Playlist".into(),
-            FeedKey::Browse { .. } => "Channel".into(),
-            FeedKey::Section(s) => s.title().into(),
-            FeedKey::Related(_) => "Up next".into(),
-            FeedKey::Group(id) => cx.views.store.groups.iter().find(|g| &g.0 == id).map(|g| g.1.clone()).unwrap_or_else(|| "Group".into()),
+            FeedKey::Search { query, .. } => tr("Results for \u{201C}{}\u{201D}").replace("{}", query),
+            FeedKey::Browse { id, .. } if id.starts_with("VL") => tr("Playlist").into(),
+            FeedKey::Browse { .. } => tr("Channel").into(),
+            FeedKey::Section(s) => tr(s.title()).into(),
+            FeedKey::Related(_) => tr("Up next").into(),
+            FeedKey::Group(id) => cx.views.store.groups.iter().find(|g| &g.0 == id).map(|g| g.1.clone()).unwrap_or_else(|| tr("Group").into()),
         }
+    }
+}
+
+/// The search filters in effect, in words of the interface language ("This week · Videos").
+fn filters_summary(f: &yt_core::search_filters::Filters) -> String {
+    use crate::i18n::tr;
+    use yt_core::search_filters::*;
+    let mut parts: Vec<&str> = Vec::new();
+    parts.extend(match f.upload_date {
+        UploadDate::Any => None,
+        UploadDate::Hour => Some("Last hour"),
+        UploadDate::Today => Some("Today"),
+        UploadDate::Week => Some("This week"),
+        UploadDate::Month => Some("This month"),
+        UploadDate::Year => Some("This year"),
+    });
+    parts.extend(match f.kind {
+        Kind::Any => None,
+        Kind::Video => Some("Videos"),
+        Kind::Channel => Some("Channels"),
+        Kind::Playlist => Some("Playlists"),
+        Kind::Movie => Some("Movies"),
+    });
+    parts.extend(match f.duration {
+        Duration::Any => None,
+        Duration::Short => Some("Under 4 minutes"),
+        Duration::Medium => Some("4 to 20 minutes"),
+        Duration::Long => Some("Over 20 minutes"),
+    });
+    if f.live {
+        parts.push("Live");
+    }
+    if f.hd_4k {
+        parts.push("4K");
+    }
+    if f.hdr {
+        parts.push("HDR");
+    }
+    parts.extend(match f.sort {
+        Sort::Relevance => None,
+        Sort::Rating => Some("by rating"),
+        Sort::UploadDate => Some("newest first"),
+        Sort::ViewCount => Some("most viewed"),
+    });
+    parts.iter().map(|p| tr(p)).collect::<Vec<_>>().join(" \u{00B7} ")
+}
+
+impl FeedScreen {
+    /// The filters hint drawn on the title's line (search results only).
+    fn filters_hint(&self, cx: &Cx<'_, YtHost>) -> Option<String> {
+        let FeedKey::Search { params, .. } = &self.key else { return None };
+        let f = &cx.views.store.search_filters;
+        let label = format!("\u{25B2} {}", crate::i18n::tr("Filters"));
+        Some(if params.is_some() && !f.is_default() { format!("{}   {label}", filters_summary(f)) } else { label })
     }
 }
 
@@ -214,9 +273,20 @@ impl Screen<YtHost> for FeedScreen {
             self.grid.record_stops(f, p, &src);
         }
         ui::header_band(p, Rect::new(0.0, 0.0, 1920.0, grid_top(&self.key) - 20.0));
-        ui::text(p, &ui::ellipsize(&self.title(cx), 70), 112.0, 64.0, 46, ui::WHITE, ui::ALIGN_LEFT, true);
+        // The title takes the line up to the filters hint and the clock (both right-aligned).
+        let mut right = 1824.0;
         if cx.views.store.settings.clock_on_pages {
             common::clock_block(p, cx, 1824.0, 40.0);
+            let (time, date) = (common::clock(&cx.views), common::date_text());
+            right -= f.measure.width_str(&time, 40, true).max(f.measure.width_str(&date, 22, false)) + 40.0;
+        }
+        let hint = self.filters_hint(cx);
+        let hint_w = hint.as_ref().map_or(0.0, |h| f.measure.width_str(h, 26, false) + 40.0);
+        let room = (right - hint_w - 112.0).max(240.0);
+        let title = f.measure.fit_line(&self.title(cx), room, 46, true);
+        ui::text_raw(p, &title.to_string_lossy(), 112.0, 64.0, 46, ui::WHITE, ui::ALIGN_LEFT, true);
+        if let Some(h) = &hint {
+            ui::text_raw(p, h, right, 74.0, 26, ui::FAINT, ui::ALIGN_RIGHT, false);
         }
         if self.channel().is_some() {
             ui::stop(f, FocusKey { entry: self.entry, elem: SUB_BTN }, SUB_RECT, Rect::new(0.0, 0.0, 1920.0, 1080.0));
@@ -232,11 +302,6 @@ impl Screen<YtHost> for FeedScreen {
             ui::fill(p, SUB_RECT, 25.0, if focused { ui::WHITE } else { bg });
             let ink = if focused { [0.0, 0.0, 0.0, 1.0] } else { ui::WHITE };
             ui::text(p, label, SUB_RECT.x + SUB_RECT.w / 2.0, SUB_RECT.y + 10.0, 26, ink, ui::ALIGN_CENTER, true);
-        }
-        if let FeedKey::Search { params, .. } = &self.key {
-            let f = &cx.views.store.search_filters;
-            let hint = if params.is_some() && !f.is_default() { format!("{}   \u{25B2} Filters", f.summary()) } else { "\u{25B2} Filters".into() };
-            ui::text(p, &hint, 1808.0, 74.0, 26, ui::FAINT, ui::ALIGN_RIGHT, false);
         }
         common::toast(p, cx);
     }

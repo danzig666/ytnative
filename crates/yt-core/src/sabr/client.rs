@@ -605,7 +605,7 @@ impl SabrStream {
                 let (id, _) = super::ump::read_varint(data).context("SABR: empty MEDIA_END part")?;
                 if let Some((h, buf)) = rx.headers.remove(&(id as u32)) {
                     if let Some(len) = h.content_length {
-                        if len as usize != buf.len() {
+                        if len < 0 || len as u64 != buf.len() as u64 {
                             bail!("SABR: segment itag {} length {} != {}", h.itag(), buf.len(), len);
                         }
                     }
@@ -702,7 +702,12 @@ impl SabrStream {
             }
             return;
         }
-        let seq = h.sequence_number.unwrap_or(0) as i64;
+        let Some(seq) = h.sequence_number.map(|n| n as i64) else {
+            // No sequence number: nothing to tell duplicates or buffered ranges by, so pass it on
+            // as it is (counting it as number 0 would drop every later unnumbered segment).
+            out.push(Segment { track: t.fmt.track, itag, sequence: 0, start_ms, duration_ms, data, is_init: false });
+            return;
+        };
         if t.has(seq) {
             return; // duplicate
         }

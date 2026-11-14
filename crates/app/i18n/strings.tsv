@@ -392,3 +392,57 @@ Plays next	Ez jön következőnek	Wird als Nächstes abgespielt	Se reproducirá 
 Plays next ({} in the queue)	Következőnek jön ({} a sorban)	Als Nächstes ({} in der Warteschlange)	A continuación ({} en la cola)	Lue ensuite ({} dans la file)	Следующим ({} в очереди)
 Removed from Play next	Eltávolítva a következők közül	Aus „Als Nächstes“ entfernt	Quitado de la cola	Retiré de la file	Убрано из очереди
 Card menu: Play next	Kártyamenü: Lejátszás következőként	Kartenmenü: Als Nächstes abspielen	Menú de tarjeta: Reproducir a continuación	Menu de la carte : Lire ensuite	Меню карточки: Воспроизвести следующим
+This video is private.	Ez a videó privát.	Dieses Video ist privat.	Este vídeo es privado.	Cette vidéo est privée.	Это видео скрыто владельцем.
+This video has been removed.	Ezt a videót eltávolították.	Dieses Video wurde entfernt.	Este vídeo se ha eliminado.	Cette vidéo a été supprimée.	Это видео удалено.
+This video is not available.	Ez a videó nem érhető el.	Dieses Video ist nicht verfügbar.	Este vídeo no está disponible.	Cette vidéo n'est pas disponible.	Это видео недоступно.
+This video is not available in your country.	Ez a videó nem érhető el az országodban.	Dieses Video ist in deinem Land nicht verfügbar.	Este vídeo no está disponible en tu país.	Cette vidéo n'est pas disponible dans votre pays.	Это видео недоступно в вашей стране.
+YouTube asks to confirm your age: sign in with an adult account.	A YouTube az életkorod igazolását kéri: jelentkezz be egy felnőtt fiókkal.	YouTube möchte dein Alter bestätigen: Melde dich mit einem Erwachsenenkonto an.	YouTube pide confirmar tu edad: inicia sesión con una cuenta de adulto.	YouTube demande de confirmer votre âge : connectez-vous avec un compte adulte.	YouTube просит подтвердить возраст: войдите во взрослый аккаунт.
+YouTube asks to confirm you're not a bot: try again later, or sign in.	A YouTube azt kéri, igazold, hogy nem vagy robot: próbáld újra később, vagy jelentkezz be.	YouTube möchte bestätigen, dass du kein Bot bist: Versuche es später erneut oder melde dich an.	YouTube pide confirmar que no eres un bot: inténtalo más tarde o inicia sesión.	YouTube demande de confirmer que vous n'êtes pas un robot : réessayez plus tard ou connectez-vous.	YouTube просит подтвердить, что вы не бот: повторите позже или войдите в аккаунт.
+This live stream or premiere has not started yet.	Ez az élő adás vagy premier még nem kezdődött el.	Dieser Livestream oder diese Premiere hat noch nicht begonnen.	Esta emisión en directo o estreno aún no ha empezado.	Ce direct ou cette première n'a pas encore commencé.	Эта трансляция или премьера ещё не началась.
+Skipped: {}	Átugorva: {}	Übersprungen: {}	Omitido: {}	Passé : {}	Пропущено: {}
+{} — press OK to skip	{} — az átugráshoz nyomd meg az OK gombot	{} — zum Überspringen OK drücken	{} — pulsa OK para omitir	{} — appuyez sur OK pour passer	{} — нажмите OK, чтобы пропустить
+Outro / end cards	Outró / végkártyák	Outro / Abspann	Cierre / tarjetas finales	Outro / écrans de fin	Концовка / конечные заставки
+Filler tangent	Kitérő töltelék	Abschweifung	Relleno fuera de tema	Digression	Отступление от темы
+Exclusive access	Exkluzív hozzáférés	Exklusiver Zugang	Acceso exclusivo	Accès exclusif	Эксклюзивный доступ
+Loading…	Betöltés…	Wird geladen…	Cargando…	Chargement…	Загрузка…
+Loading more…	További elemek betöltése…	Weitere werden geladen…	Cargando más…	Chargement de la suite…	Загрузка продолжения…
+Save to playlist…	Mentés lejátszási listába…	In Playlist speichern…	Guardar en lista…	Enregistrer dans une playlist…	Сохранить в плейлист…
+Loading your playlists…	Lejátszási listáid betöltése…	Deine Playlists werden geladen…	Cargando tus listas…	Chargement de vos playlists…	Загрузка ваших плейлистов…
++  New private playlist	+  Új privát lejátszási lista	+  Neue private Playlist	+  Nueva lista privada	+  Nouvelle playlist privée	+  Новый личный плейлист
++  Add an account	+  Fiók hozzáadása	+  Konto hinzufügen	+  Añadir una cuenta	+  Ajouter un compte	+  Добавить аккаунт
+Type with the keyboard below…	Gépelj a lenti billentyűzettel…	Tippe mit der Tastatur unten…	Escribe con el teclado de abajo…	Saisissez avec le clavier ci-dessous…	Введите текст с клавиатуры ниже…
+Getting a code…	Kód lekérése…	Code wird abgerufen…	Obteniendo un código…	Obtention d'un code…	Получение кода…
+1.  On your phone or computer, go to	1.  A telefonodon vagy a számítógépeden nyisd meg ezt a címet:	1.  Öffne auf deinem Handy oder Computer	1.  En tu teléfono u ordenador, ve a	1.  Sur votre téléphone ou ordinateur, allez sur	1.  На телефоне или компьютере откройте
+2.  Enter this code	2.  Írd be ezt a kódot	2.  Gib diesen Code ein	2.  Introduce este código	2.  Saisissez ce code	2.  Введите этот код
+Or scan the code with your phone →	Vagy olvasd be a kódot a telefonoddal →	Oder scanne den Code mit deinem Handy →	O escanea el código con tu teléfono →	Ou scannez le code avec votre téléphone →	Или отсканируйте код телефоном →
+Waiting for you to approve…	Várakozás a jóváhagyásodra…	Warten auf deine Bestätigung…	Esperando tu aprobación…	En attente de votre approbation…	Ожидание подтверждения…
+Card menu: Play	Kártyamenü: Lejátszás	Kartenmenü: Abspielen	Menú de tarjeta: Reproducir	Menu de la carte : Lire	Меню карточки: Смотреть
+YouTube › Cast › Link with TV code	YouTube › Átküldés › Összekapcsolás TV-kóddal	YouTube › Streamen › Mit TV-Code verbinden	YouTube › Enviar › Vincular con código de TV	YouTube › Caster › Associer avec un code TV	YouTube › Трансляция › Связать с помощью кода
+Add to group “{}”	Hozzáadás a(z) „{}” csoporthoz	Zur Gruppe „{}“ hinzufügen	Añadir al grupo «{}»	Ajouter au groupe « {} »	Добавить в группу «{}»
+More from {}	Továbbiak tőle: {}	Mehr von {}	Más de {}	Plus de {}	Ещё от {}
+Block {}	Letiltás: {}	{} blockieren	Bloquear {}	Bloquer {}	Заблокировать {}
+Open {}	Megnyitás: {}	{} öffnen	Abrir {}	Ouvrir {}	Открыть {}
+Pinned {}	Kitűzve: {}	{} angeheftet	{} fijado	{} épinglé	{} закреплено
+{} blocked (Settings › Content filters)	{} letiltva (Beállítások › Tartalomszűrők)	{} blockiert (Einstellungen › Inhaltsfilter)	{} bloqueado (Ajustes › Filtros de contenido)	{} bloqué (Paramètres › Filtres de contenu)	{} заблокирован (Настройки › Фильтры контента)
+only one	csak egy van	nur eine	solo hay una	une seule	только одна
+Results for “{}”	Találatok erre: „{}”	Ergebnisse für „{}“	Resultados de «{}»	Résultats pour « {} »	Результаты по запросу «{}»
+Filters	Szűrők	Filter	Filtros	Filtres	Фильтры
+by rating	értékelés szerint	nach Bewertung	por valoración	par note	по рейтингу
+newest first	legújabbak elöl	neueste zuerst	más recientes primero	les plus récentes d'abord	сначала новые
+most viewed	legnézettebbek	meistgesehen	más vistos	les plus vues	самые просматриваемые
+{} behind live	{} késéssel az élő adáshoz képest	{} hinter der Liveübertragung	{} por detrás del directo	{} de retard sur le direct	Отставание от эфира: {}
+Remove {}	Eltávolítás: {}	{} entfernen	Quitar {}	Retirer {}	Удалить {}
+Press OK again to remove {}	Nyomd meg újra az OK gombot a(z) {} fiók eltávolításához	Drücke erneut OK, um {} zu entfernen	Pulsa OK otra vez para quitar {}	Appuyez de nouveau sur OK pour retirer {}	Нажмите OK ещё раз, чтобы удалить {}
+Replies to {}	Válaszok {} hozzászólására	Antworten an {}	Respuestas a {}	Réponses à {}	Ответы на комментарий: {}
+Pinned comment	Kitűzött hozzászólás	Angehefteter Kommentar	Comentario fijado	Commentaire épinglé	Закреплённый комментарий
+Signed in as {}	Bejelentkezve: {}	Angemeldet als {}	Sesión iniciada como {}	Connecté en tant que {}	Вы вошли как {}
+Signed in as {}.	Bejelentkezve: {}.	Angemeldet als {}.	Sesión iniciada como {}.	Connecté en tant que {}.	Вы вошли как {}.
+You are signed in as {}.	Bejelentkezve ezzel a fiókkal: {}.	Du bist als {} angemeldet.	Has iniciado sesión como {}.	Vous êtes connecté en tant que {}.	Вы вошли как {}.
+You are signed in.	Be vagy jelentkezve.	Du bist angemeldet.	Has iniciado sesión.	Vous êtes connecté.	Вы вошли в аккаунт.
+position {}	{}. hely	Position {}	posición {}	position {}	позиция {}
+hidden	rejtve	ausgeblendet	oculto	masqué	скрыт
+shown	látható	sichtbar	visible	affiché	показан
+in the morning	reggel	morgens	de la mañana	du matin	утра
+in the afternoon	délután	nachmittags	de la tarde	de l'après-midi	дня
+in the evening	este	abends	de la noche	du soir	вечера
+at night	éjjel	nachts	de la madrugada	de la nuit	ночи

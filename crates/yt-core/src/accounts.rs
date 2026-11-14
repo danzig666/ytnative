@@ -85,7 +85,7 @@ fn local_id(t: &Token) -> String {
 /// sessions at once must not interleave and lose an update).
 static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn lock() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -94,19 +94,31 @@ impl Store {
     /// does not parse is moved aside to `accounts.json.bad` (the app then starts signed out
     /// instead of failing every request).
     pub fn load() -> Result<Store> {
-        let path = store_file();
-        if let Ok(raw) = std::fs::read_to_string(&path) {
-            match serde_json::from_str(&raw) {
+        Self::load_from(&store_file(), &legacy_token_file())
+    }
+
+    /// [`Store::load`] with explicit paths. Only a missing accounts file triggers the migration
+    /// of `token.json`; any other read error is returned, so a transient failure never leads to
+    /// a save over the real file.
+    fn load_from(path: &std::path::Path, legacy: &std::path::Path) -> Result<Store> {
+        match std::fs::read(path) {
+            Ok(raw) => match serde_json::from_slice(&raw) {
                 Ok(s) => return Ok(s),
                 Err(e) => {
                     eprintln!("[accounts] {} is damaged ({e}); moved to .bad, starting signed out", path.display());
-                    let _ = std::fs::rename(&path, path.with_extension("json.bad"));
-                    return Ok(Store::default());
+                    let _ = std::fs::rename(path, path.with_extension("json.bad"));
+                    // An empty accounts file stops the next load from migrating token.json again,
+                    // which would bring back an old, possibly removed, account.
+                    let s = Store::default();
+                    crate::fsutil::write_atomic(path, serde_json::to_string_pretty(&s)?.as_bytes())?;
+                    return Ok(s);
                 }
-            }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
         }
         let mut s = Store::default();
-        if let Ok(raw) = std::fs::read_to_string(legacy_token_file()) {
+        if let Ok(raw) = std::fs::read_to_string(legacy) {
             let token: Token = serde_json::from_str(&raw).context("parsing token.json")?;
             s.upsert(Account {
                 id: local_id(&token),
@@ -118,7 +130,7 @@ impl Store {
                 token,
                 password: None,
             });
-            s.save()?;
+            crate::fsutil::write_atomic(path, serde_json::to_string_pretty(&s)?.as_bytes())?;
         }
         Ok(s)
     }
@@ -217,27 +229,69 @@ pub fn set_password(id: &str, password: Option<&str>) -> Result<()> {
 }
 
 /// Account `id` (or the current one) with a token refreshed if needed (and persisted).
+///
+/// The network refresh runs without holding the store lock, so a slow token endpoint does not
+/// stall every other account operation. After a failed refresh the next attempt for the same
+/// sign-in waits [`REFRESH_RETRY`] (or [`REVOKED_RETRY`] when the grant was revoked), instead of
+/// adding a token request to every API call.
 pub fn resolve(http: &reqwest::blocking::Client, id: Option<&str>) -> Result<Option<Account>> {
-    let _g = lock();
-    let mut s = Store::load()?;
-    let Some(mut a) = (match id {
-        Some(id) => s.get(id).cloned(),
-        None => s.current().cloned(),
+    let Some(mut a) = ({
+        let _g = lock();
+        let s = Store::load()?;
+        match id {
+            Some(id) => s.get(id).cloned(),
+            None => s.current().cloned(),
+        }
     }) else {
         return Ok(None);
     };
+    if !a.token.needs_refresh() || refresh_backed_off(&a.token.refresh_token) {
+        return Ok(Some(a));
+    }
     match auth::refresh(http, &mut a.token) {
         Ok(true) => {
+            clear_refresh_failure(&a.token.refresh_token);
+            let _g = lock();
+            let mut s = Store::load()?;
             s.update_token(&a.token);
             s.save()?;
         }
         Ok(false) => {}
         // Offline, or the grant was revoked: keep going with the old token instead of failing
-        // every call (playback does not need it; personal feeds fail on their own and the next
+        // every call (playback does not need it; personal feeds fail on their own and a later
         // call tries the refresh again).
-        Err(e) => eprintln!("[accounts] token refresh failed: {e:#}"),
+        Err(e) => {
+            let revoked = e.downcast_ref::<auth::GrantRevoked>().is_some();
+            note_refresh_failure(&a.token.refresh_token, if revoked { REVOKED_RETRY } else { REFRESH_RETRY });
+            eprintln!("[accounts] token refresh failed: {e:#}");
+        }
     }
     Ok(Some(a))
+}
+
+/// Wait before retrying a refresh that failed (offline, server error).
+pub const REFRESH_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
+/// Wait before retrying a refresh whose grant was revoked.
+pub const REVOKED_RETRY: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Refresh token -> instant before which no new refresh is attempted.
+static REFRESH_FAILURES: std::sync::Mutex<Vec<(String, std::time::Instant)>> = std::sync::Mutex::new(Vec::new());
+
+fn refresh_backed_off(refresh_token: &str) -> bool {
+    let now = std::time::Instant::now();
+    let mut v = REFRESH_FAILURES.lock().unwrap_or_else(|e| e.into_inner());
+    v.retain(|(_, until)| *until > now);
+    v.iter().any(|(t, _)| t == refresh_token)
+}
+
+fn note_refresh_failure(refresh_token: &str, wait: std::time::Duration) {
+    let mut v = REFRESH_FAILURES.lock().unwrap_or_else(|e| e.into_inner());
+    v.retain(|(t, _)| t != refresh_token);
+    v.push((refresh_token.to_string(), std::time::Instant::now() + wait));
+}
+
+fn clear_refresh_failure(refresh_token: &str) {
+    REFRESH_FAILURES.lock().unwrap_or_else(|e| e.into_inner()).retain(|(t, _)| t != refresh_token);
 }
 
 /// Legacy `auth::save`: updates the identities using this token, or adds it as a new account.
@@ -391,6 +445,9 @@ pub fn fill_profile(http: &reqwest::blocking::Client, cfg: &TvConfig, id: &str) 
     .context("account not in accounts_list")?;
     let _g = lock();
     let mut s = Store::load()?;
+    // Re-read the account under the lock: a token refresh or password change made while
+    // accounts_list was in flight must not be replaced by the copy read before it.
+    let a = s.get(id).context("account was removed meanwhile")?.clone();
     let was_current = s.current().map(|c| c.id.clone()) == Some(a.id.clone());
     let mut new = account_from(i, a.token.clone());
     new.password = a.password.clone();
@@ -572,6 +629,40 @@ mod tests {
         assert!(!s.remove("a"));
         let js = serde_json::to_string(&s).unwrap();
         assert_eq!(serde_json::from_str::<Store>(&js).unwrap(), s);
+    }
+
+    #[test]
+    fn load_errors_never_migrate_over_the_store() {
+        let d = crate::fsutil::temp_dir("accounts-load");
+        let (path, legacy) = (d.join("accounts.json"), d.join("token.json"));
+        std::fs::write(&legacy, serde_json::to_vec(&tok("legacy")).unwrap()).unwrap();
+
+        // A read error other than "not found" (here: the path is a directory) is returned and
+        // does not migrate token.json.
+        std::fs::create_dir(&path).unwrap();
+        assert!(Store::load_from(&path, &legacy).is_err());
+        std::fs::remove_dir(&path).unwrap();
+
+        // Missing file: token.json is migrated.
+        assert_eq!(Store::load_from(&path, &legacy).unwrap().accounts.len(), 1);
+
+        // Damaged file (invalid UTF-8 too): moved to .bad, and an empty store is written so the
+        // next load does not migrate token.json again.
+        std::fs::write(&path, b"\xff{oops").unwrap();
+        assert!(Store::load_from(&path, &legacy).unwrap().accounts.is_empty());
+        assert!(d.join("accounts.json.bad").exists());
+        assert!(Store::load_from(&path, &legacy).unwrap().accounts.is_empty());
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn refresh_backoff() {
+        let t = "backoff-test-token";
+        assert!(!refresh_backed_off(t));
+        note_refresh_failure(t, std::time::Duration::from_secs(60));
+        assert!(refresh_backed_off(t));
+        clear_refresh_failure(t);
+        assert!(!refresh_backed_off(t));
     }
 
     #[test]

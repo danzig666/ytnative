@@ -12,20 +12,20 @@ use std::borrow::Cow;
 const G: GroupId = GroupId(1);
 const BASE: u32 = 0x7800_0000;
 
-fn wrap(s: &str, width: usize) -> Vec<String> {
+/// The description wrapped to `w` px, paragraph by paragraph, at most `max` lines (a word wider
+/// than the line, a long link say, is cut across lines; the last line shown is ellipsised).
+fn wrap(m: &dyn plx_machine::machine::Measure, s: &str, w: f32, size: i32, max: usize) -> Vec<String> {
     let mut out = Vec::new();
     for para in s.lines() {
-        let mut cur = String::new();
-        for w in para.split_whitespace() {
-            if !cur.is_empty() && cur.chars().count() + 1 + w.chars().count() > width {
-                out.push(std::mem::take(&mut cur));
-            }
-            if !cur.is_empty() {
-                cur.push(' ');
-            }
-            cur.push_str(w);
+        if out.len() >= max {
+            break;
         }
-        out.push(cur);
+        if para.trim().is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        let one_line: String = para.split_whitespace().collect::<Vec<_>>().join(" ");
+        out.extend(ui::wrap_lines(m, &one_line, w, size, false, max - out.len()));
     }
     out
 }
@@ -123,17 +123,20 @@ impl Screen<YtHost> for InfoScreen {
         ui::fill(p, Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, [0.03, 0.03, 0.05, 0.94]);
         let st = cx.views.player;
         let w = st.extras.watch.as_ref();
-        ui::text(p, &ui::ellipsize(&st.title, 60), 80.0, 70.0, 42, ui::WHITE, ui::ALIGN_LEFT, true);
+        let m = f.measure;
+        ui::text_raw(p, &m.fit_line(&st.title, 1760.0, 42, true).to_string_lossy(), 80.0, 70.0, 42, ui::WHITE, ui::ALIGN_LEFT, true);
         let mut meta = st.author.clone();
         if let Some(w) = w {
             for t in [&w.subscriber_count_text, &w.view_count_text, &w.published_text, &w.like_count_text].into_iter().flatten() {
                 meta.push_str(&format!("  \u{2022}  {t}"));
             }
         }
-        ui::text(p, &ui::ellipsize(&meta, 110), 80.0, 130.0, 26, ui::DIM, ui::ALIGN_LEFT, false);
+        // The left column (stats, description) ends short of the chapter column.
+        let col_w = 1180.0 - 80.0 - 40.0;
+        ui::text_raw(p, &m.fit_line(&meta, col_w, 26, false).to_string_lossy(), 80.0, 130.0, 26, ui::DIM, ui::ALIGN_LEFT, false);
         let desc = w.map(|w| w.description.as_str()).unwrap_or("");
-        for (i, line) in wrap(desc, 62).iter().take(24).enumerate() {
-            ui::text(p, line, 80.0, 190.0 + i as f32 * 34.0, 24, ui::WHITE, ui::ALIGN_LEFT, false);
+        for (i, line) in wrap(m, desc, col_w, 24, 24).iter().enumerate() {
+            ui::text_raw(p, line, 80.0, 190.0 + i as f32 * 34.0, 24, ui::WHITE, ui::ALIGN_LEFT, false);
         }
         let ch = self.chapters(cx);
         if ch.is_empty() {
@@ -145,9 +148,9 @@ impl Screen<YtHost> for InfoScreen {
             let rows: Vec<Row> = ch
                 .iter()
                 .enumerate()
-                .map(|(i, (t, ms))| Row::new(ui::ellipsize(t, 34)).value(ui::fmt_time(*ms)).active(Some(i) == cur))
+                .map(|(i, (t, ms))| Row::new(t.clone()).value(ui::fmt_time(*ms)).active(Some(i) == cur).raw())
                 .collect();
-            self.list.draw(p, &rows, self.list.focused(cx, rows.len()));
+            self.list.draw(p, f.measure, &rows, self.list.focused(cx, rows.len()));
             self.list.stops(f, rows.len());
         }
     }

@@ -280,8 +280,8 @@ fn main() {
         let mut ev = [0u8; 128];
         let mut prev = 0u32;
         let mut running = true;
-        // OLED protection: blank the screen after IDLE_BLANK_MS without input unless a video is
-        // playing. Any key wakes it and is swallowed.
+        // OLED protection: blank the screen after the idle time (`AppRig::idle_blank_ms`) without
+        // input unless a video is playing. Any key wakes it and is swallowed.
         let mut last_input = sdl::SDL_GetTicks();
         let mut blanked = false;
         let mut foreground = true;
@@ -496,6 +496,8 @@ fn main() {
             links.extend(plx_platform::tv::launch::take_all());
             let ready = d.top_screen().is_some();
             for raw in if ready { std::mem::take(&mut links) } else { Vec::new() } {
+                // A link (cast, voice search) is activity: it wakes a blanked screen.
+                last_input = now;
                 match deeplink(&raw) {
                     Some(Link::Video(v)) => {
                         log(&format!("launch: play {v}"));
@@ -515,6 +517,24 @@ fn main() {
                     }
                     None => {}
                 }
+            }
+            // OLED protection: after the idle time without input (Settings: idle_blank_secs) and
+            // with no video playing, the screen goes black; any input, a phone's command or a
+            // video starting brings it back (the waking key itself does nothing else, see above).
+            let idle_for = now.wrapping_sub(last_input);
+            if blanked && idle_for < rig.idle_blank_ms() {
+                blanked = false;
+                plx_machine::idle::invalidate();
+                log("idle: wake");
+            } else if !blanked && foreground && idle_for >= rig.idle_blank_ms() {
+                blanked = true;
+                log("idle: blank");
+                // One opaque black frame over everything, the video plane included (a paused
+                // picture must not stay lit either); nothing is presented while blanked.
+                let (x, y, w, h) = plx_base::surface::viewport();
+                sdl::glViewport(x, y, w, h);
+                plx_gfx::gfx::frame_clear(0.0, 0.0, 0.0);
+                sdl::SDL_GL_SwapWindow(win);
             }
             plx_machine::idle::frame_begin(dt);
             images::THUMBS.deliver();
@@ -697,7 +717,7 @@ fn color_key(act: &str, rig: &mut AppRig, d: &mut Dispatcher<YtHost>) {
         "accounts" => d.request(MachineId::Nav, NavOp::Push(YtArg::Accounts)),
         "subtitles" => {
             rig.store.settings.subtitles = !rig.store.settings.subtitles;
-            rig.store.settings.save();
+            rig.save_settings();
             let msg = if rig.store.settings.subtitles { "Subtitles on" } else { "Subtitles off" };
             rig.store.toast = Some((msg.into(), rig.now_ms + 2500));
         }

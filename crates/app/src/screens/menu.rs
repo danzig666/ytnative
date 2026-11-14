@@ -2,6 +2,7 @@
 //! A panel on the right; OK runs an action, Left/Right change a player option in place.
 
 use crate::host::{UserAction, YtArg, YtFx, YtHost};
+use crate::i18n::tr;
 use crate::settings::{PlaybackMode, SLEEP_MINS, SPEEDS};
 use crate::store::FeedKey;
 use crate::ui::{self, Row, VList};
@@ -125,28 +126,28 @@ impl MenuScreen {
         let mut tagged: Vec<(&'static str, String, Act)> = Vec::new();
         let mut acts = Vec::new();
         let mut kind = "play";
-        let mut title = "Options".to_string();
+        let mut title = tr("Options").to_string();
         if let Some(card) = cx.views.store.card(elem) {
             title = card.title.clone();
             if let Some(v) = card.video_id() {
                 kind = "play";
-                tagged.push((kind, "Play".to_string(), Act::Play(v.to_string())));
-                tagged.push(("play_start", "Play from the start".to_string(), Act::PlayWith(v.to_string(), true, false)));
-                tagged.push(("play_private", "Play without history".to_string(), Act::PlayWith(v.to_string(), false, true)));
+                tagged.push((kind, tr("Play").to_string(), Act::Play(v.to_string())));
+                tagged.push(("play_start", tr("Play from the start").to_string(), Act::PlayWith(v.to_string(), true, false)));
+                tagged.push(("play_private", tr("Play without history").to_string(), Act::PlayWith(v.to_string(), false, true)));
                 if cx.views.store.play_next.iter().any(|(q, _)| q == v) {
-                    tagged.push(("play_next", "Remove from Play next".to_string(), Act::PlayNext(v.to_string(), card.title.clone(), false)));
+                    tagged.push(("play_next", tr("Remove from Play next").to_string(), Act::PlayNext(v.to_string(), card.title.clone(), false)));
                 } else {
-                    tagged.push(("play_next", "Play next".to_string(), Act::PlayNext(v.to_string(), card.title.clone(), true)));
+                    tagged.push(("play_next", tr("Play next").to_string(), Act::PlayNext(v.to_string(), card.title.clone(), true)));
                 }
                 if !cx.views.store.settings.child_mode {
-                    tagged.push(("comments", "Comments".to_string(), Act::Comments(v.to_string())));
+                    tagged.push(("comments", tr("Comments").to_string(), Act::Comments(v.to_string())));
                 }
             }
             if let Some(Endpoint::Browse { browse_id, params }) = &card.item.endpoint {
                 if browse_id.starts_with("UC") {
-                    tagged.push(("open", "Open channel".into(), Act::OpenChannel(browse_id.clone())));
+                    tagged.push(("open", tr("Open channel").to_string(), Act::OpenChannel(browse_id.clone())));
                 } else {
-                    tagged.push(("open", "Open".into(), Act::OpenPlaylist(browse_id.clone())));
+                    tagged.push(("open", tr("Open").to_string(), Act::OpenPlaylist(browse_id.clone())));
                 }
                 if browse_id.starts_with("UC") && cx.views.store.signed_in {
                     // Subscribed: as YouTube said, or it is on the subscribed channels' pages.
@@ -154,24 +155,24 @@ impl MenuScreen {
                         .iter()
                         .any(|k| cx.views.store.cards(k).iter().any(|c| c.elem == card.elem));
                     let subscribed = cx.views.store.subscribed.get(browse_id).copied().unwrap_or(in_subs);
-                    let label = crate::i18n::tr(if subscribed { "Unsubscribe from {}" } else { "Subscribe to {}" }).replace("{}", &card.title);
+                    let label = tr(if subscribed { "Unsubscribe from {}" } else { "Subscribe to {}" }).replace("{}", &card.title);
                     tagged.push(("subscribe", label, Act::User(UserAction::Subscribe { channel_id: browse_id.clone(), subscribe: !subscribed })));
                 }
                 if browse_id.starts_with("UC") {
                     for (gid, gt) in &cx.views.store.groups {
-                        tagged.push(("groups", format!("Add to group \u{201C}{gt}\u{201D}"), Act::AddToGroup(Some(gid.clone()), browse_id.clone(), card.title.clone(), card.item.thumbnail.clone())));
+                        tagged.push(("groups", tr("Add to group \u{201C}{}\u{201D}").replace("{}", gt), Act::AddToGroup(Some(gid.clone()), browse_id.clone(), card.title.clone(), card.item.thumbnail.clone())));
                     }
-                    tagged.push(("groups", "Add to a new group".into(), Act::AddToGroup(None, browse_id.clone(), card.title.clone(), card.item.thumbnail.clone())));
+                    tagged.push(("groups", tr("Add to a new group").to_string(), Act::AddToGroup(None, browse_id.clone(), card.title.clone(), card.item.thumbnail.clone())));
                 }
                 if cx.views.store.settings.pinned.iter().any(|p| &p.1 == browse_id) {
-                    tagged.push(("pin", "Unpin from sidebar".into(), Act::Unpin(browse_id.clone())));
+                    tagged.push(("pin", tr("Unpin from sidebar").to_string(), Act::Unpin(browse_id.clone())));
                 } else {
-                    tagged.push(("pin", "Pin to sidebar".into(), Act::Pin(card.title.clone(), browse_id.clone(), params.clone())));
+                    tagged.push(("pin", tr("Pin to sidebar").to_string(), Act::Pin(card.title.clone(), browse_id.clone(), params.clone())));
                 }
             }
             if let Some(v) = card.video_id() {
-                tagged.push(("watch_later", "Save to Watch later".to_string(), Act::User(UserAction::WatchLater(v.to_string()))));
-                tagged.push(("playlist", "Save to playlist\u{2026}".to_string(), Act::PickPlaylist(v.to_string(), card.title.clone())));
+                tagged.push(("watch_later", tr("Save to Watch later").to_string(), Act::User(UserAction::WatchLater(v.to_string()))));
+                tagged.push(("playlist", tr("Save to playlist\u{2026}").to_string(), Act::PickPlaylist(v.to_string(), card.title.clone())));
             }
             // The card's own YouTube menu (Not interested, Don't recommend channel, Remove from
             // history, ...). Lazy "More" panels and plain navigation entries are left out.
@@ -182,18 +183,18 @@ impl MenuScreen {
                     MenuKind::NotInterested | MenuKind::DontRecommendChannel | MenuKind::RemoveFromHistory | MenuKind::RemoveFromWatchLater
                 ) || matches!(m.command, MenuCommand::Feedback { .. });
                 if useful && !m.label.is_empty() {
-                    tagged.push(("youtube", m.label.clone(), Act::User(UserAction::Menu(m.clone()))));
+                    tagged.push(("youtube", tr(&m.label).to_string(), Act::User(UserAction::Menu(m.clone()))));
                 }
             }
             if let Some(ch) = card.item.channel.as_ref().filter(|_| !cx.views.store.settings.child_mode) {
-                tagged.push(("more_from", format!("More from {ch}"), Act::SearchFor(ch.clone())));
+                tagged.push(("more_from", tr("More from {}").replace("{}", ch), Act::SearchFor(ch.clone())));
                 if cx.views.store.settings.blocked_channels.contains(ch) {
-                    tagged.push(("block", crate::i18n::tr("Unblock {}").replace("{}", ch), Act::UnblockChannel(ch.clone())));
+                    tagged.push(("block", tr("Unblock {}").replace("{}", ch), Act::UnblockChannel(ch.clone())));
                 } else {
-                    tagged.push(("block", format!("Block {ch}"), Act::BlockChannel(ch.clone())));
+                    tagged.push(("block", tr("Block {}").replace("{}", ch), Act::BlockChannel(ch.clone())));
                 }
                 if cx.views.store.settings.sponsorblock && card.video_id().is_some() {
-                    tagged.push(("sponsorblock", "SponsorBlock on this channel".into(), Act::SbChannel(ch.clone())));
+                    tagged.push(("sponsorblock", tr("SponsorBlock on this channel").to_string(), Act::SbChannel(ch.clone())));
                 }
             }
         }
@@ -202,7 +203,7 @@ impl MenuScreen {
         tagged.sort_by_key(|(k, _, _)| rank(k)); // stable: items of one kind keep their order
         let _ = kind;
         acts.extend(tagged.into_iter().filter(|(k, _, _)| !s.card_menu_hidden.iter().any(|h| h == k)).map(|(_, l, a)| (l, a)));
-        acts.push(("Close".into(), Act::Close));
+        acts.push((tr("Close").to_string(), Act::Close));
         Self::make(entry, title, acts)
     }
 
@@ -213,26 +214,26 @@ impl MenuScreen {
             let mark = if o.contains { "\u{2713}  " } else { "     " };
             acts.push((format!("{mark}{}", o.title), Act::TogglePlaylist(o.playlist_id.clone(), video_id.clone(), !o.contains)));
         }
-        acts.push(("+  New private playlist".to_string(), Act::NewPlaylist(title.clone(), video_id.clone())));
-        acts.push(("Close".to_string(), Act::Close));
-        let mut m = Self::make(entry, "Save to playlist".into(), acts);
+        acts.push((tr("+  New private playlist").to_string(), Act::NewPlaylist(title.clone(), video_id.clone())));
+        acts.push((tr("Close").to_string(), Act::Close));
+        let mut m = Self::make(entry, tr("Save to playlist").to_string(), acts);
         m.picker_for = Some(video_id);
         m
     }
 
     pub fn filters(entry: EntryId, query: String) -> Self {
         let acts = vec![
-            ("Upload date".to_string(), Act::Filter(0)),
-            ("Type".to_string(), Act::Filter(1)),
-            ("Duration".to_string(), Act::Filter(2)),
-            ("Sort by".to_string(), Act::Filter(3)),
-            ("Live".to_string(), Act::Filter(4)),
-            ("4K".to_string(), Act::Filter(5)),
-            ("HDR".to_string(), Act::Filter(6)),
-            ("Reset filters".to_string(), Act::Filter(7)),
-            ("Apply".to_string(), Act::ApplyFilters(query)),
+            (tr("Upload date").to_string(), Act::Filter(0)),
+            (tr("Type").to_string(), Act::Filter(1)),
+            (tr("Duration").to_string(), Act::Filter(2)),
+            (tr("Sort by").to_string(), Act::Filter(3)),
+            (tr("Live").to_string(), Act::Filter(4)),
+            (tr("4K").to_string(), Act::Filter(5)),
+            (tr("HDR").to_string(), Act::Filter(6)),
+            (tr("Reset filters").to_string(), Act::Filter(7)),
+            (tr("Apply").to_string(), Act::ApplyFilters(query)),
         ];
-        Self::make(entry, "Search filters".into(), acts)
+        Self::make(entry, tr("Search filters").to_string(), acts)
     }
 
     pub fn player(entry: EntryId, cx: &Cx<'_, YtHost>) -> Self {
@@ -244,51 +245,51 @@ impl MenuScreen {
             let is_like = matches!(liked, Some(yt_core::watch::LikeStatus::Like));
             let is_dislike = matches!(liked, Some(yt_core::watch::LikeStatus::Dislike));
             acts.push((
-                if is_like { "Remove like".to_string() } else { "Like".to_string() },
+                if is_like { tr("Remove like").to_string() } else { tr("Like").to_string() },
                 Act::User(UserAction::Rate(st.video_id.clone(), if is_like { Rating::None } else { Rating::Like })),
             ));
             acts.push((
-                if is_dislike { "Remove dislike".to_string() } else { "Dislike".to_string() },
+                if is_dislike { tr("Remove dislike").to_string() } else { tr("Dislike").to_string() },
                 Act::User(UserAction::Rate(st.video_id.clone(), if is_dislike { Rating::None } else { Rating::Dislike })),
             ));
             if !st.channel_id.is_empty() {
                 let subscribed = st.extras.watch.as_ref().and_then(|w| w.subscribed).unwrap_or(false);
                 acts.push((
-                    if subscribed { format!("Unsubscribe from {}", st.author) } else { format!("Subscribe to {}", st.author) },
+                    tr(if subscribed { "Unsubscribe from {}" } else { "Subscribe to {}" }).replace("{}", &st.author),
                     Act::User(UserAction::Subscribe { channel_id: st.channel_id.clone(), subscribe: !subscribed }),
                 ));
             }
-            acts.push(("Save to Watch later".to_string(), Act::User(UserAction::WatchLater(st.video_id.clone()))));
-            acts.push(("Save to playlist\u{2026}".to_string(), Act::PickPlaylist(st.video_id.clone(), st.title.clone())));
-            acts.push(("Video info & chapters".to_string(), Act::Info));
+            acts.push((tr("Save to Watch later").to_string(), Act::User(UserAction::WatchLater(st.video_id.clone()))));
+            acts.push((tr("Save to playlist\u{2026}").to_string(), Act::PickPlaylist(st.video_id.clone(), st.title.clone())));
+            acts.push((tr("Video info & chapters").to_string(), Act::Info));
             if !cx.views.store.settings.child_mode {
-                acts.push(("Comments".to_string(), Act::Comments(st.video_id.clone())));
+                acts.push((tr("Comments").to_string(), Act::Comments(st.video_id.clone())));
             }
             if !st.channel_id.is_empty() {
-                acts.push((format!("Open {}", st.author), Act::OpenChannel(st.channel_id.clone())));
+                acts.push((tr("Open {}").replace("{}", &st.author), Act::OpenChannel(st.channel_id.clone())));
             }
         }
         acts.extend(vec![
-            ("Playback speed".to_string(), Act::Speed),
-            ("Audio language".to_string(), Act::AudioTrack),
-            ("Video zoom".to_string(), Act::ZoomMode),
-            ("Sleep timer".to_string(), Act::Sleep),
-            ("Maximum quality".to_string(), Act::MaxQuality),
-            ("Subtitles".to_string(), Act::Subtitles),
-            ("Subtitle size".to_string(), Act::SubSize),
-            ("Subtitle colour".to_string(), Act::SubColor),
-            ("Subtitle style".to_string(), Act::SubStyle),
-            ("Subtitle font".to_string(), Act::SubFont),
-            ("Bold subtitles".to_string(), Act::SubBold),
-            ("When the video ends".to_string(), Act::RepeatMode),
+            (tr("Playback speed").to_string(), Act::Speed),
+            (tr("Audio language").to_string(), Act::AudioTrack),
+            (tr("Video zoom").to_string(), Act::ZoomMode),
+            (tr("Sleep timer").to_string(), Act::Sleep),
+            (tr("Maximum quality").to_string(), Act::MaxQuality),
+            (tr("Subtitles").to_string(), Act::Subtitles),
+            (tr("Subtitle size").to_string(), Act::SubSize),
+            (tr("Subtitle colour").to_string(), Act::SubColor),
+            (tr("Subtitle style").to_string(), Act::SubStyle),
+            (tr("Subtitle font").to_string(), Act::SubFont),
+            (tr("Bold subtitles").to_string(), Act::SubBold),
+            (tr("When the video ends").to_string(), Act::RepeatMode),
         ]);
         if cx.views.store.settings.sponsorblock && !st.author.is_empty() {
-            acts.push(("SponsorBlock on this channel".to_string(), Act::SbChannel(st.author.clone())));
+            acts.push((tr("SponsorBlock on this channel").to_string(), Act::SbChannel(st.author.clone())));
         }
         acts.extend(vec![
-            ("Close".to_string(), Act::Close),
+            (tr("Close").to_string(), Act::Close),
         ]);
-        Self::make(entry, "Player options".into(), acts)
+        Self::make(entry, tr("Player options").to_string(), acts)
     }
 
     fn value(&self, act: &Act, cx: &Cx<'_, YtHost>) -> Option<String> {
@@ -345,10 +346,10 @@ impl MenuScreen {
             Act::AudioTrack => {
                 let st = cx.views.player;
                 if st.audio_tracks.len() < 2 {
-                    return Some("only one".into());
+                    return Some(tr("only one").to_string());
                 }
                 let cur = st.audio_track.clone().or_else(|| st.audio_tracks.iter().find(|t| t.2).map(|t| t.0.clone()));
-                let name = st.audio_tracks.iter().find(|t| Some(&t.0) == cur.as_ref()).map(|t| t.1.clone()).unwrap_or_else(|| "default".into());
+                let name = st.audio_tracks.iter().find(|t| Some(&t.0) == cur.as_ref()).map(|t| t.1.clone()).unwrap_or_else(|| tr("default").to_string());
                 format!("{}  \u{203A}", ui::ellipsize(&name, 18))
             }
             Act::ZoomMode => format!(
@@ -440,7 +441,7 @@ impl MenuScreen {
             }
             Act::Pin(t, id, p) => {
                 let (t, id, p) = (t.clone(), id.clone(), p.clone());
-                fx.push(Fx::App(YtFx::Toast(format!("Pinned {t}"))));
+                fx.push(Fx::App(YtFx::Toast(tr("Pinned {}").replace("{}", &t))));
                 fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| s.pinned.push((t, id, p))))));
                 fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
             }
@@ -452,7 +453,7 @@ impl MenuScreen {
             }
             Act::BlockChannel(ch) => {
                 let ch = ch.clone();
-                fx.push(Fx::App(YtFx::Toast(format!("{ch} blocked (Settings \u{203A} Content filters)"))));
+                fx.push(Fx::App(YtFx::Toast(tr("{} blocked (Settings \u{203A} Content filters)").replace("{}", &ch))));
                 fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| {
                     if !s.blocked_channels.contains(&ch) {
                         s.blocked_channels.push(ch);
@@ -642,7 +643,7 @@ impl Machine<YtHost> for MenuScreen {
                     match self.choices(&act, cx) {
                         Some((v, cur)) => {
                             let anchor = self.list.place(*e, n, Some(i)).map(|p| p.rect).unwrap_or(self.list.rect);
-                            self.choice = Some(ui::ChoiceBox::new(self.list.entry, i, v, cur, anchor));
+                            self.choice = Some(ui::ChoiceBox::new(self.list.entry, i, v, cur, anchor).raw(matches!(act, Act::AudioTrack)));
                             fx.invalidate(plx_machine::present::Provenance::Input);
                         }
                         None => self.run(&act, 1, cx, fx),
@@ -736,7 +737,7 @@ impl Screen<YtHost> for MenuScreen {
         let cx = f.cx;
         let _dim = ui::HdrDim::begin(ui::hdr_playing(cx.views.player));
         ui::fill(p, PANEL, 0.0, ui::PANEL);
-        ui::text(p, &ui::ellipsize(&self.title, 30), PANEL.x + 52.0, 62.0, 30, ui::WHITE, ui::ALIGN_LEFT, true);
+        ui::text_raw(p, &f.measure.fit_line(&self.title, PANEL.w - 104.0, 30, true).to_string_lossy(), PANEL.x + 52.0, 62.0, 30, ui::WHITE, ui::ALIGN_LEFT, true);
         if let Some(v) = &self.picker_for {
             if !cx.views.store.playlist_options.contains_key(v) {
                 ui::text(p, "Loading your playlists\u{2026}", PANEL.x + 60.0, 150.0, 24, ui::FAINT, ui::ALIGN_LEFT, false);
@@ -746,14 +747,14 @@ impl Screen<YtHost> for MenuScreen {
             .acts
             .iter()
             .map(|(label, act)| {
-                let r = Row::new(label.clone());
+                let r = Row::new(label.clone()).raw();
                 match self.value(act, cx) {
                     Some(v) => r.value(v),
                     None => r,
                 }
             })
             .collect();
-        self.list.draw(p, &rows, self.list.focused(cx, rows.len()));
+        self.list.draw(p, f.measure, &rows, self.list.focused(cx, rows.len()));
         if let Some(c) = &self.choice {
             c.draw(f);
         } else {

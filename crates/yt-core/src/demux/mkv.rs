@@ -4,7 +4,7 @@
 //! Incremental: `Segment` and `Cluster` are entered without being buffered (either may have an
 //! unknown size); every other element is parsed once complete, or skipped byte-wise.
 
-use super::{AccessUnit, Codec, Color, Demuxer, Kind, SegmentRef, TrackInfo};
+use super::{AccessUnit, MAX_ELEMENT, Codec, Color, Demuxer, Kind, SegmentRef, TrackInfo};
 use anyhow::{bail, Result};
 use std::collections::VecDeque;
 
@@ -96,8 +96,9 @@ pub fn elements(mut b: &[u8]) -> impl Iterator<Item = (u32, &[u8])> {
         let (id, il) = read_id(b)?;
         let (size, sl) = read_vint(&b[il..])?;
         let start = il + sl;
+        // A 64-bit size that does not fit usize (32-bit targets) cannot fit the slice either.
         let end = match size {
-            Some(s) => start.checked_add(s as usize)?,
+            Some(s) => start.checked_add(usize::try_from(s).ok()?)?,
             None => b.len(),
         };
         if end > b.len() {
@@ -241,6 +242,12 @@ impl MkvDemuxer {
                 self.skip = total;
                 continue;
             }
+            if total > MAX_ELEMENT {
+                // Waiting for such an element would buffer without bound: the stream is corrupt.
+                let at = self.pos;
+                self.buf.clear();
+                bail!("mkv: element {id:#x} of {size} bytes at {at} is too large");
+            }
             if (self.buf.len() as u64) < total {
                 return Ok(());
             }
@@ -251,7 +258,7 @@ impl MkvDemuxer {
                 ID_INFO => self.parse_info(&body),
                 ID_TRACKS => self.parse_tracks(&body),
                 ID_CUES => self.parse_cues(&body),
-                ID_TIMESTAMP => self.cluster_ts = uint(&body) as i64,
+                ID_TIMESTAMP => self.cluster_ts = i64::try_from(uint(&body)).unwrap_or(i64::MAX),
                 ID_SIMPLE_BLOCK => self.parse_block(&body, None, None),
                 ID_BLOCK_GROUP => {
                     let mut block = None;
@@ -280,7 +287,14 @@ impl MkvDemuxer {
         let mut dur = None;
         for (id, b) in elements(body) {
             match id {
-                ID_TIMESTAMP_SCALE => self.timestamp_scale = uint(b).max(1) as i64,
+                // Real files use 1 ms (1_000_000); a scale above 1 s per tick is corrupt and
+                // would overflow the timestamp math, so it keeps the default.
+                ID_TIMESTAMP_SCALE => {
+                    let v = uint(b);
+                    if (1..=1_000_000_000).contains(&v) {
+                        self.timestamp_scale = v as i64;
+                    }
+                }
                 ID_DURATION => dur = Some(float(b)),
                 _ => {}
             }
@@ -424,16 +438,16 @@ impl MkvDemuxer {
         let mut out = Vec::with_capacity(self.cues.len());
         for (i, &(t, p)) in self.cues.iter().enumerate() {
             let next = self.cues.get(i + 1);
-            let start_ns = t * ts;
+            let start_ns = t.saturating_mul(ts);
             let end_ns = match next {
-                Some(&(nt, _)) => nt * ts,
+                Some(&(nt, _)) => nt.saturating_mul(ts),
                 None => self.duration_ns.unwrap_or(start_ns),
             };
             let size = match next {
                 Some(&(_, np)) => np.saturating_sub(p),
                 None => self.segment_end.map(|e| e.saturating_sub(base + p)).unwrap_or(0),
             };
-            out.push(SegmentRef { start_ns, duration_ns: end_ns - start_ns, offset: base + p, size });
+            out.push(SegmentRef { start_ns, duration_ns: end_ns.saturating_sub(start_ns), offset: base.saturating_add(p), size });
         }
         self.index = Some(out);
     }
@@ -451,8 +465,8 @@ impl MkvDemuxer {
         let keyframe = key.unwrap_or(flags & 0x80 != 0) || kind == Kind::Audio;
         let ts = self.timestamp_scale;
         let delay = self.delays.iter().find(|d| d.0 == track).map_or(0, |d| d.1);
-        let pts = (self.cluster_ts + rel) * ts - delay;
-        let dur = dur_ticks.map(|d| d * ts).unwrap_or(def_dur);
+        let pts = self.cluster_ts.saturating_add(rel).saturating_mul(ts).saturating_sub(delay);
+        let dur = dur_ticks.map(|d| d.saturating_mul(ts)).unwrap_or(def_dur);
         let payload = &b[tl + 3..];
         let frames = match (flags >> 1) & 3 {
             0 => vec![payload],

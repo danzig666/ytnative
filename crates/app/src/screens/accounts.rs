@@ -24,11 +24,14 @@ fn rows_of(cx: &Cx<'_, YtHost>) -> Vec<(Row, RowAct)> {
         .store
         .accounts
         .iter()
-        .map(|a| (Row::new(a.name.clone()).value(if a.current { "current" } else { "switch" }).active(a.current), RowAct::Switch(a.id.clone())))
+        .map(|a| {
+            let state = crate::i18n::tr(if a.current { "current" } else { "switch" });
+            (Row::new(a.name.clone()).value(state).active(a.current).raw(), RowAct::Switch(a.id.clone()))
+        })
         .collect();
     v.push((Row::new("+  Add an account"), RowAct::Add));
     for a in &cx.views.store.accounts {
-        v.push((Row::new(format!("Remove {}", a.name)), RowAct::Remove(a.id.clone(), a.name.clone())));
+        v.push((Row::new(crate::i18n::tr("Remove {}").replace("{}", &a.name)).raw(), RowAct::Remove(a.id.clone(), a.name.clone())));
     }
     v
 }
@@ -80,7 +83,7 @@ impl Machine<YtHost> for AccountsScreen {
                                 fx.push(Fx::App(YtFx::Act(UserAction::RemoveAccount(id))));
                             } else {
                                 self.confirm_remove = Some(id);
-                                fx.push(Fx::App(YtFx::Toast(format!("Press OK again to remove {name}"))));
+                                fx.push(Fx::App(YtFx::Toast(crate::i18n::tr("Press OK again to remove {}").replace("{}", &name))));
                             }
                         }
                     }
@@ -135,7 +138,7 @@ impl Screen<YtHost> for AccountsScreen {
         let cx = f.cx;
         ui::text(p, "Accounts", 360.0, 80.0, 48, ui::WHITE, ui::ALIGN_LEFT, true);
         let rows: Vec<Row> = rows_of(cx).into_iter().map(|r| r.0).collect();
-        self.list.draw(p, &rows, self.list.focused(cx, rows.len()));
+        self.list.draw(p, f.measure, &rows, self.list.focused(cx, rows.len()));
         self.list.stops(f, rows.len());
         super::common::toast(p, cx);
     }

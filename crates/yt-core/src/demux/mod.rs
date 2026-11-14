@@ -188,6 +188,11 @@ impl<'a> Rd<'a> {
     }
 }
 
+/// Largest box / element a demuxer buffers whole (a `moof`, an `mdat`, a `SimpleBlock`, `Cues`, ...).
+/// YouTube's largest fragments are a few MB; a bigger declared size is a corrupt stream, and
+/// waiting for it would buffer without bound.
+pub const MAX_ELEMENT: u64 = 64 << 20;
+
 /// `v * num / den` without overflow for the ranges media timestamps use.
 pub(crate) fn scale(v: i64, num: i64, den: i64) -> i64 {
     if den == 0 {

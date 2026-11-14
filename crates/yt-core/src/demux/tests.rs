@@ -37,8 +37,27 @@ fn avcc() -> Vec<u8> {
 }
 
 fn mp4_init(timescale: u32) -> Vec<u8> {
+    mp4_init_tracks(timescale, &[1])
+}
+
+/// An init segment with one H.264 track per id in `ids`.
+fn mp4_init_tracks(timescale: u32, ids: &[u32]) -> Vec<u8> {
     let ftyp = bx(b"ftyp", b"dash\0\0\0\0iso6");
-    let tkhd = full(b"tkhd", 0, 3, &cat(&[&[0; 8], &1u32.to_be_bytes(), &[0; 68]]));
+    let mvhd = full(b"mvhd", 0, 0, &cat(&[&[0; 8], &1000u32.to_be_bytes(), &10_000u32.to_be_bytes(), &[0; 80]]));
+    let mut moov = mvhd;
+    for &id in ids {
+        moov.extend_from_slice(&mp4_trak(timescale, id));
+    }
+    let trexs: Vec<u8> = ids
+        .iter()
+        .flat_map(|id| full(b"trex", 0, 0, &cat(&[&id.to_be_bytes(), &1u32.to_be_bytes(), &3000u32.to_be_bytes(), &0u32.to_be_bytes(), &0x0101_0000u32.to_be_bytes()])))
+        .collect();
+    moov.extend_from_slice(&bx(b"mvex", &trexs));
+    cat(&[&ftyp, &bx(b"moov", &moov)])
+}
+
+fn mp4_trak(timescale: u32, id: u32) -> Vec<u8> {
+    let tkhd = full(b"tkhd", 0, 3, &cat(&[&[0; 8], &id.to_be_bytes(), &[0; 68]]));
     let mdhd = full(b"mdhd", 0, 0, &cat(&[&[0; 8], &timescale.to_be_bytes(), &[0; 8]]));
     let hdlr = full(b"hdlr", 0, 0, &cat(&[&[0; 4], b"vide", &[0; 13]]));
     let mut vse = vec![0u8; 78];
@@ -53,18 +72,18 @@ fn mp4_init(timescale: u32) -> Vec<u8> {
     let mdia = bx(b"mdia", &cat(&[&mdhd, &hdlr, &minf]));
     let elst = full(b"elst", 0, 0, &cat(&[&1u32.to_be_bytes(), &0u32.to_be_bytes(), &3000u32.to_be_bytes(), &[0, 1, 0, 0]]));
     let edts = bx(b"edts", &elst);
-    let trak = bx(b"trak", &cat(&[&tkhd, &edts, &mdia]));
-    let trex = full(b"trex", 0, 0, &cat(&[&1u32.to_be_bytes(), &1u32.to_be_bytes(), &3000u32.to_be_bytes(), &0u32.to_be_bytes(), &0x0101_0000u32.to_be_bytes()]));
-    let mvex = bx(b"mvex", &trex);
-    let mvhd = full(b"mvhd", 0, 0, &cat(&[&[0; 8], &1000u32.to_be_bytes(), &10_000u32.to_be_bytes(), &[0; 80]]));
-    let moov = bx(b"moov", &cat(&[&mvhd, &trak, &mvex]));
-    cat(&[&ftyp, &moov])
+    bx(b"trak", &cat(&[&tkhd, &edts, &mdia]))
 }
 
 /// moof+mdat with `samples` (size, cts) at decode time `tfdt`; first is a sync sample.
 fn mp4_fragment(tfdt: u64, samples: &[Vec<u8>], cts: &[u32]) -> Vec<u8> {
+    mp4_fragment_for(1, tfdt, samples, cts)
+}
+
+/// Like [`mp4_fragment`], for track `track_id`.
+fn mp4_fragment_for(track_id: u32, tfdt: u64, samples: &[Vec<u8>], cts: &[u32]) -> Vec<u8> {
     let mfhd = full(b"mfhd", 0, 0, &1u32.to_be_bytes());
-    let tfhd = full(b"tfhd", 0, 0x02_0000, &1u32.to_be_bytes());
+    let tfhd = full(b"tfhd", 0, 0x02_0000, &track_id.to_be_bytes());
     let tfdt_b = full(b"tfdt", 1, 0, &tfdt.to_be_bytes());
     // trun: data_offset, first_sample_flags, size, cts.
     let build_trun = |data_off: u32| {
@@ -148,6 +167,89 @@ fn mp4_fragment_demux_incremental() {
     let a = f.frame(&aus[0]);
     assert_eq!(a, cat(&[&[0, 0, 0, 1], SPS, &[0, 0, 0, 1], PPS, &[0, 0, 0, 1, 0x65, 1, 2, 3]]));
     assert_eq!(f.frame(&aus[1]), vec![0, 0, 0, 1, 0x41, 9]);
+}
+
+/// Length of the box at the front of `b` (32-bit size field).
+fn box_len(b: &[u8]) -> usize {
+    u32::from_be_bytes(b[..4].try_into().unwrap()) as usize
+}
+
+#[test]
+fn mp4_oversized_box_fails_instead_of_buffering() {
+    let mut d = mp4::Mp4Demuxer::new();
+    d.push(&mp4_init(90_000)).unwrap();
+    // A moof declaring 1.5 GB is an error at once, and the buffer is dropped.
+    let mut huge = 0x6000_0000u32.to_be_bytes().to_vec();
+    huge.extend_from_slice(b"moof");
+    huge.extend_from_slice(&[0; 100]);
+    assert!(d.push(&huge).is_err());
+    assert_eq!(d.buffered(), 0);
+    // The next fragment still parses.
+    d.push(&mp4_fragment(0, &[nal_sample(&[&[0x65, 1]])], &[0])).unwrap();
+    assert_eq!(std::iter::from_fn(|| d.pop()).count(), 1);
+    // An uninteresting box of that size is skipped without buffering.
+    let mut free = 0x6000_0000u32.to_be_bytes().to_vec();
+    free.extend_from_slice(b"free");
+    free.extend_from_slice(&[0; 1000]);
+    d.push(&free).unwrap();
+    assert_eq!(d.buffered(), 0);
+}
+
+#[test]
+fn mp4_truncated_input_waits_without_output() {
+    let init = mp4_init(90_000);
+    let frag = mp4_fragment(0, &[nal_sample(&[&[0x65, 1, 2]])], &[0]);
+    let mut d = mp4::Mp4Demuxer::new();
+    // Half an init segment and most of a fragment give nothing yet, without an error or a panic.
+    d.push(&init[..init.len() / 2]).unwrap();
+    assert!(d.tracks().is_empty());
+    d.push(&init[init.len() / 2..]).unwrap();
+    d.push(&frag[..frag.len() - 3]).unwrap();
+    assert!(d.pop().is_none());
+    d.push(&frag[frag.len() - 3..]).unwrap();
+    assert_eq!(std::iter::from_fn(|| d.pop()).count(), 1);
+    // A sidx cut short is an error, not a panic.
+    assert!(mp4::parse_sidx(&[0, 0, 0, 0, 0, 0, 0, 1], 0).is_err());
+}
+
+#[test]
+fn mp4_moov_with_fewer_tracks_between_moof_and_mdat() {
+    let mut d = mp4::Mp4Demuxer::new();
+    d.push(&mp4_init_tracks(90_000, &[1, 2])).unwrap();
+    assert_eq!(d.tracks().len(), 2);
+    let frag = mp4_fragment_for(2, 0, &[nal_sample(&[&[0x65, 1]])], &[0]);
+    let moof_len = box_len(&frag);
+    d.push(&frag[..moof_len]).unwrap();
+    // A re-sent moov with one track, then the mdat of the track-2 samples: no panic, and the
+    // samples that referred to the old track list are dropped.
+    d.push(&mp4_init(90_000)).unwrap();
+    assert_eq!(d.tracks().len(), 1);
+    d.push(&frag[moof_len..]).unwrap();
+    assert!(d.pop().is_none());
+}
+
+#[test]
+fn mp4_size_zero_mdat_streams_and_drains() {
+    let samples = [nal_sample(&[&[0x65, 1, 2, 3]]), nal_sample(&[&[0x41, 9]]), nal_sample(&[&[0x01, 7, 7]])];
+    let frag = mp4_fragment(0, &samples, &[0, 0, 0]);
+    let moof_len = box_len(&frag);
+    // The same fragment with its mdat declaring size 0 ("to the end of the file").
+    let mut open = frag.clone();
+    open[moof_len..moof_len + 4].copy_from_slice(&[0, 0, 0, 0]);
+    let mut d = mp4::Mp4Demuxer::new();
+    d.push(&mp4_init(90_000)).unwrap();
+    for chunk in open.chunks(5) {
+        d.push(chunk).unwrap();
+    }
+    let aus: Vec<_> = std::iter::from_fn(|| d.pop()).collect();
+    assert_eq!(aus.iter().map(|a| a.data.clone()).collect::<Vec<_>>(), samples.to_vec());
+    // Everything after it belongs to the mdat and is not kept.
+    d.push(&[0u8; 100_000]).unwrap();
+    assert_eq!(d.buffered(), 0);
+    // A seek leaves the open mdat.
+    d.reset_to(0);
+    d.push(&frag).unwrap();
+    assert_eq!(std::iter::from_fn(|| d.pop()).count(), 3);
 }
 
 // ---- tiny EBML writer ----------------------------------------------------------------------
@@ -255,6 +357,24 @@ fn webm_demux_blocks_cues_and_lacing() {
     d.reset_to(seg_data + cluster_pos);
     d.push(&cluster).unwrap();
     assert_eq!(std::iter::from_fn(|| d.pop()).count(), 9);
+}
+
+#[test]
+fn webm_oversized_block_fails_instead_of_buffering() {
+    let ebml = el(0x1A45_DFA3, &el(0x4282, b"webm"));
+    let tracks = el(0x1654_AE6B, &el(0xAE, &cat(&[&u(0xD7, 1), &u(0x83, 1), &el(0x86, b"V_VP9")])));
+    let mut d = mkv::MkvDemuxer::new();
+    d.push(&cat(&[&ebml, &el_unknown(0x1853_8067), &tracks, &el_unknown(0x1F43_B675), &u(0xE7, 0)])).unwrap();
+    // A SimpleBlock declaring 2^40 bytes is an error at once.
+    let mut huge = vec![0xA3];
+    let mut sz = (1u64 << 40).to_be_bytes();
+    sz[0] = 0x01;
+    huge.extend_from_slice(&sz);
+    huge.extend_from_slice(&[0x81, 0, 0, 0x80]);
+    assert!(d.push(&huge).is_err());
+    // The next block still parses.
+    d.push(&el(0xA3, &block(1, 0, 0x80, &[0x82, 0x49]))).unwrap();
+    assert_eq!(std::iter::from_fn(|| d.pop()).count(), 1);
 }
 
 #[test]

@@ -281,10 +281,10 @@ impl TimeRange {
         Ok(t)
     }
     pub fn start_ms(&self) -> i64 {
-        if self.timescale > 0 { self.start_ticks * 1000 / self.timescale as i64 } else { 0 }
+        ticks_ms(self.start_ticks, self.timescale as i64)
     }
     pub fn duration_ms(&self) -> i64 {
-        if self.timescale > 0 { self.duration_ticks * 1000 / self.timescale as i64 } else { 0 }
+        ticks_ms(self.duration_ticks, self.timescale as i64)
     }
 }
 
@@ -509,6 +509,12 @@ impl VideoPlaybackAbrRequest {
 }
 
 // ---------------------------------------------------------------------------------------------
+/// `ticks` at `timescale` per second in milliseconds, without overflowing on huge values from
+/// the server (0 for no timescale).
+fn ticks_ms(ticks: i64, timescale: i64) -> i64 {
+    if timescale > 0 { (ticks as i128 * 1000 / timescale as i128).clamp(i64::MIN as i128, i64::MAX as i128) as i64 } else { 0 }
+}
+
 // Response side
 // ---------------------------------------------------------------------------------------------
 
@@ -814,7 +820,7 @@ impl SabrSeek {
     }
     pub fn ms(&self) -> i64 {
         if self.seek_media_timescale > 0 {
-            self.seek_media_time * 1000 / self.seek_media_timescale as i64
+            ticks_ms(self.seek_media_time, self.seek_media_timescale as i64)
         } else {
             self.seek_media_time
         }

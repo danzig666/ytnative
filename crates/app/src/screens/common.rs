@@ -85,7 +85,7 @@ pub fn empty_state(p: Painter, feed: Option<&Feed>, area: Rect, now_ms: u32) {
         ui::text(p, sub, area.x + area.w / 2.0, area.y + area.h / 2.0 + 10.0, 26, ui::FAINT, ui::ALIGN_CENTER, false);
     }
     if let Some(e) = feed.and_then(|f| f.error.as_deref()) {
-        ui::text(p, &ui::ellipsize(e, 110), area.x + area.w / 2.0, area.y + area.h / 2.0 + 56.0, 20, ui::FAINT, ui::ALIGN_CENTER, false);
+        ui::text_raw(p, &ui::ellipsize(e, 110), area.x + area.w / 2.0, area.y + area.h / 2.0 + 56.0, 20, ui::FAINT, ui::ALIGN_CENTER, false);
     }
 }
 
@@ -131,12 +131,24 @@ pub fn clock(views: &Views<'_>) -> String {
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;
     let local = secs + local_offset_secs();
     let (h, m) = ((local / 3600).rem_euclid(24), (local / 60).rem_euclid(60));
-    if views.store.settings.time_24h {
-        format!("{h:02}:{m:02}")
-    } else {
-        let h12 = if h % 12 == 0 { 12 } else { h % 12 };
-        format!("{h12}:{m:02} {}", if h < 12 { "AM" } else { "PM" })
+    clock_text(h, m, views.store.settings.time_24h)
+}
+
+/// "HH:MM" on the 24-hour clock, or (English with the 12-hour clock chosen) the hour on the
+/// 12-hour clock with the part of the day in words ("9:41 in the evening"); never "AM" / "PM".
+/// The other interface languages tell the time on the 24-hour clock.
+pub fn clock_text(h: i64, m: i64, time_24h: bool) -> String {
+    if time_24h || crate::i18n::current() != "en" {
+        return format!("{h:02}:{m:02}");
     }
+    let h12 = if h % 12 == 0 { 12 } else { h % 12 };
+    let part = match h {
+        5..=11 => "in the morning",
+        12..=17 => "in the afternoon",
+        18..=21 => "in the evening",
+        _ => "at night",
+    };
+    format!("{h12}:{m:02} {}", crate::i18n::tr(part))
 }
 
 #[cfg(windows)]

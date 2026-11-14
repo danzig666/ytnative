@@ -214,7 +214,9 @@ impl Player {
         }
         let my_gen = self.gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         let gen = self.gen.clone();
-        *self.status.lock().unwrap() = Status { phase: Phase::Resolving, rate: 1.0, ..Default::default() };
+        // The video is known from the start (the phone's queue updates, history, a restart of the
+        // same video compare against it), not only once it is resolved.
+        *self.status.lock().unwrap() = Status { phase: Phase::Resolving, rate: 1.0, video_id: video_id.clone(), ..Default::default() };
         let Some(create) = sdl_sym::<CreateFn>("SDL_webOSCreateExportedWindow") else {
             self.fail("no SDL exported-window support on this TV");
             return;
@@ -246,8 +248,8 @@ impl Player {
             match run(luna, &video_id, &window_id, &session, &status, &media_id, prefs, start_ms, feed, &live, my_gen) {
                 Ok(true) => {
                     if extras.history {
-                        let (v, s2, st2) = (video_id.clone(), session.clone(), status.clone());
-                        let _ = plx_base::task::spawn("track", move || track_history(&v, &s2, &st2));
+                        let (v, s2, st2, g2) = (video_id.clone(), session.clone(), status.clone(), gen.clone());
+                        let _ = plx_base::task::spawn("track", move || track_history(&v, &s2, &st2, &g2, my_gen));
                     }
                     load_extras(&video_id, &session, &status, &extras)
                 }
@@ -364,8 +366,8 @@ impl Player {
 
     /// Playback speed (0.25..2.0) through uMediaServer's setPlayRate.
     pub fn set_rate(&mut self, rate: f32) {
+        let rate = rate.clamp(0.25, 2.0);
         if self.feed.active() {
-            self.status.lock().unwrap().rate = rate;
             self.feed.set_rate(rate);
             return;
         }
@@ -446,6 +448,7 @@ fn run(
 ) -> anyhow::Result<bool> {
     let resolved = {
         let mut g = session.lock().unwrap();
+        crate::host::take_reset(&mut g);
         if g.is_none() {
             *g = Some(yt_core::session::Session::new()?);
         }
@@ -462,10 +465,12 @@ fn run(
         s.paid_promotion = resolved.raw.get("paidContentOverlay").is_some();
         // Where it will start, so a BACK before the first position event saves this, not 0.
         s.position_ms = start_ms.unwrap_or(0);
-        s.phase = Phase::Loading;
     }
     {
         let mut s = status.lock().unwrap();
+        // Loading only together with the caption tracks etc. below: the frame loop loads captions
+        // as soon as it sees a video past Resolving.
+        s.phase = Phase::Loading;
         s.video_id = video_id.to_string();
         s.channel_id = resolved.channel_id.clone();
         s.storyboard = resolved.storyboard_spec.clone();
@@ -583,9 +588,10 @@ fn on_event(status: &Mutex<Status>, msg: &str) {
 }
 
 /// Worker: reports playback to YouTube (watch history, resume position) on YouTube's own
-/// schedule until this video stops playing.
+/// schedule until this playback stops (`gen` moves on with every start / stop, so the same video
+/// started again gets a tracker of its own instead of a second one).
 #[cfg(not(windows))]
-fn track_history(video_id: &str, session: &Mutex<Option<yt_core::session::Session>>, status: &Arc<Mutex<Status>>) {
+fn track_history(video_id: &str, session: &Mutex<Option<yt_core::session::Session>>, status: &Arc<Mutex<Status>>, gen: &std::sync::atomic::AtomicU64, my_gen: u64) {
     let mut t = match crate::host::with_session(session, |s| s.tracking_for(video_id)) {
         Ok(t) => t,
         Err(e) => {
@@ -604,8 +610,9 @@ fn track_history(video_id: &str, session: &Mutex<Option<yt_core::session::Sessio
         for _ in 0..wait {
             std::thread::sleep(std::time::Duration::from_secs(1));
             let s = status.lock().unwrap();
-            if s.video_id != video_id || matches!(s.phase, Phase::Idle | Phase::Failed(_) | Phase::Ended) {
-                let end = if s.video_id == video_id { pos(&s) } else { last };
+            let current = gen.load(std::sync::atomic::Ordering::SeqCst) == my_gen && s.video_id == video_id;
+            if !current || matches!(s.phase, Phase::Idle | Phase::Failed(_) | Phase::Ended) {
+                let end = if current { pos(&s) } else { last };
                 drop(s);
                 let _ = crate::host::with_session(session, |se| se.report_end(&mut t, end));
                 return;

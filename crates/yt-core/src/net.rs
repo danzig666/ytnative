@@ -82,18 +82,20 @@ struct Doh {
     url: String,
     http: reqwest::Client,
     cache: Arc<Mutex<HashMap<String, (Vec<IpAddr>, Instant)>>>,
+    /// The DoH server did not answer: the system resolver until then (no 10 s wait per host).
+    down_until: Arc<Mutex<Option<Instant>>>,
 }
 
 impl Doh {
     fn new(url: String) -> Doh {
         let http = reqwest::Client::builder().timeout(Duration::from_secs(5)).no_proxy().build().unwrap_or_default();
-        Doh { url, http, cache: Arc::default() }
+        Doh { url, http, cache: Arc::default(), down_until: Arc::default() }
     }
 }
 
 impl Resolve for Doh {
     fn resolve(&self, name: Name) -> Resolving {
-        let (url, http, cache) = (self.url.clone(), self.http.clone(), self.cache.clone());
+        let (url, http, cache, down_until) = (self.url.clone(), self.http.clone(), self.cache.clone(), self.down_until.clone());
         let host = name.as_str().to_string();
         Box::pin(async move {
             if let Some((ips, until)) = cache.lock().unwrap().get(&host) {
@@ -103,20 +105,34 @@ impl Resolve for Doh {
             }
             let mut ips = Vec::new();
             let mut ttl = 300u64;
-            for ty in ["A", "AAAA"] {
-                if let Ok((found, t)) = query(&http, &url, &host, ty).await {
-                    ttl = ttl.min(t.max(30));
-                    ips.extend(found);
+            let doh_down = down_until.lock().unwrap().is_some_and(|t| Instant::now() < t);
+            if !doh_down {
+                let mut answered = false;
+                for ty in ["A", "AAAA"] {
+                    if let Ok((found, t)) = query(&http, &url, &host, ty).await {
+                        answered = true;
+                        ttl = ttl.min(t.max(30));
+                        ips.extend(found);
+                    }
+                    if !ips.is_empty() {
+                        break; // IPv4 is enough; AAAA only when there is no A record.
+                    }
                 }
-                if !ips.is_empty() {
-                    break; // IPv4 is enough; AAAA only when there is no A record.
+                if !answered {
+                    *down_until.lock().unwrap() = Some(Instant::now() + Duration::from_secs(60));
                 }
             }
             if ips.is_empty() {
-                // System resolver fallback.
-                ips = (host.as_str(), 0).to_socket_addrs()?.map(|a| a.ip()).collect();
+                // System resolver fallback, off the client's runtime thread (it blocks).
+                let h = host.clone();
+                ips = tokio::task::spawn_blocking(move || (h.as_str(), 0).to_socket_addrs().map(|a| a.map(|a| a.ip()).collect::<Vec<_>>()))
+                    .await
+                    .map_err(|e| std::io::Error::other(e.to_string()))??;
             } else {
-                cache.lock().unwrap().insert(host, (ips.clone(), Instant::now() + Duration::from_secs(ttl)));
+                let now = Instant::now();
+                let mut c = cache.lock().unwrap();
+                c.retain(|_, (_, until)| *until > now);
+                c.insert(host, (ips.clone(), now + Duration::from_secs(ttl)));
             }
             Ok(addrs(ips))
         })

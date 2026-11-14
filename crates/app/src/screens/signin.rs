@@ -46,7 +46,7 @@ impl SignInScreen {
         }
         if let SignIn::Done(name) = cx.views.signin {
             self.left = true;
-            fx.push(Fx::App(YtFx::Toast(format!("Signed in as {name}"))));
+            fx.push(Fx::App(YtFx::Toast(crate::i18n::tr("Signed in as {}").replace("{}", name))));
             fx.push(Fx::Nav(NavOp::Pop));
         }
     }
@@ -137,22 +137,29 @@ impl Screen<YtHost> for SignInScreen {
         let cx = f.cx;
         super::common::logo(p, 120.0, 90.0);
         ui::text(p, "Sign in to YouTube", 120.0, 200.0, 56, ui::WHITE, ui::ALIGN_LEFT, true);
+        // Opened while signed in, before OK started a sign-in of its own: whatever state an
+        // earlier sign-in left behind ("Done", "Failed") is not this screen's.
+        if !self.started && cx.views.store.signed_in {
+            let who = cx.views.store.account.clone().filter(|a| !a.trim().is_empty());
+            let line = match who {
+                Some(who) => crate::i18n::tr("You are signed in as {}.").replace("{}", &who),
+                None => crate::i18n::tr("You are signed in.").to_string(),
+            };
+            ui::text_raw(p, &line, 120.0, 330.0, 36, ui::DIM, ui::ALIGN_LEFT, false);
+            ui::text(p, "Press OK to link another account, BACK to return.", 120.0, 400.0, 30, ui::FAINT, ui::ALIGN_LEFT, false);
+            return;
+        }
         match cx.views.signin {
-            SignIn::Idle if cx.views.store.signed_in => {
-                let who = cx.views.store.account.clone().unwrap_or_else(|| "your account".into());
-                ui::text(p, &format!("You are signed in as {who}."), 120.0, 330.0, 36, ui::DIM, ui::ALIGN_LEFT, false);
-                ui::text(p, "Press OK to link another account, BACK to return.", 120.0, 400.0, 30, ui::FAINT, ui::ALIGN_LEFT, false);
-            }
             SignIn::Idle | SignIn::Starting => {
                 ui::text(p, "Getting a code\u{2026}", 120.0, 330.0, 36, ui::DIM, ui::ALIGN_LEFT, false);
             }
             SignIn::Code { user_code, url } => {
                 ui::text(p, "1.  On your phone or computer, go to", 120.0, 320.0, 34, ui::DIM, ui::ALIGN_LEFT, false);
-                ui::text(p, &url.replace("https://", ""), 180.0, 375.0, 44, ui::WHITE, ui::ALIGN_LEFT, true);
+                ui::text_raw(p, &url.replace("https://", ""), 180.0, 375.0, 44, ui::WHITE, ui::ALIGN_LEFT, true);
                 ui::text(p, "2.  Enter this code", 120.0, 470.0, 34, ui::DIM, ui::ALIGN_LEFT, false);
                 let box_ = Rect::new(170.0, 530.0, 760.0, 150.0);
                 ui::fill(p, box_, 22.0, [1.0, 1.0, 1.0, 0.10]);
-                ui::text(p, user_code, box_.x + box_.w / 2.0, box_.y + 34.0, 72, ui::WHITE, ui::ALIGN_CENTER, true);
+                ui::text_raw(p, user_code, box_.x + box_.w / 2.0, box_.y + 34.0, 72, ui::WHITE, ui::ALIGN_CENTER, true);
                 ui::text(p, "Or scan the code with your phone \u{2192}", 120.0, 740.0, 30, ui::FAINT, ui::ALIGN_LEFT, false);
                 ui::text(p, "Waiting for you to approve\u{2026}", 120.0, 800.0, 30, ui::FAINT, ui::ALIGN_LEFT, false);
                 if let Some((_, qr)) = &self.qr {
@@ -161,11 +168,11 @@ impl Screen<YtHost> for SignInScreen {
                 }
             }
             SignIn::Done(name) => {
-                ui::text(p, &format!("Signed in as {name}."), 120.0, 330.0, 40, ui::WHITE, ui::ALIGN_LEFT, false);
+                ui::text_raw(p, &crate::i18n::tr("Signed in as {}.").replace("{}", name), 120.0, 330.0, 40, ui::WHITE, ui::ALIGN_LEFT, false);
             }
             SignIn::Failed(e) => {
                 ui::text(p, "Sign-in didn't work.", 120.0, 330.0, 40, ui::WHITE, ui::ALIGN_LEFT, false);
-                ui::text(p, &ui::ellipsize(e, 90), 120.0, 395.0, 28, ui::FAINT, ui::ALIGN_LEFT, false);
+                ui::text_raw(p, &f.measure.fit_line(e, 1680.0, 28, false).to_string_lossy(), 120.0, 395.0, 28, ui::FAINT, ui::ALIGN_LEFT, false);
                 ui::text(p, "Press OK to try again.", 120.0, 460.0, 30, ui::DIM, ui::ALIGN_LEFT, false);
             }
         }

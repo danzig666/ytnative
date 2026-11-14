@@ -215,6 +215,8 @@ impl BrowseScreen {
         self.cols = ui::card_cols();
         self.stack = Stack::new(self.entry).clipped(Rect::new(0.0, 0.0, 1920.0, 1080.0));
         self.rows = Rows { key: self.key() };
+        // The card focus was on belongs to the section left behind.
+        self.content_last.set(0);
         if cx.views.store.feed(&self.key()).is_none() {
             fx.push(Fx::App(YtFx::Load(self.key())));
         }
@@ -508,9 +510,12 @@ impl Focusable<YtHost> for BrowseScreen {
     }
     fn reconcile(&self, want: FocusKey<u32>, cx: &Cx<'_, YtHost>) -> FocusKey<u32> {
         let items = nav_items(cx);
-        if let Some(e) = self.focus_req.take() {
-            return FocusKey { entry: self.entry, elem: e };
-        }
+        // A focus the screen asked for, when it is still there (the card a closed sidebar returns
+        // to may belong to a section switched away from meanwhile: then the usual rules apply).
+        let want = match self.focus_req.take() {
+            Some(e) => FocusKey { entry: self.entry, elem: e },
+            None => want,
+        };
         // Focus on the sidebar without it being asked for (start-up, before the content loaded):
         // move to the content once it is there. The sidebar opens only on request.
         if want.elem >= NAV_BASE && !self.nav_open.get() {
@@ -630,19 +635,19 @@ impl Screen<YtHost> for BrowseScreen {
                 match i {
                     NavItem::Section(s) => Row::new(s.title()).active(*s == self.section).icon(section_icon(*s)),
                     NavItem::Search => Row::new("Search").icon(K::Search),
-                    NavItem::Pinned(t, ..) => Row::new(ui::ellipsize(t, 16)).icon(K::Star),
-                    NavItem::Group(_, t) => Row::new(ui::ellipsize(t, 16)).icon(K::Folder),
+                    NavItem::Pinned(t, ..) => Row::new(t.clone()).icon(K::Star).raw(),
+                    NavItem::Group(_, t) => Row::new(t.clone()).icon(K::Folder).raw(),
                     NavItem::Settings => Row::new("Settings").icon(K::Gear),
-                    NavItem::Account => Row::new(match (&cx.views.store.account, cx.views.store.signed_in) {
-                        (Some(a), true) if !a.trim().is_empty() => ui::ellipsize(a, 16),
-                        (_, true) => "Account".into(),
-                        _ => "Sign in".into(),
-                    })
+                    NavItem::Account => match (&cx.views.store.account, cx.views.store.signed_in) {
+                        (Some(a), true) if !a.trim().is_empty() => Row::new(a.clone()).raw(),
+                        (_, true) => Row::new("Account"),
+                        _ => Row::new("Sign in"),
+                    }
                     .icon(K::User),
                 }
             })
             .collect();
-        self.nav.draw(p, &rows, self.nav.focused(cx, items.len()));
+        self.nav.draw(p, f.measure, &rows, self.nav.focused(cx, items.len()));
         if t > 0.9 {
             self.nav.stops(f, items.len());
         }

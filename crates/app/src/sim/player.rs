@@ -43,13 +43,16 @@ impl Player {
         let max_h = prefs.max_height;
         let spawned = plx_base::task::spawn("play", move || {
             let r = crate::host::with_session(&session, |s| s.resolve(&video_id));
-            if generation.load(Ordering::SeqCst) != gen {
-                return;
-            }
             match r {
                 Ok(resolved) => {
                     {
+                        // The generation is checked under the status lock: `start`/`stop` write
+                        // the status under it too, so a newer session cannot slip in between the
+                        // check and the writes.
                         let mut s = status.lock().unwrap();
+                        if generation.load(Ordering::SeqCst) != gen {
+                            return;
+                        }
                         s.title = resolved.title.clone();
                         s.author = resolved.author.clone();
                         s.duration_ms = resolved.length_secs * 1000;
@@ -68,11 +71,17 @@ impl Player {
                     plx_machine::present::wake_from_worker();
                     let (st2, g2) = (status.clone(), generation.clone());
                     let _ = plx_base::task::spawn("simclock", move || clock(&st2, &g2, gen));
-                    load_extras(&video_id, &session, &status, &extras);
+                    // The extras would land in a newer session's status.
+                    if generation.load(Ordering::SeqCst) == gen {
+                        load_extras(&video_id, &session, &status, &extras);
+                    }
                 }
                 Err(e) => {
                     crate::log(&format!("sim player: {e:#}"));
-                    status.lock().unwrap().phase = Phase::Failed(format!("{e:#}"));
+                    let mut s = status.lock().unwrap();
+                    if generation.load(Ordering::SeqCst) == gen {
+                        s.phase = Phase::Failed(format!("{e:#}"));
+                    }
                 }
             }
             plx_machine::present::wake_from_worker();

@@ -2,7 +2,7 @@
 //! `trak`, `mvex/trex`), `sidx`, then `moof`+`mdat` pairs. Incremental: top-level boxes are parsed
 //! once complete; a `moof` waits for its `mdat`.
 
-use super::{scale, AccessUnit, Codec, Color, Demuxer, Kind, Rd, SegmentRef, TrackInfo};
+use super::{scale, AccessUnit, MAX_ELEMENT, Codec, Color, Demuxer, Kind, Rd, SegmentRef, TrackInfo};
 use anyhow::{bail, Result};
 use std::collections::VecDeque;
 
@@ -49,6 +49,8 @@ pub struct Mp4Demuxer {
     duration_ns: Option<i64>,
     /// Bytes of an uninteresting box still to discard (lets huge boxes pass without buffering).
     skip: u64,
+    /// Inside an `mdat` of size 0 ("to the end of the file"): every further byte belongs to it.
+    open_mdat: bool,
 }
 
 impl Default for Mp4Demuxer {
@@ -69,7 +71,14 @@ impl Mp4Demuxer {
             out: VecDeque::new(),
             duration_ns: None,
             skip: 0,
+            open_mdat: false,
         }
+    }
+
+    /// Bytes currently buffered (tests check that nothing grows without bound).
+    #[cfg(test)]
+    pub(crate) fn buffered(&self) -> usize {
+        self.buf.len()
     }
 
     fn parse(&mut self) -> Result<()> {
@@ -83,16 +92,32 @@ impl Mp4Demuxer {
                     return Ok(());
                 }
             }
+            if self.open_mdat {
+                // Hand out the samples that are complete, then keep only the bytes that pending
+                // samples still need (the buffer would otherwise hold the rest of the stream).
+                let len = self.buf.len() as u64;
+                if !self.pending.is_empty() {
+                    self.extract(len, true)?;
+                }
+                let keep_from = self.pending.iter().map(|s| s.offset.saturating_sub(self.pos)).min().unwrap_or(len).min(len);
+                self.buf.drain(..keep_from as usize);
+                self.pos += keep_from;
+                return Ok(());
+            }
             let Some((ty, hdr, size)) = box_header(&self.buf) else { return Ok(()) };
             let size = match size {
                 Some(s) => s,
-                // size 0 = "to the end of the file": only sensible for a trailing mdat.
+                // Size 0 means "to the end of the file", which is only sensible for a trailing
+                // mdat. Any other such box is discarded together with everything after it.
                 None => {
-                    if &ty == b"mdat" && !self.pending.is_empty() {
-                        let len = self.buf.len() as u64;
-                        self.extract(len, true)?;
+                    self.buf.drain(..hdr);
+                    self.pos += hdr as u64;
+                    if &ty == b"mdat" {
+                        self.open_mdat = true;
+                    } else {
+                        self.skip = u64::MAX;
                     }
-                    return Ok(());
+                    continue;
                 }
             };
             if size < hdr as u64 {
@@ -102,7 +127,18 @@ impl Mp4Demuxer {
                 self.pending.clear();
                 bail!("mp4: box {} has bad size {size}", String::from_utf8_lossy(&ty));
             }
-            let interesting = matches!(&ty, b"moov" | b"moof" | b"sidx" | b"mdat");
+            // An mdat without pending samples holds nothing we can use: skip it unbuffered.
+            let interesting = match &ty {
+                b"moov" | b"moof" | b"sidx" => true,
+                b"mdat" => !self.pending.is_empty(),
+                _ => false,
+            };
+            if interesting && size > MAX_ELEMENT {
+                // Waiting for such a box would buffer without bound: the stream is corrupt.
+                self.buf.clear();
+                self.pending.clear();
+                bail!("mp4: box {} of {size} bytes is too large", String::from_utf8_lossy(&ty));
+            }
             if !interesting {
                 self.skip = size;
                 continue;
@@ -146,7 +182,8 @@ impl Mp4Demuxer {
                 // feed garbage.
                 continue;
             }
-            let t = &self.traks[s.track];
+            // A moov parsed after this sample's moof may have fewer tracks.
+            let Some(t) = self.traks.get(s.track) else { continue };
             let at = (s.offset - self.pos) as usize;
             let data = self.buf[at..at + s.size as usize].to_vec();
             // YouTube's fragments flag mid-fragment IDRs as non-sync samples (seen in SABR
@@ -156,12 +193,12 @@ impl Mp4Demuxer {
                 None => s.key,
             };
             let ts = t.timescale as i64;
-            let pts = s.dts + s.cts - t.edit_offset;
+            let pts = s.dts.saturating_add(s.cts).saturating_sub(t.edit_offset);
             self.out.push_back(AccessUnit {
                 track: t.info.id,
                 kind: t.info.kind,
                 pts_ns: scale(pts, 1_000_000_000, ts),
-                dts_ns: scale(s.dts - t.edit_offset, 1_000_000_000, ts),
+                dts_ns: scale(s.dts.saturating_sub(t.edit_offset), 1_000_000_000, ts),
                 duration_ns: scale(s.duration as i64, 1_000_000_000, ts),
                 keyframe: key,
                 data,
@@ -222,6 +259,8 @@ impl Mp4Demuxer {
         }
         self.infos = traks.iter().map(|t| t.info.clone()).collect();
         self.traks = traks;
+        // Pending samples refer to the old track list by index.
+        self.pending.clear();
         if mvhd_dur.is_some() {
             self.duration_ns = mvhd_dur;
         }
@@ -302,9 +341,13 @@ impl Mp4Demuxer {
                     let non_sync = sflags & 0x1_0000 != 0;
                     let depends = (sflags >> 24) & 0x3;
                     let key = audio || (!non_sync && depends != 1);
-                    self.pending.push(PendingSample { track: ti, offset: cursor, size, dts, cts, duration: dur, key });
+                    // A sample larger than any real frame is corrupt; waiting for its bytes in a
+                    // size-0 mdat would buffer without bound.
+                    if size as u64 <= MAX_ELEMENT {
+                        self.pending.push(PendingSample { track: ti, offset: cursor, size, dts, cts, duration: dur, key });
+                    }
                     cursor = cursor.saturating_add(size as u64);
-                    dts += dur as i64;
+                    dts = dts.saturating_add(dur as i64);
                 }
             }
         }
@@ -331,6 +374,7 @@ impl Demuxer for Mp4Demuxer {
         self.pending.clear();
         self.out.clear();
         self.skip = 0;
+        self.open_mdat = false;
         self.pos = offset;
     }
     fn duration_ns(&self) -> Option<i64> {
@@ -364,7 +408,11 @@ fn box_header(b: &[u8]) -> Option<([u8; 4], usize, Option<u64>)> {
 pub(crate) fn boxes(mut b: &[u8]) -> impl Iterator<Item = ([u8; 4], &[u8])> {
     std::iter::from_fn(move || {
         let (ty, hdr, size) = box_header(b)?;
-        let size = size.map(|s| s as usize).unwrap_or(b.len());
+        // A 64-bit size that does not fit usize (32-bit targets) cannot fit the slice either.
+        let size = match size {
+            Some(s) => usize::try_from(s).ok()?,
+            None => b.len(),
+        };
         if size < hdr || size > b.len() {
             return None;
         }
@@ -394,8 +442,8 @@ pub fn parse_sidx(b: &[u8], end: u64) -> Result<Vec<SegmentRef>> {
     r.skip(2);
     let n = r.u16().unwrap_or(0);
     let mut out = Vec::with_capacity(n as usize);
-    let mut off = end + first;
-    let mut t = ept as i64;
+    let Some(mut off) = end.checked_add(first) else { bail!("mp4: sidx first_offset {first} overflows") };
+    let Ok(mut t) = i64::try_from(ept) else { bail!("mp4: sidx earliest_presentation_time {ept} out of range") };
     for _ in 0..n {
         let (Some(a), Some(dur), Some(_sap)) = (r.u32(), r.u32(), r.u32()) else { bail!("mp4: truncated sidx") };
         let size = (a & 0x7fff_ffff) as u64;
@@ -405,8 +453,8 @@ pub fn parse_sidx(b: &[u8], end: u64) -> Result<Vec<SegmentRef>> {
             offset: off,
             size,
         });
-        off += size;
-        t += dur as i64;
+        off = off.saturating_add(size);
+        t = t.saturating_add(dur as i64);
     }
     Ok(out)
 }

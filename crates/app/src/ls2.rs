@@ -69,6 +69,8 @@ unsafe extern "C" fn on_reply(_sh: *mut c_void, msg: *mut c_void, ctx: *mut c_vo
     match &mut *(ctx as *mut Ctx) {
         Ctx::Once(tx) => {
             let _ = tx.send(s);
+            // A one-reply call gets exactly this one callback: its context is done.
+            drop(Box::from_raw(ctx as *mut Ctx));
         }
         Ctx::Sub(f) => f(&s),
     }
@@ -147,7 +149,8 @@ impl Luna {
     /// One-reply call, blocking up to 8 s.
     pub fn call(&self, uri: &str, payload: &str) -> String {
         let (tx, rx) = mpsc::channel();
-        let ctx = Box::into_raw(Box::new(Ctx::Once(tx))) as *mut c_void; // leaked if no reply: fine for a PoC
+        // Freed by `on_reply` (or below when the call is refused); leaked only if no reply ever comes.
+        let ctx = Box::into_raw(Box::new(Ctx::Once(tx))) as *mut c_void;
         let (u, p) = (CString::new(uri).unwrap(), CString::new(payload).unwrap());
         unsafe {
             let mut err: LSError = std::mem::zeroed();
@@ -155,6 +158,8 @@ impl Luna {
             let mut tok: libc::c_ulong = 0;
             if !(self.api.call_one)(self.handle, u.as_ptr(), p.as_ptr(), on_reply, ctx, &mut tok, &mut err) {
                 let m = if err.message.is_null() { "?".into() } else { CStr::from_ptr(err.message).to_string_lossy().into_owned() };
+                (self.api.error_free)(&mut err);
+                drop(Box::from_raw(ctx as *mut Ctx));
                 return format!("<LSCallOneReply failed: {m}>");
             }
         }

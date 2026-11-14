@@ -60,8 +60,9 @@ fn best_of(adaptive: &[Value], codec: VideoCodec, r: &Request) -> Option<Value> 
         .filter(|f| video_codec(f) == Some(codec))
         .filter(|f| !r.need_url || f["url"].is_string())
         .filter(|f| r.allow_hdr || !is_hdr(f))
-        .filter(|f| n(f, "height") <= cap)
-        .max_by_key(|f| (n(f, "height"), n(f, "fps"), r.allow_hdr && is_hdr(f), n(f, "bitrate")))
+        // The short side is the rung (a vertical 1080p video is 1080x1920).
+        .filter(|f| crate::mpd::rung(f) <= cap)
+        .max_by_key(|f| (crate::mpd::rung(f), n(f, "fps"), r.allow_hdr && is_hdr(f), n(f, "bitrate")))
         .cloned()
 }
 
@@ -90,7 +91,7 @@ pub fn choose(adaptive: &[Value], r: Request) -> Option<Choice> {
     let mut best: Option<((u64, u8), Value, VideoCodec)> = None;
     for c in &order {
         if let Some(f) = best_of(adaptive, *c, &r) {
-            let rank = (n(&f, "height"), hdr_rank(&f, *c));
+            let rank = (crate::mpd::rung(&f), hdr_rank(&f, *c));
             if best.as_ref().map_or(true, |(br, _, _)| rank > *br) {
                 best = Some((rank, f, *c));
             }

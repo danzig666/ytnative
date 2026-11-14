@@ -603,14 +603,39 @@ impl Settings {
 
     fn from_json(raw: Option<serde_json::Value>) -> Settings {
         let Some(v) = raw else { return Settings::default() };
-        let mut s: Settings = serde_json::from_value(v.clone()).unwrap_or_default();
+        let mut s: Settings = serde_json::from_value(v.clone()).unwrap_or_else(|_| Self::lenient(&v));
         s.migrate(&v);
         s
+    }
+
+    /// A file with a value this build cannot read (an option of a newer version, a hand edit):
+    /// keep every other saved choice instead of starting over (which the next save would make
+    /// permanent). Each field is taken over only if it still reads.
+    fn lenient(v: &serde_json::Value) -> Settings {
+        let Some(obj) = v.as_object() else { return Settings::default() };
+        let Ok(serde_json::Value::Object(mut merged)) = serde_json::to_value(Settings::default()) else { return Settings::default() };
+        for (k, val) in obj {
+            let before = merged.insert(k.clone(), val.clone());
+            if serde_json::from_value::<Settings>(serde_json::Value::Object(merged.clone())).is_err() {
+                crate::log(&format!("settings: unreadable value for {k:?} ignored"));
+                match before {
+                    Some(b) => merged.insert(k.clone(), b),
+                    None => merged.remove(k),
+                };
+            }
+        }
+        serde_json::from_value(serde_json::Value::Object(merged)).unwrap_or_default()
     }
 
     /// Carries older single options over to the ones that replaced them.
     fn migrate(&mut self, v: &serde_json::Value) {
         let has = |k: &str| v.get(k).is_some();
+        // Settings saved before the TV's capabilities were read: the playback choices in them may
+        // be the viewer's own (1080p, H.264, the system player look the same as the old defaults),
+        // so only a first start (no settings yet) is set from the TV.
+        if !has("device_checked") {
+            self.device_checked = true;
+        }
         if !has("playback_mode") {
             self.playback_mode = match v["repeat"].as_str() {
                 Some("Off") => PlaybackMode::PauseEach,
@@ -676,5 +701,24 @@ mod tests {
         assert_eq!(s.controls_time, ControlsTime::Off);
         let s = Settings::from_json(Some(serde_json::json!({"playback_mode": "Shuffle", "repeat": "One"})));
         assert_eq!(s.playback_mode, PlaybackMode::Shuffle);
+    }
+
+    #[test]
+    fn saved_settings_keep_their_playback_choices() {
+        // Saved before the TV's capabilities were read: not a first start.
+        assert!(Settings::from_json(Some(serde_json::json!({"codec": "Avc"}))).device_checked);
+        assert!(!Settings::from_json(Some(serde_json::json!({"device_checked": false}))).device_checked);
+        assert!(!Settings::from_json(None).device_checked);
+    }
+
+    #[test]
+    fn one_unreadable_value_keeps_the_others() {
+        let s = Settings::from_json(Some(serde_json::json!({
+            "max_height": 2160, "player_style": "SomeFutureStyle", "color_keys": ["none"], "device_checked": true
+        })));
+        assert_eq!(s.max_height, 2160);
+        assert!(s.device_checked);
+        assert_eq!(s.player_style, PlayerStyle::SmartTube);
+        assert_eq!(s.color_keys[1], "subtitles");
     }
 }

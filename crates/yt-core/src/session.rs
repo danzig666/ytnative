@@ -137,7 +137,9 @@ impl Session {
         // JSONP-ish: window.google.ac.h(["q",[["s1",0,[..]],...],...])
         let start = txt.find('[').unwrap_or(0);
         let end = txt.rfind(']').map(|e| e + 1).unwrap_or(txt.len());
-        let v: Value = serde_json::from_str(&txt[start..end]).unwrap_or(Value::Null);
+        // `get` instead of slicing: an answer whose last ']' comes before its first '[' is not a
+        // reason to panic.
+        let v: Value = txt.get(start..end).and_then(|s| serde_json::from_str(s).ok()).unwrap_or(Value::Null);
         Ok(v[1].as_array().map(|a| a.iter().filter_map(|s| s[0].as_str().map(str::to_string)).collect()).unwrap_or_default())
     }
 }

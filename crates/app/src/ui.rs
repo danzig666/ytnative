@@ -133,21 +133,21 @@ pub fn draw_focused_caption(p: Painter, m: &dyn plx_machine::machine::Measure, _
     let (l1, l2, d) = caption_lines(m, &title, &detail, w0);
     match &l2 {
         Some(l2) if l2.ends_with('\u{2026}') => {
-            text(p, &l1, ix, iy, SIZE, PANEL_FOCUS_INK, ALIGN_LEFT, true);
+            text_raw(p, &l1, ix, iy, SIZE, PANEL_FOCUS_INK, ALIGN_LEFT, true);
             let rest = title.get(l1.len()..).unwrap_or("").trim_start();
             marquee(p, m, rest, Some(l2), ix, iy + 31.0, w, SIZE);
         }
         Some(l2) => {
-            text(p, &l1, ix, iy, SIZE, PANEL_FOCUS_INK, ALIGN_LEFT, true);
-            text(p, l2, ix, iy + 31.0, SIZE, PANEL_FOCUS_INK, ALIGN_LEFT, true);
+            text_raw(p, &l1, ix, iy, SIZE, PANEL_FOCUS_INK, ALIGN_LEFT, true);
+            text_raw(p, l2, ix, iy + 31.0, SIZE, PANEL_FOCUS_INK, ALIGN_LEFT, true);
         }
         None if l1 != title => marquee(p, m, &title, Some(&l1), ix, iy, w, SIZE),
         None => {
-            text(p, &l1, ix, iy, SIZE, PANEL_FOCUS_INK, ALIGN_LEFT, true);
+            text_raw(p, &l1, ix, iy, SIZE, PANEL_FOCUS_INK, ALIGN_LEFT, true);
         }
     }
     if !d.is_empty() {
-        text(p, &d, ix, iy + 67.0, 20, PANEL_FOCUS_DIM, ALIGN_LEFT, false);
+        text_raw(p, &d, ix, iy + 67.0, 20, PANEL_FOCUS_DIM, ALIGN_LEFT, false);
     }
 }
 
@@ -170,14 +170,14 @@ fn marquee(p: Painter, m: &dyn plx_machine::machine::Measure, title: &str, still
         let off = ((t % cycle - HOLD) * SPEED).clamp(0.0, dist);
         if off <= 0.0 {
             if let Some(still) = still {
-                text(p, still, ix, iy, size, PANEL_FOCUS_INK, ALIGN_LEFT, true);
+                text_raw(p, still, ix, iy, size, PANEL_FOCUS_INK, ALIGN_LEFT, true);
                 animating();
                 return;
             }
         }
         {
             let _scope = plx_ui::screen::ClipScope::open_in(p, Rect::new(ix, iy - 4.0, w, 40.0));
-            text(p, title, ix - off, iy, size, PANEL_FOCUS_INK, ALIGN_LEFT, true);
+            text_raw(p, title, ix - off, iy, size, PANEL_FOCUS_INK, ALIGN_LEFT, true);
         }
         animating();
     }
@@ -391,7 +391,74 @@ pub fn text(p: Painter, s: &str, x: f32, y: f32, size: i32, col: [f32; 4], align
     p.text(c.as_ptr(), x, y, size, col, align, bold as i32)
 }
 
-/// Truncates to roughly `max` characters with an ellipsis (cheap, measure-free).
+/// [`text`] without the translation lookup: for server and user content (titles, channel names,
+/// comments, captions, queries), which must be shown as it came even when it happens to equal one
+/// of the interface's strings.
+pub fn text_raw(p: Painter, s: &str, x: f32, y: f32, size: i32, col: [f32; 4], align: i32, bold: bool) -> f32 {
+    let col = dimmed(col);
+    let Ok(c) = CString::new(s.replace('\0', "")) else { return 0.0 };
+    p.text(c.as_ptr(), x, y, size, col, align, bold as i32)
+}
+
+/// `s` word-wrapped into at most `max` lines of `w` px (the last one ellipsised; a word wider
+/// than a line is cut).
+pub fn wrap_lines(m: &dyn plx_machine::machine::Measure, s: &str, w: f32, size: i32, bold: bool, max: usize) -> Vec<String> {
+    let width = |t: &str| CString::new(t).map_or(0.0, |c| m.width(&c, size, bold));
+    let mut lines: Vec<String> = Vec::new();
+    let mut rest = s.trim();
+    while !rest.is_empty() && lines.len() < max {
+        if lines.len() + 1 == max || width(rest) <= w {
+            lines.push(m.fit_line(rest, w, size, bold).to_string_lossy().into_owned());
+            break;
+        }
+        let mut line = String::new();
+        let mut used = 0;
+        for word in rest.split_inclusive(' ') {
+            let trial = format!("{line}{word}");
+            if !line.is_empty() && width(trial.trim_end()) > w {
+                break;
+            }
+            line = trial;
+            used += word.len();
+        }
+        if line.trim().is_empty() || width(line.trim_end()) > w {
+            // One word wider than the line: as much of it as fits, then the rest on the next.
+            let cut = m.fit_line(rest, w, size, bold).to_string_lossy().into_owned();
+            let keep = cut.trim_end_matches('\u{2026}');
+            let n = keep.len().min(rest.len());
+            if n == 0 || !rest.starts_with(keep) {
+                lines.push(cut);
+                break;
+            }
+            lines.push(keep.to_string());
+            rest = rest[n..].trim_start();
+            continue;
+        }
+        lines.push(line.trim_end().to_string());
+        rest = rest[used..].trim_start();
+    }
+    lines
+}
+
+/// A whole number written out in the interface language's digit grouping ("1,234,567" in
+/// English, "1 234 567" in Hungarian): counts are never shortened to "1.2K".
+pub fn full_count(n: u64) -> String {
+    let sep = match crate::i18n::current() {
+        "de" | "es" => ".",
+        "hu" | "fr" | "ru" => "\u{202F}",
+        _ => ",",
+    };
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push_str(sep);
+        }
+        out.push(ch);
+    }
+    out
+}
+
 /// [`text`] in an extra face (1..=8, the subtitle fonts: 1-4 bold, 5-8 regular).
 pub fn text_face(p: Painter, s: &str, x: f32, y: f32, size: i32, col: [f32; 4], align: i32, face: i32) -> f32 {
     let col = dimmed(col);
@@ -399,6 +466,7 @@ pub fn text_face(p: Painter, s: &str, x: f32, y: f32, size: i32, col: [f32; 4], 
     p.text(c.as_ptr(), x, y, size, col, align, (face.clamp(0, 8) << 4) | (face <= 4) as i32)
 }
 
+/// Truncates to roughly `max` characters with an ellipsis (cheap, measure-free).
 pub fn ellipsize(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
@@ -487,12 +555,12 @@ impl CardSource<YtHost> for CardsSrc<'_> {
             // (the page is drawn several times a frame, and a scroll draws every frame).
             let (l1, l2, d) = caption_lines(m, &c.title, &c.detail, w0);
             let ink = [1.0, 1.0, 1.0, 0.92];
-            text(p, &l1, x, y, 24, ink, ALIGN_LEFT, true);
+            text_raw(p, &l1, x, y, 24, ink, ALIGN_LEFT, true);
             if let Some(l2) = &l2 {
-                text(p, l2, x, y + 31.0, 24, ink, ALIGN_LEFT, true);
+                text_raw(p, l2, x, y + 31.0, 24, ink, ALIGN_LEFT, true);
             }
             if !d.is_empty() {
-                text(p, &d, x, y + 67.0, 20, DIM, ALIGN_LEFT, false);
+                text_raw(p, &d, x, y + 67.0, 20, DIM, ALIGN_LEFT, false);
             }
         }
         self.badge(p, i, tile);
@@ -545,10 +613,15 @@ impl CardsSrc<'_> {
             let r = tile.rect;
             let label = crate::i18n::tr("Members only");
             let w = 13.5 * label.chars().count() as f32 + 62.0;
-            let pill = Rect::new(r.x + 10.0, r.y + r.h - 44.0, w, 34.0);
+            // A small card (or a long translation) leaves room for the star alone, clear of the
+            // duration badge in the other corner.
+            let words = w <= r.w * 0.6;
+            let pill = Rect::new(r.x + 10.0, r.y + r.h - 44.0, if words { w } else { 40.0 }, 34.0);
             fill(p, pill, 6.0, [0.0, 0.0, 0.0, 0.78]);
             icon::draw(p, icon::Kind::Star, Rect::new(pill.x + 8.0, pill.y + 5.0, 24.0, 24.0), [1.0, 0.82, 0.25, 1.0], true);
-            text(p, &label, pill.x + 38.0, pill.y + 4.0, 22, WHITE, ALIGN_LEFT, true);
+            if words {
+                text(p, &label, pill.x + 38.0, pill.y + 4.0, 22, WHITE, ALIGN_LEFT, true);
+            }
         }
     }
 }
@@ -579,6 +652,8 @@ pub struct Row {
     pub active: bool,
     /// An icon before the label (the sidebar).
     pub icon: Option<icon::Kind>,
+    /// Label and value are drawn as given (server / user content, or already translated).
+    pub raw: bool,
 }
 
 impl Row {
@@ -595,6 +670,11 @@ impl Row {
     }
     pub fn icon(mut self, k: icon::Kind) -> Row {
         self.icon = Some(k);
+        self
+    }
+    /// Not looked up in the translations (see [`Row::raw`]).
+    pub fn raw(mut self) -> Row {
+        self.raw = true;
         self
     }
 }
@@ -677,7 +757,8 @@ impl VList {
         }
     }
 
-    pub fn draw(&self, p: Painter, rows: &[Row], focus: Option<usize>) {
+    /// Draws the visible rows; a label (and value) too long for its row is ellipsised to fit.
+    pub fn draw(&self, p: Painter, m: &dyn plx_machine::machine::Measure, rows: &[Row], focus: Option<usize>) {
         let top = self.top_for(focus, rows.len());
         let vis = self.rows_visible();
         for (i, row) in rows.iter().enumerate().skip(top).take(vis) {
@@ -697,10 +778,20 @@ impl VList {
                 icon::draw(p, k, Rect::new(lx, r.y + (r.h - s) / 2.0, s, s), col, false);
                 lx += s + 20.0;
             }
-            text(p, &row.label, lx, ty, self.text_size, col, ALIGN_LEFT, focused || row.active);
+            let bold = focused || row.active;
+            let tr = |s: &str| if row.raw { s.to_string() } else { crate::i18n::tr(s).to_string() };
+            let right = r.x + r.w - 24.0;
+            // The value keeps its natural width up to half the row; the label takes what is left.
+            let mut vw = 0.0;
             if let Some(v) = &row.value {
-                text(p, v, r.x + r.w - 24.0, ty, self.text_size, if focused { WHITE } else { DIM }, ALIGN_RIGHT, false);
+                let v = tr(v);
+                let (run, w) = m.fit_line_measured(&v, (r.w - 56.0) / 2.0, self.text_size, false);
+                vw = w;
+                text_raw(p, &run.to_string_lossy(), right, ty, self.text_size, if focused { WHITE } else { DIM }, ALIGN_RIGHT, false);
             }
+            let room = (right - lx - if vw > 0.0 { vw + 24.0 } else { 0.0 }).max(40.0);
+            let label = m.fit_line(&tr(&row.label), room, self.text_size, bold);
+            text_raw(p, &label.to_string_lossy(), lx, ty, self.text_size, col, ALIGN_LEFT, bold);
         }
         if top > 0 {
             text(p, "\u{25B2}", self.rect.x + self.rect.w / 2.0, self.rect.y - 34.0, 22, FAINT, ALIGN_CENTER, false);
@@ -720,6 +811,8 @@ pub struct ChoiceBox {
     pub options: Vec<String>,
     pub current: usize,
     pub list: VList,
+    /// The values are content (audio track names): shown as given, not translated.
+    pub raw: bool,
 }
 
 pub const CHOICE_BASE: u32 = 0x7f00_0000;
@@ -740,7 +833,13 @@ impl ChoiceBox {
             options,
             current,
             list: VList { entry, group: CHOICE_GROUP, base: CHOICE_BASE, rect: Rect::new(x + 8.0, y + 8.0, w - 16.0, h - 16.0), row_h: ROW_H, text_size: 26 },
+            raw: false,
         }
+    }
+    /// Values shown as given (see [`ChoiceBox::raw`]).
+    pub fn raw(mut self, on: bool) -> ChoiceBox {
+        self.raw = on;
+        self
     }
     pub fn owns(&self, e: u32) -> bool {
         self.list.index(e, self.options.len()).is_some()
@@ -753,9 +852,12 @@ impl ChoiceBox {
             .options
             .iter()
             .enumerate()
-            .map(|(i, o)| Row::new(crate::i18n::tr(o).to_string()).value(if i == self.current { "\u{2713}" } else { "" }).active(i == self.current))
+            .map(|(i, o)| {
+                let label = if self.raw { o.clone() } else { crate::i18n::tr(o).to_string() };
+                Row::new(label).value(if i == self.current { "\u{2713}" } else { "" }).active(i == self.current).raw()
+            })
             .collect();
-        self.list.draw(p, &rows, self.list.focused(f.cx, rows.len()));
+        self.list.draw(p, f.measure, &rows, self.list.focused(f.cx, rows.len()));
         self.list.stops(f, rows.len());
     }
 }

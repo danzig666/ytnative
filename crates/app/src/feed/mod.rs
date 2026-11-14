@@ -225,8 +225,9 @@ impl FeedPlayer {
         if !self.active() {
             return false;
         }
+        let rate = rate.clamp(0.25, 2.0);
         self.status.lock().unwrap().rate = rate;
-        self.send(Cmd::Rate(rate.clamp(0.25, 2.0)));
+        self.send(Cmd::Rate(rate));
         true
     }
 

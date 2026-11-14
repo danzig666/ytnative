@@ -128,9 +128,9 @@ impl Screen<YtHost> for ChaptersScreen {
         let rows: Vec<Row> = ch
             .iter()
             .enumerate()
-            .map(|(i, (t, ms))| Row::new(ui::ellipsize(t, 30)).value(ui::fmt_time(*ms)).active(i == cur))
+            .map(|(i, (t, ms))| Row::new(t.clone()).value(ui::fmt_time(*ms)).active(i == cur).raw())
             .collect();
-        self.list.draw(p, &rows, self.list.focused(cx, rows.len()));
+        self.list.draw(p, f.measure, &rows, self.list.focused(cx, rows.len()));
         self.list.stops(f, rows.len());
     }
     fn render(&self) -> RenderStrategy {

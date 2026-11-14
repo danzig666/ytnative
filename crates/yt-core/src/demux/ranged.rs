@@ -85,6 +85,19 @@ fn fetch_once(http: &reqwest::blocking::Client, url: &str, user_agent: &str, sta
     Ok(out)
 }
 
+/// The error of a segment fetch given up by its `abort` check (see
+/// [`RangedTrack::fetch_segment_abortable`]); not a network failure.
+#[derive(Debug)]
+pub struct Aborted;
+
+impl std::fmt::Display for Aborted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("segment fetch aborted")
+    }
+}
+
+impl std::error::Error for Aborted {}
+
 /// One direct-URL format, opened: tracks + segment index known.
 pub struct RangedTrack {
     pub url: String,
@@ -159,8 +172,24 @@ impl RangedTrack {
         Ok(out)
     }
 
+    /// Like [`fetch_segment`](Self::fetch_segment), but gives up with [`Aborted`] as soon as
+    /// `abort` returns true between two ranges (a stop or a seek), instead of downloading the
+    /// rest of a segment nobody wants any more.
+    pub fn fetch_segment_abortable(&mut self, i: usize, abort: &dyn Fn() -> bool) -> Result<Vec<AccessUnit>> {
+        let mut out = Vec::new();
+        self.fetch_segment_inner(i, abort, &mut |au| {
+            out.push(au);
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
     /// Like [`fetch_segment`](Self::fetch_segment), handing units over as each range arrives.
     pub fn fetch_segment_with(&mut self, i: usize, sink: &mut dyn FnMut(AccessUnit) -> Result<()>) -> Result<()> {
+        self.fetch_segment_inner(i, &|| false, sink)
+    }
+
+    fn fetch_segment_inner(&mut self, i: usize, abort: &dyn Fn() -> bool, sink: &mut dyn FnMut(AccessUnit) -> Result<()>) -> Result<()> {
         let s = *self.segments.get(i).context("segment index out of range")?;
         if s.size == 0 {
             bail!("segment {i} has unknown size");
@@ -169,6 +198,9 @@ impl RangedTrack {
         let (http, url, ua) = (self.http.clone(), self.url.clone(), self.user_agent.clone());
         let demux = &mut self.demux;
         fetch_range_with(&http, &url, &ua, s.offset, s.offset + s.size - 1, &mut |d| {
+            if abort() {
+                return Err(Aborted.into());
+            }
             demux.push(d)?;
             while let Some(au) = demux.pop() {
                 sink(au)?;

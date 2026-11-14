@@ -298,8 +298,9 @@ pub fn parse_watch(resp: &Value) -> WatchInfo {
     w.suggestions_continuation = page.continuation.or_else(|| first_token(pivot));
 
     // --- autoplay ---
-    let current = r["currentVideoEndpoint"]["watchEndpoint"]["videoId"].as_str().unwrap_or("");
-    w.autoplay_next = autoplay_next(&r["autoplay"]["autoplay"], current);
+    // The playing video (YouTube's "watch again" candidate is it): from the metadata, else the
+    // response's top-level currentVideoEndpoint (not under singleColumnWatchNextResults).
+    w.autoplay_next = autoplay_next(&r["autoplay"]["autoplay"], &w.video_id);
     w
 }
 

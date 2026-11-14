@@ -274,8 +274,8 @@ impl PlayerScreen {
             fx.push(Fx::App(replay));
             return;
         }
-        // "Play next" goes first (unless this video repeats).
-        if s.playback_mode != PlaybackMode::RepeatOne {
+        // "Play next" goes first, unless this video repeats or the mode stops after each video.
+        if !matches!(s.playback_mode, PlaybackMode::RepeatOne | PlaybackMode::PauseEach | PlaybackMode::CloseEach) {
             if let Some(v) = queued_next(cx, &self.video_id) {
                 go_to(v, None, fx);
                 return;
@@ -451,6 +451,9 @@ impl Machine<YtHost> for PlayerScreen {
                 // A video that follows another starts without the controls unless asked for.
                 if MOVED_ON.with(|m| m.replace(false)) && !cx.views.store.settings.hud_on_next_video {
                     self.hud = false;
+                    // No button stays selected under hidden controls: the keys would go to it
+                    // (OK toggling pause, Left / Right not seeking) instead of the player.
+                    self.osd_sel = None;
                     fx.push(Fx::CancelTimer(T_HIDE));
                 }
                 Handled::Yes
@@ -855,9 +858,9 @@ impl Screen<YtHost> for PlayerScreen {
                 // The failure: a headline, YouTube's (or our) reason under it in full; a members-only
                 // video just says so.
                 ui::text(p, "Can't play this video", 960.0, 440.0, 40, ui::WHITE, ui::ALIGN_CENTER, true);
-                let members = msg.contains("available to this channel's members");
-                let msg = if members { crate::i18n::tr("Only this channel's members can watch it.").to_string() } else { msg };
-                for (i, line) in wrap_lines(f.measure, &msg, 1300.0, 28, false, 4).iter().enumerate() {
+                // YouTube's common refusals in the interface's language; anything else as it came.
+                let msg = refusal_text(&msg).map_or(msg, |t| crate::i18n::tr(t).to_string());
+                for (i, line) in ui::wrap_lines(f.measure, &msg, 1300.0, 28, false, 4).iter().enumerate() {
                     ui::text(p, line, 960.0, 510.0 + i as f32 * 42.0, 28, ui::DIM, ui::ALIGN_CENTER, false);
                 }
             }
@@ -924,8 +927,8 @@ impl Screen<YtHost> for PlayerScreen {
         // veil), the title stays on top.
         if let Some(sel) = self.sugg_sel {
             ui::fill(p, Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, [0.0, 0.0, 0.0, 0.82]);
-            ui::text(p, &ui::ellipsize(&st.title, 70), 96.0, 90.0, 48, ui::WHITE, ui::ALIGN_LEFT, true);
-            ui::text(p, &st.author, 96.0, 160.0, 28, ui::DIM, ui::ALIGN_LEFT, false);
+            ui::text_raw(p, &f.measure.fit_line(&st.title, 1728.0, 48, true).to_string_lossy(), 96.0, 90.0, 48, ui::WHITE, ui::ALIGN_LEFT, true);
+            ui::text_raw(p, &st.author, 96.0, 160.0, 28, ui::DIM, ui::ALIGN_LEFT, false);
             draw_suggestions(p, f.measure, &suggestions(cx), sel, 560.0);
             common::toast(p, cx);
             return;
@@ -934,7 +937,7 @@ impl Screen<YtHost> for PlayerScreen {
         p.rect(Rect::new(0.0, 520.0, 1920.0, 260.0), 0.0, [0.0, 0.0, 0.0, 0.0], ui::dimmed([0.0, 0.0, 0.0, 0.82]), 0.0);
         ui::fill(p, Rect::new(0.0, 780.0, 1920.0, 300.0), 0.0, [0.0, 0.0, 0.0, 0.82]);
         // Title and the line under it: channel, views, age, likes, dislikes, subscribers.
-        ui::text(p, &ui::ellipsize(&st.title, 72), 96.0, 640.0, 50, ui::WHITE, ui::ALIGN_LEFT, true);
+        ui::text_raw(p, &f.measure.fit_line(&st.title, 1728.0, 50, true).to_string_lossy(), 96.0, 640.0, 50, ui::WHITE, ui::ALIGN_LEFT, true);
         let mut byline = st.author.clone();
         if let Some(w) = &ex.watch {
             if let Some(v) = &w.short_view_count_text {
@@ -945,32 +948,32 @@ impl Screen<YtHost> for PlayerScreen {
             }
         }
         let votes: Option<(String, Option<String>)> = match (&ex.votes, ex.watch.as_ref().and_then(|w| w.like_count_text.clone())) {
-            (Some(v), _) => Some((short_num(v.likes), Some(short_num(v.dislikes)))),
+            (Some(v), _) => Some((ui::full_count(v.likes), Some(ui::full_count(v.dislikes)))),
             (None, Some(l)) => Some((l, None)),
             _ => None,
         };
         let my = 712.0;
-        let mut bx = 96.0 + ui::text(p, &byline, 96.0, my, 28, ui::DIM, ui::ALIGN_LEFT, false);
+        let mut bx = 96.0 + ui::text_raw(p, &byline, 96.0, my, 28, ui::DIM, ui::ALIGN_LEFT, false);
         if let Some((likes, dislikes)) = votes {
             bx += ui::text(p, "  \u{2022}  ", bx, my, 28, ui::DIM, ui::ALIGN_LEFT, false);
             ui::icon::draw(p, ui::icon::Kind::ThumbUp, Rect::new(bx, my + 3.0, 26.0, 26.0), ui::DIM, false);
             bx += 34.0;
-            bx += ui::text(p, &likes, bx, my, 28, ui::DIM, ui::ALIGN_LEFT, false);
+            bx += ui::text_raw(p, &likes, bx, my, 28, ui::DIM, ui::ALIGN_LEFT, false);
             if let Some(d) = dislikes {
                 bx += ui::text(p, "  \u{2022}  ", bx, my, 28, ui::DIM, ui::ALIGN_LEFT, false);
                 ui::icon::draw(p, ui::icon::Kind::ThumbDown, Rect::new(bx, my + 6.0, 26.0, 26.0), ui::DIM, false);
                 bx += 34.0;
-                bx += ui::text(p, &d, bx, my, 28, ui::DIM, ui::ALIGN_LEFT, false);
+                bx += ui::text_raw(p, &d, bx, my, 28, ui::DIM, ui::ALIGN_LEFT, false);
             }
         }
         if let Some(subs) = ex.watch.as_ref().and_then(|w| w.subscriber_count_text.as_ref()) {
-            ui::text(p, &format!("  \u{2022}  {subs}"), bx, my, 28, ui::DIM, ui::ALIGN_LEFT, false);
+            ui::text_raw(p, &format!("  \u{2022}  {subs}"), bx, my, 28, ui::DIM, ui::ALIGN_LEFT, false);
         }
         // The chapter being played, over the right end of the bar.
         if let Some(w) = &ex.watch {
             if let Some(i) = yt_core::watch::chapter_at(&w.chapters, st.position_ms) {
                 let t = format!("\u{25B6} {}", ui::ellipsize(&w.chapters[i].title, 60));
-                ui::text(p, &t, 1824.0, 712.0, 28, ui::WHITE, ui::ALIGN_RIGHT, false);
+                ui::text_raw(p, &t, 1824.0, 712.0, 28, ui::WHITE, ui::ALIGN_RIGHT, false);
             }
         }
         // Seek bar: one piece per chapter with a small clear gap between.
@@ -1029,7 +1032,7 @@ impl Screen<YtHost> for PlayerScreen {
         if st.phase == Phase::Ended {
             quality = format!("{}  {quality}", crate::i18n::tr("Ended"));
         }
-        ui::text(p, &quality, 1824.0, ROW_A_Y + 2.0, 26, ui::DIM, ui::ALIGN_RIGHT, false);
+        ui::text_raw(p, &quality, 1824.0, ROW_A_Y + 2.0, 26, ui::DIM, ui::ALIGN_RIGHT, false);
         if s.show_clock {
             // The date where it always was, beside the controls; the time in the top right corner
             // like on the video pages. Both leave with the controls, so nothing stays still on the
@@ -1044,9 +1047,9 @@ impl Screen<YtHost> for PlayerScreen {
         if st.live {
             let behind = st.live_edge_ms.saturating_sub(st.position_ms);
             if behind < 20_000 {
-                ui::text(p, "\u{25CF} LIVE", 1824.0, ROW_B_Y + 16.0, 30, ui::accent(), ui::ALIGN_RIGHT, true);
+                ui::text_raw(p, &format!("\u{25CF} {}", crate::i18n::tr("LIVE")), 1824.0, ROW_B_Y + 16.0, 30, ui::accent(), ui::ALIGN_RIGHT, true);
             } else {
-                ui::text(p, &format!("\u{2212}{} behind live", ui::fmt_time(behind)), 1824.0, ROW_B_Y + 16.0, 28, ui::WHITE, ui::ALIGN_RIGHT, false);
+                ui::text_raw(p, &crate::i18n::tr("{} behind live").replace("{}", &ui::fmt_time(behind)), 1824.0, ROW_B_Y + 16.0, 28, ui::WHITE, ui::ALIGN_RIGHT, false);
             }
         } else {
             if let Some(t) = ending_text(st, s) {
@@ -1181,36 +1184,6 @@ const YT_REST: [f32; 4] = [0.22, 0.22, 0.24, 0.62];
 const YT_FOCUS: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 const YT_FOCUS_INK: [f32; 4] = [0.06, 0.06, 0.07, 1.0];
 
-/// `s` word-wrapped into at most `max` lines of `w` px (the last one ellipsised).
-fn wrap_lines(m: &dyn plx_machine::machine::Measure, s: &str, w: f32, size: i32, bold: bool, max: usize) -> Vec<String> {
-    let width = |t: &str| std::ffi::CString::new(t).map_or(0.0, |c| m.width(&c, size, bold));
-    let mut lines: Vec<String> = Vec::new();
-    let mut rest = s.trim();
-    while !rest.is_empty() && lines.len() < max {
-        if lines.len() + 1 == max || width(rest) <= w {
-            lines.push(m.fit_line(rest, w, size, bold).to_string_lossy().into_owned());
-            break;
-        }
-        let mut line = String::new();
-        let mut used = 0;
-        for word in rest.split_inclusive(' ') {
-            let trial = format!("{line}{word}");
-            if !line.is_empty() && width(trial.trim_end()) > w {
-                break;
-            }
-            line = trial;
-            used += word.len();
-        }
-        if line.trim().is_empty() || width(line.trim_end()) > w {
-            // One word wider than the line: cut it.
-            lines.push(m.fit_line(rest, w, size, bold).to_string_lossy().into_owned());
-            break;
-        }
-        lines.push(line.trim_end().to_string());
-        rest = rest[used..].trim_start();
-    }
-    lines
-}
 
 impl PlayerScreen {
     fn draw_youtube(&mut self, p: plx_ui::Painter, m: &dyn plx_machine::machine::Measure, cx: &Cx<'_, YtHost>) {
@@ -1235,8 +1208,8 @@ impl PlayerScreen {
 
         // Title (up to two lines) and channel, views, age under it.
         let mut y = 64.0;
-        for line in wrap_lines(m, &st.title, 1300.0, 46, true, 2) {
-            ui::text(p, &line, 96.0, y, 46, ui::WHITE, ui::ALIGN_LEFT, true);
+        for line in ui::wrap_lines(m, &st.title, 1300.0, 46, true, 2) {
+            ui::text_raw(p, &line, 96.0, y, 46, ui::WHITE, ui::ALIGN_LEFT, true);
             y += 58.0;
         }
         let mut byline = st.author.clone();
@@ -1248,7 +1221,7 @@ impl PlayerScreen {
                 byline.push_str(&format!(" \u{2022} {d}"));
             }
         }
-        ui::text(p, &byline, 96.0, y + 8.0, 26, ui::DIM, ui::ALIGN_LEFT, false);
+        ui::text_raw(p, &byline, 96.0, y + 8.0, 26, ui::DIM, ui::ALIGN_LEFT, false);
         if s.show_clock {
             ui::text(p, &common::clock(&cx.views), 1824.0, 64.0, 40, ui::WHITE, ui::ALIGN_RIGHT, true);
         }
@@ -1267,7 +1240,7 @@ impl PlayerScreen {
             ui::fill(p, r, 6.0, if behind < 20_000 { [0.8, 0.0, 0.0, 1.0] } else { YT_REST });
             ui::text(p, "LIVE", r.x + r.w / 2.0, r.y + 5.0, 22, ui::WHITE, ui::ALIGN_CENTER, true);
         } else {
-            ui::text(p, &left, 96.0, time_y, 26, ui::WHITE, ui::ALIGN_LEFT, false);
+            ui::text_raw(p, &left, 96.0, time_y, 26, ui::WHITE, ui::ALIGN_LEFT, false);
             ui::text(p, &ui::fmt_time(st.duration_ms), 1824.0, time_y, 26, ui::WHITE, ui::ALIGN_RIGHT, false);
         }
 
@@ -1460,11 +1433,7 @@ pub fn ending_text(st: &crate::host::PlayerView, s: &crate::settings::Settings) 
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;
             let end = now + (left as f64 / 1000.0 / rate).round() as i64 + local_offset_secs();
             let (h, m) = ((end / 3600).rem_euclid(24), (end / 60).rem_euclid(60));
-            let t = if s.time_24h {
-                format!("{h:02}:{m:02}")
-            } else {
-                format!("{}:{m:02} {}", if h % 12 == 0 { 12 } else { h % 12 }, if h < 12 { "AM" } else { "PM" })
-            };
+            let t = common::clock_text(h, m, s.time_24h);
             Some(crate::i18n::tr("Ends at {}").replace("{}", &t))
         }
     }
@@ -1594,16 +1563,42 @@ fn draw_suggestions_at(p: plx_ui::Painter, m: &dyn plx_machine::machine::Measure
         ui::fill(p, panel, 14.0, bg);
         let tw = panel.w - 32.0;
         let t1 = m.fit_line(&it.title, tw, 24, true).to_string_lossy().into_owned();
-        ui::text(p, &t1, panel.x + 16.0, panel.y + 12.0, 24, ink, ui::ALIGN_LEFT, true);
+        ui::text_raw(p, &t1, panel.x + 16.0, panel.y + 12.0, 24, ink, ui::ALIGN_LEFT, true);
         let detail = it.lines.join(" \u{2022} ");
         let d = m.fit_line(&detail, tw, 20, false).to_string_lossy().into_owned();
-        ui::text(p, &d, panel.x + 16.0, panel.y + 52.0, 20, dim, ui::ALIGN_LEFT, false);
+        ui::text_raw(p, &d, panel.x + 16.0, panel.y + 52.0, 20, dim, ui::ALIGN_LEFT, false);
     }
 }
 
 /// The playing video has chapters.
 fn has_chapters(cx: &Cx<'_, YtHost>) -> bool {
     cx.views.player.extras.watch.as_ref().is_some_and(|w| !w.chapters.is_empty())
+}
+
+/// YouTube's reason for refusing a video (always English: requests are sent with hl=en) as one of
+/// this app's translated sentences, when it is a common one.
+fn refusal_text(reason: &str) -> Option<&'static str> {
+    let r = reason.to_ascii_lowercase();
+    let has = |k: &str| r.contains(k);
+    Some(if has("available to this channel's members") || has("members-only") {
+        "Only this channel's members can watch it."
+    } else if has("not a bot") {
+        "YouTube asks to confirm you're not a bot: try again later, or sign in."
+    } else if has("confirm your age") || has("age-restricted") || has("inappropriate for some users") {
+        "YouTube asks to confirm your age: sign in with an adult account."
+    } else if has("in your country") {
+        "This video is not available in your country."
+    } else if has("private") {
+        "This video is private."
+    } else if has("removed") || has("terminated") || has("no longer available") {
+        "This video has been removed."
+    } else if has("live event will begin") || has("premieres in") || has("premiere will begin") {
+        "This live stream or premiere has not started yet."
+    } else if r.trim_end_matches('.') == "video unavailable" || r.trim_end_matches('.') == "this video is unavailable" {
+        "This video is not available."
+    } else {
+        return None;
+    })
 }
 
 /// The first video in "Play next" other than the one playing.
@@ -1631,19 +1626,6 @@ fn next_video(cx: &Cx<'_, YtHost>, current: &str, repeat_list: bool) -> Option<(
             Some((video_id.clone(), playlist_id.clone()))
         }
         _ => Some((n.id.clone(), None)),
-    }
-}
-
-fn short_num(n: u64) -> String {
-    let f = |v: f64, unit: &str| {
-        let s = format!("{v:.1}");
-        format!("{}{unit}", s.trim_end_matches(".0"))
-    };
-    match n {
-        0..=999 => n.to_string(),
-        1_000..=999_999 => f(n as f64 / 1e3, "K"),
-        1_000_000..=999_999_999 => f(n as f64 / 1e6, "M"),
-        _ => f(n as f64 / 1e9, "B"),
     }
 }
 
@@ -1695,10 +1677,10 @@ fn draw_caption_styled(p: plx_ui::Painter, text: &str, size: i32, bottom: f32, i
 fn cap_text(p: plx_ui::Painter, s: &str, x: f32, y: f32, size: i32, ink: [f32; 4]) {
     match SUB_FACE.with(|c| c.get()) {
         0 => {
-            ui::text(p, s, x, y, size, ink, ui::ALIGN_CENTER, true);
+            ui::text_raw(p, s, x, y, size, ink, ui::ALIGN_CENTER, true);
         }
         -1 => {
-            ui::text(p, s, x, y, size, ink, ui::ALIGN_CENTER, false);
+            ui::text_raw(p, s, x, y, size, ink, ui::ALIGN_CENTER, false);
         }
         face => {
             ui::text_face(p, s, x, y, size, ink, ui::ALIGN_CENTER, face);
@@ -1719,8 +1701,22 @@ fn draw_caption_old(p: plx_ui::Painter, text: &str, size: i32, bottom: f32, ink:
         let o = (size as f32 / 16.0).max(2.0);
         let outline = [0.0, 0.0, 0.0, 0.92];
         for (dx, dy) in [(-o, 0.0), (o, 0.0), (0.0, -o), (0.0, o), (-o, -o), (o, -o), (-o, o), (o, o)] {
-            ui::text(p, line, 960.0 + dx, y + dy, size, outline, ui::ALIGN_CENTER, true);
+            ui::text_raw(p, line, 960.0 + dx, y + dy, size, outline, ui::ALIGN_CENTER, true);
         }
-        ui::text(p, line, 960.0, y, size, ink, ui::ALIGN_CENTER, true);
+        ui::text_raw(p, line, 960.0, y, size, ink, ui::ALIGN_CENTER, true);
+    }
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::refusal_text;
+
+    #[test]
+    fn common_refusals_are_translated_sentences() {
+        assert_eq!(refusal_text("This video is available to this channel's members on level: X. Join this channel."), Some("Only this channel's members can watch it."));
+        assert_eq!(refusal_text("Sign in to confirm your age"), Some("YouTube asks to confirm your age: sign in with an adult account."));
+        assert_eq!(refusal_text("Video unavailable"), Some("This video is not available."));
+        assert_eq!(refusal_text("This video is private"), Some("This video is private."));
+        assert_eq!(refusal_text("no client could play abc: Profile(tv): ERROR boom"), None);
     }
 }

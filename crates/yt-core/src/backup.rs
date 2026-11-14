@@ -164,6 +164,9 @@ pub fn restore_into(data_dir: &Path, b: &Bundle, opts: RestoreOptions) -> Result
             r.skipped.push(name.clone());
             continue;
         }
+        // accounts.json is written under the accounts lock, so a token refresh saving at the same
+        // moment cannot write the old accounts back over the restored ones.
+        let _accounts = (name == ACCOUNTS_FILE).then(crate::accounts::lock);
         crate::fsutil::write_atomic(&data_dir.join(name), &serde_json::to_vec_pretty(v)?)?;
         r.restored.push(name.clone());
     }
@@ -207,10 +210,19 @@ pub fn list_backups(dir: &Path) -> Vec<BackupInfo> {
             })
         })
         .collect();
-    // Compare stems so "...-120000-1" (a second backup within the same second) is newer.
-    let stem = |n: &str| n.trim_end_matches(".json").to_string();
-    v.sort_by_key(|b| std::cmp::Reverse(stem(&b.name)));
+    v.sort_by_key(|b| std::cmp::Reverse(sort_key(&b.name)));
     v
+}
+
+/// (timestamp, same-second counter) of a backup name, so "...-120000-10" sorts after
+/// "...-120000-2", which sorts after "...-120000".
+fn sort_key(name: &str) -> (String, u64) {
+    let stem = name.strip_prefix(NAME_PREFIX).unwrap_or(name).trim_end_matches(".json");
+    match stem.rsplit_once('-') {
+        // The stamp itself has one dash ("YYYYMMDD-HHMMSS"); a second one starts the counter.
+        Some((stamp, n)) if stamp.contains('-') => (stamp.to_string(), n.parse().unwrap_or(0)),
+        _ => (stem.to_string(), 0),
+    }
 }
 
 /// Writes a new timestamped bundle of `data_dir` into `dir` and deletes the oldest ones so at most
@@ -224,7 +236,10 @@ pub fn auto_backup_from(data_dir: &Path, dir: &Path, keep: usize, opts: BackupOp
         n += 1;
     }
     crate::fsutil::write_atomic(&path, &to_bytes(&b)?)?;
-    for old in list_backups(dir).into_iter().skip(keep.max(1)) {
+    // The new file is never deleted, even when it sorts as the oldest (a TV clock that is wrong
+    // before the network time arrives): it is the only copy of the current data.
+    let others = list_backups(dir).into_iter().filter(|o| o.path != path);
+    for old in others.skip(keep.max(1) - 1) {
         let _ = std::fs::remove_file(old.path);
     }
     Ok(path)
@@ -375,6 +390,44 @@ mod tests {
         assert!(read_bundle(&p2).is_ok());
         std::fs::remove_dir_all(src).unwrap();
         std::fs::remove_dir_all(out).unwrap();
+    }
+
+    #[test]
+    fn rotation_keeps_new_file_with_wrong_clock() {
+        let src = crate::fsutil::temp_dir("backup-clock-src");
+        let out = crate::fsutil::temp_dir("backup-clock-out");
+        seed(&src);
+        // Backups "from the future" relative to the current clock.
+        for s in ["29990101-000000", "29990102-000000"] {
+            std::fs::write(out.join(format!("{NAME_PREFIX}{s}.json")), "{}").unwrap();
+        }
+        let p = auto_backup_from(&src, &out, 2, BackupOptions::default()).unwrap();
+        assert!(p.exists());
+        let names: Vec<String> = list_backups(&out).into_iter().map(|b| b.name).collect();
+        assert_eq!(names.len(), 2);
+        assert!(names.iter().any(|n| n.contains("29990102")));
+        std::fs::remove_dir_all(src).unwrap();
+        std::fs::remove_dir_all(out).unwrap();
+    }
+
+    #[test]
+    fn same_second_counter_sorts_numerically() {
+        let mut names = vec![
+            format!("{NAME_PREFIX}20240101-120000.json"),
+            format!("{NAME_PREFIX}20240101-120000-10.json"),
+            format!("{NAME_PREFIX}20240101-120000-2.json"),
+            format!("{NAME_PREFIX}20231231-235959-99.json"),
+        ];
+        names.sort_by_key(|n| std::cmp::Reverse(sort_key(n)));
+        assert_eq!(
+            names,
+            [
+                format!("{NAME_PREFIX}20240101-120000-10.json"),
+                format!("{NAME_PREFIX}20240101-120000-2.json"),
+                format!("{NAME_PREFIX}20240101-120000.json"),
+                format!("{NAME_PREFIX}20231231-235959-99.json"),
+            ]
+        );
     }
 
     #[test]

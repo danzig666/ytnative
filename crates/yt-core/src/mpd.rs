@@ -52,10 +52,38 @@ pub fn build_with_audio(
     max_height: u64,
     audio_track: Option<&str>,
 ) -> Option<(String, usize, usize)> {
+    let built = build_inner(formats, duration_ms, video_codec, min_height, max_height, audio_track);
+    // A track id that matches nothing here (kept from another video): the default track.
+    if built.is_none() && audio_track.is_some() {
+        return build_inner(formats, duration_ms, video_codec, min_height, max_height, None);
+    }
+    built
+}
+
+/// A video format's quality rung: its short side (a vertical 1080p video is 1080x1920).
+pub fn rung(f: &Value) -> u64 {
+    let h = f["height"].as_u64().unwrap_or(0);
+    match f["width"].as_u64() {
+        Some(w) if w > 0 => w.min(h),
+        _ => h,
+    }
+}
+
+fn build_inner(
+    formats: &[Value],
+    duration_ms: u64,
+    video_codec: &str,
+    min_height: u64,
+    max_height: u64,
+    audio_track: Option<&str>,
+) -> Option<(String, usize, usize)> {
+    // The tallest rung under the cap among the formats this manifest can use (a direct URL and
+    // both ranges).
     let best = formats
         .iter()
+        .filter(|f| f["url"].is_string() && range(f, "initRange").is_some() && range(f, "indexRange").is_some())
         .filter(|f| f["mimeType"].as_str().is_some_and(|m| m.starts_with("video/mp4") && codecs(m).is_some_and(|c| c.starts_with(video_codec))))
-        .filter_map(|f| f["height"].as_u64())
+        .map(rung)
         .filter(|&h| h <= max_height)
         .max()
         .unwrap_or(0);
@@ -75,7 +103,7 @@ pub fn build_with_audio(
         );
         if mime.starts_with("video/mp4") && c.starts_with(video_codec) {
             let h = f["height"].as_u64().unwrap_or(0);
-            if h > max_height || h < min_height {
+            if rung(f) > max_height || rung(f) < min_height {
                 continue;
             }
             video += &format!(
@@ -115,4 +143,28 @@ pub fn build_with_audio(
 "#
     );
     Some((mpd, nv, na))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn fmt(itag: u64, mime: &str, w: u64, h: u64) -> Value {
+        json!({"itag": itag, "mimeType": mime, "width": w, "height": h, "bitrate": 1000, "url": "https://x/v",
+               "initRange": {"start": "0", "end": "9"}, "indexRange": {"start": "10", "end": "19"}})
+    }
+
+    #[test]
+    fn a_vertical_video_is_capped_by_its_short_side() {
+        let v = "video/mp4; codecs=\"avc1.640028\"";
+        let a = json!({"itag": 140, "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"", "bitrate": 128000, "url": "https://x/a",
+                       "initRange": {"start": "0", "end": "9"}, "indexRange": {"start": "10", "end": "19"}});
+        let f = [fmt(137, v, 1080, 1920), fmt(136, v, 720, 1280), fmt(135, v, 480, 854), a];
+        let (mpd, nv, na) = build(&f, 60_000, "avc1", 720, 1080).unwrap();
+        assert_eq!((nv, na), (2, 1));
+        assert!(mpd.contains("id=\"137\"") && !mpd.contains("id=\"135\""));
+        // A track id that is not there falls back to the default track.
+        assert!(build_with_audio(&f, 60_000, "avc1", 720, 1080, Some("xx.9")).is_some());
+    }
 }

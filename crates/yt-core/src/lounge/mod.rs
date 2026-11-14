@@ -113,10 +113,9 @@ impl LoungeScreen {
     /// Loads the screen identity from `lounge.json`, creating it (one network call) when missing.
     /// `device_name` is what phones show ("Living room TV").
     pub fn new(http: reqwest::blocking::Client, device_name: &str) -> Result<Self> {
-        let mut p: Persisted = std::fs::read_to_string(state_file())
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        // A damaged file is moved aside to lounge.json.bad (by the loader) before a new identity
+        // replaces it, so the old screen id can still be recovered by hand.
+        let mut p: Persisted = crate::fsutil::load_json_or_default(&state_file());
         let mut dirty = false;
         if p.device_id.is_empty() {
             p.device_id = uuid::Uuid::new_v4().to_string();
@@ -530,9 +529,11 @@ fn generate_screen_id(http: &reqwest::blocking::Client) -> Result<String> {
     Ok(id)
 }
 
+/// Written atomically: a power cut during the write must not lose the screen identity, which
+/// would unpair every phone.
 fn save(p: &Persisted) {
-    if let Ok(s) = serde_json::to_string_pretty(p) {
-        let _ = std::fs::write(state_file(), s);
+    if let Err(e) = crate::fsutil::save_json(&state_file(), p) {
+        eprintln!("lounge: saving the screen identity failed: {e:#}");
     }
 }
 
