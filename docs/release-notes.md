@@ -1,9 +1,4 @@
-- New: playlists on this TV, alongside your YouTube playlists: no account needed and nothing is sent to YouTube. "Save to playlist…" shows them under "On this TV", with "New playlist on this TV"
-- New: the Library starts with an "On this TV" row, one card per playlist; playing from one follows its order with Next, Previous and the playback modes
-- New: editing: remove a video, move it to the top, up or down; rename, delete, shuffle, play all and pin a playlist to the sidebar
-- New: "Save the queue as a playlist on this TV" in the player menu, and the setting "Keep Play next after closing"
-- New: "Copy to this TV" on a YouTube playlist, and "Copy to YouTube" on a playlist on this TV (when signed in)
-- New: the on-screen keyboard has accented letters (the "áé" key): á, é, í, ó, ö, ő, ú, ü, ű and more
-- Fixed: search suggestions with accented letters came back garbled
-- Fixed: "Save to playlist…" stayed on "Loading your playlists…"
-- Playlists on this TV are included in settings backups and the Google Drive backup
+- New: webOS 4 support (tested by a contributor on an LG C9, webOS 4.10.2): video through the 4K engine, with pause and seek. On webOS 4 there is no HDR yet, the video stays full screen beside the comments, and speeds other than normal are not available
+- Fixed: on webOS 4 the app crashed in the background at start (sign-in and phone pairing could not get random numbers in the Developer Mode jail)
+- Changed: AV1 is never chosen on a TV whose decoder list has no AV1 decoder
+- Thanks to 2esq for both contributions
