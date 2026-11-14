@@ -1,1 +1,1 @@
-- Changed: choosing a speed on a video the 4K engine plays now switches to the system player at once, instead of freezing the picture for a few seconds first
+- Fixed: about one video start or seek in ten began before any sound had arrived, which could leave the picture running too fast; playback now waits for the sound (up to 8 seconds)

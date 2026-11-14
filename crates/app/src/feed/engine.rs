@@ -26,8 +26,12 @@ pub const AUDIO_SLACK_NS: i64 = 2_000_000_000;
 /// Buffer this much video and audio (paused) before Play, after a Load or a seek.
 pub const PRIME_NS: i64 = 700_000_000;
 pub const PRIME_AUDIO_NS: i64 = 300_000_000;
-/// ...or start anyway once this much video is buffered (audioless / starved audio).
+/// ...or start anyway once this much video is buffered (audioless / starved audio)...
 pub const PRIME_VIDEO_MAX_NS: i64 = 2_500_000_000;
+/// ...but with an audio track, only after waiting this long for its first audio: video
+/// downloads faster, and Play without audio left the picture without its clock (about one start
+/// in ten on the C3; after a reload it ran at about 3x).
+const PRIME_AUDIO_WAIT: Duration = Duration::from_secs(8);
 /// Cap on what is fed past the anchor while no position is known.
 const BLIND_AHEAD_NS: i64 = 4_000_000_000;
 /// Per-lane wall-clock budget per tick once the lane is healthy.
@@ -407,6 +411,8 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
 
     let mut shift = video.peek_pts().unwrap_or(0).max(0);
     let mut pipe = Pipe::open(&payload, &sh.stop, load_wait)?;
+    // Since when the current priming (Load or seek) has been waiting.
+    let mut prime_since = Instant::now();
     let mut base = 0i64; // fed-timeline anchor of the current Load/seek
     let mut floor = shift; // content-time: no audio before the video anchor
     let mut vf = LaneFeed::default();
@@ -523,6 +529,7 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
             play_at = None;
             seeking = Some(t);
             seek_started = Instant::now();
+            prime_since = Instant::now();
             rate_probe = None;
             probe_rate = false;
             rate = 1.0;
@@ -712,7 +719,8 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
         let abuf = af.fed_max.map_or(0, |m| m - base);
         let v_done = video.drained() && vf.pending.is_none();
         let a_done = !has_audio || (audio.drained() && af.pending.is_none());
-        if priming && seeking.is_none() && (vbuf >= PRIME_NS && (!has_audio || abuf >= PRIME_AUDIO_NS) || vbuf >= PRIME_VIDEO_MAX_NS || (v_done && a_done && vf.fed_max.is_some())) {
+        let audio_ready_or_given_up = !has_audio || af.fed_max.is_some() || prime_since.elapsed() > PRIME_AUDIO_WAIT;
+        if priming && seeking.is_none() && (vbuf >= PRIME_NS && (!has_audio || abuf >= PRIME_AUDIO_NS) || (vbuf >= PRIME_VIDEO_MAX_NS && audio_ready_or_given_up) || (v_done && a_done && vf.fed_max.is_some())) {
             priming = false;
             crate::log(&format!("feed: primed v={} ms a={} ms", vbuf / 1_000_000, abuf / 1_000_000));
             if !user_paused {
