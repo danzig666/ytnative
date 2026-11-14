@@ -1,1 +1,1 @@
-- Fixed: about one video start or seek in ten began before any sound had arrived, which could leave the picture running too fast; playback now waits for the sound (up to 8 seconds)
+- Fixed: a long chapter name in the player controls no longer covers the views, likes and subscribers beside it; it is shortened to the room left

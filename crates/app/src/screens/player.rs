@@ -958,13 +958,17 @@ impl Screen<YtHost> for PlayerScreen {
             }
         }
         if let Some(subs) = ex.watch.as_ref().and_then(|w| w.subscriber_count_text.as_ref()) {
-            ui::text_raw(p, &format!("  \u{2022}  {subs}"), bx, my, 28, ui::DIM, ui::ALIGN_LEFT, false);
+            bx += ui::text_raw(p, &format!("  \u{2022}  {subs}"), bx, my, 28, ui::DIM, ui::ALIGN_LEFT, false);
         }
-        // The chapter being played, over the right end of the bar.
+        // The chapter being played, at the right end of that line, in the room the line leaves.
         if let Some(w) = &ex.watch {
             if let Some(i) = yt_core::watch::chapter_at(&w.chapters, st.position_ms) {
-                let t = format!("\u{25B6} {}", ui::ellipsize(&w.chapters[i].title, 60));
-                ui::text_raw(p, &t, 1824.0, 712.0, 28, ui::WHITE, ui::ALIGN_RIGHT, false);
+                let room = 1824.0 - (bx + 48.0);
+                if room > 120.0 {
+                    let t = format!("\u{25B6} {}", w.chapters[i].title);
+                    let t = f.measure.fit_line(&t, room, 28, false).to_string_lossy().into_owned();
+                    ui::text_raw(p, &t, 1824.0, my, 28, ui::WHITE, ui::ALIGN_RIGHT, false);
+                }
             }
         }
         // Seek bar: one piece per chapter with a small clear gap between.
@@ -1231,6 +1235,8 @@ impl PlayerScreen {
             ui::fill(p, r, 6.0, if behind < 20_000 { [0.8, 0.0, 0.0, 1.0] } else { YT_REST });
             ui::text(p, "LIVE", r.x + r.w / 2.0, r.y + 5.0, 22, ui::WHITE, ui::ALIGN_CENTER, true);
         } else {
+            // The time and chapter end short of the length at the right.
+            let left = m.fit_line(&left, 1728.0 - 180.0, 26, false).to_string_lossy().into_owned();
             ui::text_raw(p, &left, 96.0, time_y, 26, ui::WHITE, ui::ALIGN_LEFT, false);
             ui::text(p, &ui::fmt_time(st.duration_ms), 1824.0, time_y, 26, ui::WHITE, ui::ALIGN_RIGHT, false);
         }
