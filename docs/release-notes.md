@@ -1,1 +1,2 @@
-- Fixed: on the LG C3 the 4K engine stops the picture at 1.5x instead of playing faster; the app now sees that and continues the video at the chosen speed on the system player
+- Fixed: playback speed works: on a 4K video, choosing a speed switches to the system player (up to 1080p), which plays at that speed (tested on the LG C3 at 1.5x)
+- Fixed: videos on the system player now resume where you left off instead of starting from the beginning

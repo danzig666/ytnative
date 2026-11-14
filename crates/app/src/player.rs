@@ -552,8 +552,30 @@ fn run(
     let r = luna.call("luna://com.webos.media/play", &format!(r#"{{"mediaId":{}}}"#, json_str(&mid)));
     crate::log(&format!("player: play -> {r}"));
     if let Some(ms) = start_ms.filter(|ms| *ms > 2000) {
-        let r = luna.call("luna://com.webos.media/seek", &format!(r#"{{"mediaId":{},"position":{ms}}}"#, json_str(&mid)));
-        crate::log(&format!("player: start at {ms} ms -> {r}"));
+        // A seek sent right after play is answered "No Error" and ignored (the C3 started a
+        // resumed video from 0:00): wait until the pipeline plays, then seek, and once more if
+        // the position did not move there.
+        let seek = |why: &str| {
+            let r = luna.call("luna://com.webos.media/seek", &format!(r#"{{"mediaId":{},"position":{ms}}}"#, json_str(&mid)));
+            crate::log(&format!("player: start at {ms} ms ({why}) -> {r}"));
+        };
+        let playing = || {
+            let s = status.lock().unwrap();
+            s.phase == Phase::Playing || s.position_ms > 0
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while live() && !playing() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        if !live() {
+            return Ok(false);
+        }
+        seek("playing");
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let at = status.lock().unwrap().position_ms;
+        if live() && at + 5_000 < ms {
+            seek("again");
+        }
     }
     Ok(true)
 }
