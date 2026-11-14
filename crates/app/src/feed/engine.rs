@@ -34,13 +34,16 @@ const BLIND_AHEAD_NS: i64 = 4_000_000_000;
 const LANE_SLICE: Duration = Duration::from_millis(3);
 /// How long a seek may wait for the first video unit of its generation (slow networks included).
 const SEEK_LANDING_TIMEOUT: Duration = Duration::from_secs(30);
-/// Load for client-side trick play (speed changes in place, in 4K; found by
-/// youtube-webos-cobalt-adfree). Off: on the C3 it reports loadCompleted only after 4 to 10 s,
-/// and fed early (after `TRICK_LOAD_WAIT`) some videos never show a picture (a 720p AV1 one
-/// stayed on the spinner), while 4K played and changed speed in place. Speeds other than 1x
-/// go to the system player instead.
+/// Client-side trick play (found by youtube-webos-cobalt-adfree): a pipeline loaded with it
+/// changes speed in place. On the C3 such a pipeline reports loadCompleted only after 4 to
+/// 10 s, and some videos (a 720p AV1 one; a 4K one fed early) never show a picture, so videos
+/// load the ordinary way and a 4K one is reloaded with trick play only when a speed other than
+/// 1x is chosen, waiting for loadCompleted. No picture within `TRICK_FIRST_FRAME` of Play: back
+/// to the ordinary pipeline, and the speed goes to the system player. Other videos change speed
+/// on the system player.
 const TRICK_PLAY: bool = false;
-const TRICK_LOAD_WAIT: Duration = Duration::from_millis(300);
+const TRICK_MIN_HEIGHT: u32 = 2160;
+const TRICK_FIRST_FRAME: Duration = Duration::from_secs(8);
 /// How long playback is timed after a speed change to see whether the TV applied it.
 const RATE_PROBE: Duration = Duration::from_secs(4);
 /// Firmware number for "decoder taken back by policy" (plx-native, webOS 4.10).
@@ -369,10 +372,19 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
         height: vt.height,
         fps,
         audio: adecl,
-        trick_play: TRICK_PLAY && !live,
+        trick_play: false,
     };
-    let payload = payload::build(&spec);
-    let load_wait = if spec.trick_play { TRICK_LOAD_WAIT } else { Duration::from_secs(10) };
+    let plain_payload = payload::build(&spec);
+    // The pipeline a speed change reloads into (4K only), until it failed once.
+    let mut trick_payload = (TRICK_PLAY && !live && vt.height >= TRICK_MIN_HEIGHT).then(|| payload::build(&payload::Spec { trick_play: true, ..spec.clone() }));
+    let mut trick = false;
+    let mut payload = plain_payload.clone();
+    let load_wait = Duration::from_secs(10);
+    // Trick play: the time by which the first frame must show (else reload without it).
+    let mut first_frame_by: Option<Instant> = None;
+    // A reload asked for by this loop itself (the trick-play fallback), taken as a seek.
+    let mut self_seek: Option<u64> = None;
+    crate::log(&format!("feed: speed in place {}", if trick_payload.is_some() { "possible (4K)" } else { "not possible" }));
     let env = payload::sink_envelope(vdecl, vt.width, vt.height, fps);
     crate::log(&format!(
         "feed: Load {} {}x{}@{fps:.3} (declared {}x{}@{}) audio={:?} hdr={:?}",
@@ -428,7 +440,7 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
         }
         // ---- commands ----
         let cmds: Vec<Cmd> = sh.cmds.lock().unwrap().drain(..).collect();
-        let mut seek_to = None;
+        let mut seek_to = self_seek.take();
         // The wall-clock estimate (below) counts from `base` at `play_at` at the current speed:
         // move that anchor to now before the speed changes or the clock stops (pause).
         let reanchor = |base: &mut i64, play_at: &mut Option<Instant>, rate: f32, running: bool| {
@@ -477,6 +489,10 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
                         wanted = 1.0;
                         probe_rate = false;
                         reload_seek = true;
+                        if trick {
+                            trick = false;
+                            payload = plain_payload.clone();
+                        }
                         seek_to = Some(sh.status.lock().unwrap().position_ms);
                     }
                 }
@@ -572,7 +588,34 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
                 break Err("the TV took the video decoder back".into());
             }
         }
-        if pres != PRES_NONE && !priming && !user_paused && seeking.is_none() && (wanted - rate).abs() > 0.001 && (wanted - 1.0).abs() > 0.01 {
+        if pres != PRES_NONE {
+            first_frame_by = None;
+        } else if trick && !user_paused && seeking.is_none() && first_frame_by.is_some_and(|t| Instant::now() > t) {
+            // No picture with trick play: load this video the ordinary way from here on.
+            crate::log("feed: no frame with trick play; reloading without it");
+            trick = false;
+            trick_payload = None;
+            payload = plain_payload.clone();
+            first_frame_by = None;
+            reload_seek = true;
+            self_seek = Some(sh.status.lock().unwrap().position_ms);
+        }
+        if !trick && (wanted - 1.0).abs() > 0.01 && seeking.is_none() && self_seek.is_none() {
+            if let Some(tp) = trick_payload.clone() {
+                // A 4K video: reload it with trick play here, the speed is sent once it shows.
+                crate::log(&format!("feed: speed {wanted}: reloading with trick play"));
+                trick = true;
+                payload = tp;
+                reload_seek = true;
+                self_seek = Some(sh.status.lock().unwrap().position_ms);
+            } else {
+                // Without trick play SetPlayRate stops the picture (C3): the system player.
+                crate::log(&format!("feed: speed {wanted} needs trick play; handing over to the system player"));
+                wanted = 1.0;
+                sh.status.lock().unwrap().rate_refused = true;
+            }
+        }
+        if pres != PRES_NONE && trick && self_seek.is_none() && !priming && !user_paused && seeking.is_none() && (wanted - rate).abs() > 0.001 && (wanted - 1.0).abs() > 0.01 {
             let ok = sys::set_play_rate(wanted);
             crate::log(&format!("feed: SetPlayRate {wanted} -> {ok}"));
             if ok {
@@ -677,6 +720,9 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
                     crate::log("feed: Play refused");
                 }
                 play_at = Some(Instant::now());
+                if trick {
+                    first_frame_by = Some(Instant::now() + TRICK_FIRST_FRAME);
+                }
             }
         }
         if !priming && !user_paused && play_at.is_none() {

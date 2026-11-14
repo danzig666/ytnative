@@ -1,1 +1,1 @@
-- Fixed: videos started very slowly or not at all in 0.2.20; the 4K speed change it added is turned off again, so choosing a speed switches the video to the system player (up to 1080p) as in 0.2.19
+- Changed: choosing a speed on a video the 4K engine plays now switches to the system player at once, instead of freezing the picture for a few seconds first
