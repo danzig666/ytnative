@@ -218,7 +218,7 @@ impl Screen<YtHost> for InfoScreen {
         ui::text_raw(p, &m.fit_line(&st.title, 1760.0, 42, true).to_string_lossy(), 80.0, 70.0, 42, ui::WHITE, ui::ALIGN_LEFT, true);
         let mut meta = st.author.clone();
         if let Some(w) = w {
-            for t in [&w.subscriber_count_text, &w.view_count_text, &w.published_text, &w.like_count_text].into_iter().flatten() {
+            for t in [&w.subscriber_count_text, &w.view_count_text, &super::common::video_age(w), &w.like_count_text].into_iter().flatten() {
                 meta.push_str(&format!("  \u{2022}  {t}"));
             }
         }

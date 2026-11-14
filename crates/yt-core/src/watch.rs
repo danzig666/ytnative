@@ -82,6 +82,10 @@ pub struct WatchInfo {
     /// Short ("23M views").
     pub short_view_count_text: Option<String>,
     pub published_text: Option<String>,
+    /// The upload (or premiere / stream) date, (year, month 1..=12, day), when the page gives
+    /// one ("Published on Nov 10, 2014"); `published_text` is the short age ("12y ago").
+    #[serde(default)]
+    pub published_date: Option<(i32, u32, u32)>,
     pub description: String,
     pub like_count_text: Option<String>,
     pub like_status: LikeStatus,
@@ -125,6 +129,7 @@ pub fn parse_watch(resp: &Value) -> WatchInfo {
         .to_string();
     w.title = text(&meta["title"]).unwrap_or_default();
     w.published_text = text(&meta["dateText"]).or_else(|| text(&meta["publishedTimeText"]));
+    w.published_date = [&meta["publishedTimeText"], &meta["dateText"]].into_iter().filter_map(text).find_map(|t| parse_date(&t));
     let vc = &meta["viewCount"]["videoViewCountRenderer"];
     w.view_count_text = text(&vc["viewCount"]);
     w.short_view_count_text = text(&vc["shortViewCount"]);
@@ -160,6 +165,9 @@ pub fn parse_watch(resp: &Value) -> WatchInfo {
             }
             if w.published_text.is_none() {
                 w.published_text = text(&h["publishDate"]);
+            }
+            if w.published_date.is_none() {
+                w.published_date = text(&h["publishDate"]).and_then(|t| parse_date(&t));
             }
         }
         if w.description.is_empty() {
@@ -302,6 +310,19 @@ pub fn parse_watch(resp: &Value) -> WatchInfo {
     // response's top-level currentVideoEndpoint (not under singleColumnWatchNextResults).
     w.autoplay_next = autoplay_next(&r["autoplay"]["autoplay"], &w.video_id);
     w
+}
+
+/// A date in YouTube's English wording ("Published on Nov 10, 2014", "Premiered Jul 1, 2020",
+/// "Streamed live on Mar 3, 2021"): (year, month, day).
+pub fn parse_date(s: &str) -> Option<(i32, u32, u32)> {
+    const MONTHS: [&str; 12] = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+    let words: Vec<&str> = s.split(|c: char| c.is_whitespace() || c == ',').filter(|w| !w.is_empty()).collect();
+    words.windows(3).find_map(|w| {
+        let m = MONTHS.iter().position(|m| w[0].len() >= 3 && w[0][..3].eq_ignore_ascii_case(m))? as u32 + 1;
+        let d: u32 = w[1].parse().ok().filter(|d| (1..=31).contains(d))?;
+        let y: i32 = w[2].parse().ok().filter(|y| (1990..=2200).contains(y))?;
+        Some((y, m, d))
+    })
 }
 
 fn like_status(s: Option<&str>) -> LikeStatus {
@@ -628,5 +649,19 @@ mod tests {
         let p = w.playlist.unwrap();
         eprintln!("mix {} items, current {:?}", p.items.len(), p.current_index);
         assert!(!p.items.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod date_tests {
+    use super::parse_date;
+
+    #[test]
+    fn youtube_dates() {
+        assert_eq!(parse_date("Published on Nov 10, 2014"), Some((2014, 11, 10)));
+        assert_eq!(parse_date("Premiered Jul 1, 2020"), Some((2020, 7, 1)));
+        assert_eq!(parse_date("Streamed live on Mar 3, 2021"), Some((2021, 3, 3)));
+        assert_eq!(parse_date("12y ago"), None);
+        assert_eq!(parse_date("3 days ago"), None);
     }
 }

@@ -52,6 +52,38 @@ pub fn current() -> &'static str {
     tables().iter().find(|(_, m)| std::ptr::eq(*m as *const Map, p as *const Map)).map_or("en", |(k, _)| k)
 }
 
+/// A full date in words in the interface language (no abbreviations): `month` 1..=12.
+pub fn full_date(year: i32, month: u32, day: u32) -> String {
+    let m = (month.clamp(1, 12) - 1) as usize;
+    match current() {
+        "hu" => {
+            const M: [&str; 12] = ["január", "február", "március", "április", "május", "június", "július", "augusztus", "szeptember", "október", "november", "december"];
+            format!("{year}. {} {day}.", M[m])
+        }
+        "de" => {
+            const M: [&str; 12] = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"];
+            format!("{day}. {} {year}", M[m])
+        }
+        "es" => {
+            const M: [&str; 12] = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
+            format!("{day} de {} de {year}", M[m])
+        }
+        "fr" => {
+            const M: [&str; 12] = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"];
+            let d = if day == 1 { "1er".to_string() } else { day.to_string() };
+            format!("{d} {} {year}", M[m])
+        }
+        "ru" => {
+            const M: [&str; 12] = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"];
+            format!("{day} {} {year}", M[m])
+        }
+        _ => {
+            const M: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+            format!("{} {day}, {year}", M[m])
+        }
+    }
+}
+
 /// A date in words in the interface language: `weekday` 0 = Sunday, `month` 1..=12.
 pub fn date_words(weekday: usize, day: u32, month: usize) -> String {
     let (w, m) = (weekday % 7, month.clamp(1, 12) - 1);

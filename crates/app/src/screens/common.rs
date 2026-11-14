@@ -109,6 +109,39 @@ pub fn clock_block(p: Painter, cx: &Cx<'_, YtHost>, right: f32, top: f32) {
     ui::text(p, &date_text(), right, top + 50.0, 22, ui::DIM, ui::ALIGN_RIGHT, false);
 }
 
+/// How old a video is, for the player and the video info: YouTube's short age ("3d ago"), or for
+/// a video a year old or more its date in words ("November 10, 2014").
+pub fn video_age(w: &yt_core::watch::WatchInfo) -> Option<String> {
+    if let Some((y, m, d)) = w.published_date {
+        let today = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |t| t.as_secs() / 86_400) as i64;
+        if today - days_from_civil(y, m, d) >= 365 {
+            return Some(crate::i18n::full_date(y, m, d));
+        }
+    }
+    w.published_text.clone().filter(|t| !t.is_empty())
+}
+
+/// Days since 1970-01-01 of a calendar date (Howard Hinnant's algorithm).
+fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y } as i64;
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m as i64 + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+#[cfg(test)]
+mod age_tests {
+    #[test]
+    fn civil_days() {
+        assert_eq!(super::days_from_civil(1970, 1, 1), 0);
+        assert_eq!(super::days_from_civil(2000, 3, 1), 11_017);
+        assert_eq!(super::days_from_civil(2014, 11, 10), 16_384);
+    }
+}
+
 /// Today's date written out in the interface language ("Friday, 13 November"; no abbreviations).
 pub fn date_text() -> String {
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;

@@ -934,7 +934,7 @@ impl Screen<YtHost> for PlayerScreen {
             if let Some(v) = &w.short_view_count_text {
                 byline.push_str(&format!("  \u{2022}  {v}"));
             }
-            if let Some(d) = w.published_text.as_deref().filter(|d| !d.is_empty()) {
+            if let Some(d) = common::video_age(w) {
                 byline.push_str(&format!("  \u{2022}  {d}"));
             }
         }
@@ -1063,8 +1063,12 @@ impl Screen<YtHost> for PlayerScreen {
         let play = if matches!(st.phase, Phase::Paused | Phase::Ended) { Kind::Play } else { Kind::Pause };
         let repeat_icon = match s.playback_mode {
             PlaybackMode::RepeatOne => Kind::Repeat1,
-            PlaybackMode::ListOnce | PlaybackMode::ListRepeat | PlaybackMode::Shuffle | PlaybackMode::Reverse => Kind::Repeat,
-            PlaybackMode::PauseEach | PlaybackMode::CloseEach => Kind::PauseEnd,
+            PlaybackMode::ListOnce => Kind::ListEnd,
+            PlaybackMode::ListRepeat => Kind::Repeat,
+            PlaybackMode::Shuffle => Kind::Shuffle,
+            PlaybackMode::Reverse => Kind::ListReverse,
+            PlaybackMode::PauseEach => Kind::PauseEnd,
+            PlaybackMode::CloseEach => Kind::Leave,
             PlaybackMode::PlayNext => Kind::Autoplay,
         };
         let kinds = [
@@ -1212,7 +1216,7 @@ impl PlayerScreen {
             if let Some(v) = &w.short_view_count_text {
                 byline.push_str(&format!(" \u{2022} {v}"));
             }
-            if let Some(d) = w.published_text.as_deref().filter(|d| !d.is_empty()) {
+            if let Some(d) = common::video_age(w) {
                 byline.push_str(&format!(" \u{2022} {d}"));
             }
         }

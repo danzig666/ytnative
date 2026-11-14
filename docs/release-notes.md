@@ -1,1 +1,2 @@
-- Fixed: a long chapter name in the player controls no longer covers the views, likes and subscribers beside it; it is shortened to the room left
+- Changed: each playback mode has its own icon on the player's playback mode button (list once, shuffle, reverse and leave the player looked like other modes)
+- Changed: the player and the video info show the upload date for videos a year old or more ("November 10, 2014" instead of "12y ago"), written out in the interface language

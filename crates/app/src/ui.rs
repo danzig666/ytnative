@@ -883,6 +883,10 @@ pub mod icon {
     const REPEAT: &str = r##"<path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/>"##;
     const REPEAT1: &str = r##"<path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/><path d="M11 10h1v4"/>"##;
     const AUTOPLAY: &str = r##"<path d="M5 5l9 7-9 7z"/><path d="M14 5l9 7-9 7"/>"##;
+    const LIST_END: &str = r##"<path d="M16 12H3"/><path d="M16 6H3"/><path d="M10 18H3"/><path d="M21 6v10a2 2 0 0 1-2 2h-5"/><path d="m16 16-2 2 2 2"/>"##;
+    const SHUFFLE: &str = r##"<path d="m18 14 4 4-4 4"/><path d="m18 2 4 4-4 4"/><path d="M2 18h1.4c1.3 0 2.5-.6 3.3-1.7l6.1-8.6c.7-1.1 2-1.7 3.3-1.7H22"/><path d="M2 6h1.9c1.5 0 2.9.9 3.6 2.2"/><path d="M22 18h-5.9c-1.3 0-2.6-.7-3.3-1.8l-.5-.8"/>"##;
+    const LIST_REVERSE: &str = r##"<path d="M3 6h10"/><path d="M3 12h10"/><path d="M3 18h10"/><path d="M19 20V4"/><path d="m15 8 4-4 4 4"/>"##;
+    const LEAVE: &str = r##"<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/>"##;
     const PAUSE_END: &str = r##"<circle cx="12" cy="12" r="10"/><path d="M10 15V9"/><path d="M14 15V9"/>"##;
     const GAUGE: &str = r##"<path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>"##;
     const LIST_PLUS: &str = r##"<path d="M11 12H3"/><path d="M16 6H3"/><path d="M16 18H3"/><path d="M18 9v6"/><path d="M21 12h-6"/>"##;
@@ -953,6 +957,14 @@ pub mod icon {
         Shield,
         ScreenOff,
         Clock,
+        /// Playback mode "the list once": a list ending in a return arrow.
+        ListEnd,
+        /// Playback mode "shuffle": crossing arrows.
+        Shuffle,
+        /// Playback mode "reverse": a list with an upward arrow beside it.
+        ListReverse,
+        /// Playback mode "leave the player": an arrow out of a door.
+        Leave,
     }
 
     fn svg(k: Kind, filled: bool) -> &'static str {
@@ -963,7 +975,7 @@ pub mod icon {
             for body in [
                 THUMB_UP, THUMB_DOWN, CHAT, GEAR, PLAY, PAUSE, PREV, NEXT, LIST, HOME, FLAME, SUBS, USERS, HISTORY, LIBRARY, MUSIC, GAMEPAD,
                 NEWS, MIC, LIVE, FILM, TROPHY, TRENDING, SEARCH, USER, STAR, FOLDER, REPEAT, REPEAT1, AUTOPLAY, PAUSE_END, GAUGE,
-                LIST_PLUS, BELL, INFO, SHIELD, SCREEN_OFF, CLOCK,
+                LIST_PLUS, BELL, INFO, SHIELD, SCREEN_OFF, CLOCK, LIST_END, SHUFFLE, LIST_REVERSE, LEAVE,
             ] {
                 v.push(format!("{HEAD}{body}</svg>"));
                 v.push(format!("{}{body}</svg>", HEAD.replace(r##"fill="none""##, r##"fill="#ffffff""##)));
@@ -1009,6 +1021,10 @@ pub mod icon {
             Kind::Shield => 70,
             Kind::ScreenOff => 72,
             Kind::Clock => 74,
+            Kind::ListEnd => 76,
+            Kind::Shuffle => 78,
+            Kind::ListReverse => 80,
+            Kind::Leave => 82,
         };
         &all[i + filled as usize]
     }
