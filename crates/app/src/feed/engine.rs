@@ -358,7 +358,9 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
         height: vt.height,
         fps,
         audio: adecl,
-        trick_play: !live,
+        // Off: with the trick-play options the C3 took 4 to 10 s to report loadCompleted, so
+        // every video started slowly or not at all (0.2.20). Speeds go to the system player.
+        trick_play: false,
     };
     let payload = payload::build(&spec);
     let env = payload::sink_envelope(vdecl, vt.width, vt.height, fps);

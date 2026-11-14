@@ -1,5 +1,1 @@
-- New: playback speed works in 4K: the speed changes on the running video, without switching to the system player (tested on the LG C3: 1.5x played at 1.48x, back to Normal at 1.0x)
-- New: the speed button opens the list of speeds, from 0.25x to 4x, as in SmartTube
-- New: long video descriptions scroll: with Up / Down when the description is selected (Left from the chapters), with the wheel, or with the pointer resting at the top or bottom edge
-- Fixed: speeds above 2x were played at 2x
-- Fixed: a speed chosen while a video is still starting no longer freezes the picture
+- Fixed: videos started very slowly or not at all in 0.2.20; the 4K speed change it added is turned off again, so choosing a speed switches the video to the system player (up to 1080p) as in 0.2.19
