@@ -68,6 +68,12 @@ pub fn add_video_body(playlist_id: &str, video_id: &str) -> Value {
     json!({ "playlistId": playlist_id, "actions": [{ "addedVideoId": video_id, "action": "ACTION_ADD_VIDEO" }] })
 }
 
+/// Adds several videos in one edit.
+pub fn add_videos_body(playlist_id: &str, video_ids: &[&str]) -> Value {
+    let actions: Vec<Value> = video_ids.iter().map(|v| json!({ "addedVideoId": v, "action": "ACTION_ADD_VIDEO" })).collect();
+    json!({ "playlistId": playlist_id, "actions": actions })
+}
+
 pub fn remove_video_body(playlist_id: &str, video_id: &str) -> Value {
     json!({ "playlistId": playlist_id, "actions": [{ "removedVideoId": video_id, "action": "ACTION_REMOVE_VIDEO_BY_VIDEO_ID" }] })
 }
@@ -580,6 +586,11 @@ impl Session {
 
     pub fn add_to_playlist(&mut self, playlist_id: &str, video_id: &str) -> Result<()> {
         self.signed_raw("browse/edit_playlist", add_video_body(playlist_id, video_id)).map(drop)
+    }
+
+    /// Adds several videos at once (YouTube takes a batch per edit).
+    pub fn add_many_to_playlist(&mut self, playlist_id: &str, video_ids: &[&str]) -> Result<()> {
+        self.signed_raw("browse/edit_playlist", add_videos_body(playlist_id, video_ids)).map(drop)
     }
 
     pub fn remove_from_playlist(&mut self, playlist_id: &str, video_id: &str) -> Result<()> {

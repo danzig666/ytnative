@@ -1,2 +1,9 @@
-- Changed: each playback mode has its own icon on the player's playback mode button (list once, shuffle, reverse and leave the player looked like other modes)
-- Changed: the player and the video info show the upload date for videos a year old or more ("November 10, 2014" instead of "12y ago"), written out in the interface language
+- New: playlists on this TV, alongside your YouTube playlists: no account needed and nothing is sent to YouTube. "Save to playlist…" shows them under "On this TV", with "New playlist on this TV"
+- New: the Library starts with an "On this TV" row, one card per playlist; playing from one follows its order with Next, Previous and the playback modes
+- New: editing: remove a video, move it to the top, up or down; rename, delete, shuffle, play all and pin a playlist to the sidebar
+- New: "Save the queue as a playlist on this TV" in the player menu, and the setting "Keep Play next after closing"
+- New: "Copy to this TV" on a YouTube playlist, and "Copy to YouTube" on a playlist on this TV (when signed in)
+- New: the on-screen keyboard has accented letters (the "áé" key): á, é, í, ó, ö, ő, ú, ü, ű and more
+- Fixed: search suggestions with accented letters came back garbled
+- Fixed: "Save to playlist…" stayed on "Loading your playlists…"
+- Playlists on this TV are included in settings backups and the Google Drive backup

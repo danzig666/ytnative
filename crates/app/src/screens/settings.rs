@@ -181,6 +181,7 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
             Opt("Loop Shorts", |s| on_off(s.loop_shorts), |s, _| s.loop_shorts = !s.loop_shorts),
             Opt("Leave the player with a double BACK", |s| on_off(s.double_back_exit), |s, _| s.double_back_exit = !s.double_back_exit),
             Opt("Show the controls when the next video starts", |s| on_off(s.hud_on_next_video), |s, _| s.hud_on_next_video = !s.hud_on_next_video),
+            Opt("Keep Play next after closing", |s| on_off(s.keep_play_next), |s, _| s.keep_play_next = !s.keep_play_next),
             Opt("Preferred audio language", |s| if s.audio_language.is_empty() { "Original".into() } else { language_name(&s.audio_language) }, |s, d| {
                 let mut l = vec![""];
                 l.extend(language_codes());
@@ -365,6 +366,10 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
                 card_item!(12),
                 card_item!(13),
                 card_item!(14),
+                card_item!(15),
+                card_item!(16),
+                card_item!(17),
+                card_item!(18),
             ]);
             v
         }

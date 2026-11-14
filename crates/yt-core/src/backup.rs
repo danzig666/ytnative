@@ -1,7 +1,8 @@
 //! Backup / restore of the app's own files as one JSON bundle.
 //!
 //! A bundle carries `settings.json` (which also holds the blocked channels and other content
-//! filters), `channel_groups.json`, `search_history.json` and `player_memory.json`. The signed-in
+//! filters), `channel_groups.json`, `local_playlists.json` (the playlists on this TV),
+//! `search_history.json` and `player_memory.json`. The signed-in
 //! accounts (`accounts.json`) are included only when the user opts in
 //! ([`BackupOptions::include_accounts`]); such a bundle is flagged `contains_sign_in_tokens`
 //! because anyone holding the file can use those YouTube sign-ins. Restoring accounts is likewise
@@ -24,6 +25,7 @@ pub const BACKUP_VERSION: u32 = 1;
 pub const FILES: &[&str] = &[
     "settings.json",
     crate::channel_groups::FILE_NAME,
+    crate::local_playlists::FILE_NAME,
     crate::search_history::FILE_NAME,
     crate::memory::FILE_NAME,
 ];
@@ -119,6 +121,9 @@ pub fn validate(b: &Bundle) -> Result<()> {
         let ok = match name.as_str() {
             crate::channel_groups::FILE_NAME => {
                 serde_json::from_value::<crate::channel_groups::Store>(v.clone()).map(drop)
+            }
+            crate::local_playlists::FILE_NAME => {
+                serde_json::from_value::<crate::local_playlists::Store>(v.clone()).map(drop)
             }
             crate::search_history::FILE_NAME => {
                 serde_json::from_value::<crate::search_history::SearchHistory>(v.clone()).map(drop)
@@ -290,6 +295,10 @@ mod tests {
         let id = g.create("News");
         g.add_channel(&id, crate::channel_groups::ChannelRef::new("UC1"));
         g.save().unwrap();
+        let mut l = crate::local_playlists::Store::load_from(&dir.join(crate::local_playlists::FILE_NAME));
+        let id = l.create("Evening");
+        l.add(&id, crate::local_playlists::Video::new("vid1"));
+        l.save().unwrap();
         let mut h = crate::search_history::SearchHistory::load_from(&dir.join(crate::search_history::FILE_NAME));
         h.add("rust");
         h.save().unwrap();
@@ -305,16 +314,18 @@ mod tests {
 
         let b = create_bundle_from(&src, BackupOptions::default()).unwrap();
         assert!(!b.contains_sign_in_tokens);
-        assert_eq!(b.file_names(), ["channel_groups.json", "search_history.json", "settings.json"]);
+        assert_eq!(b.file_names(), ["channel_groups.json", "local_playlists.json", "search_history.json", "settings.json"]);
 
         let b2 = from_bytes(&to_bytes(&b).unwrap()).unwrap();
         assert_eq!(b, b2);
         let r = restore_into(&dst, &b2, RestoreOptions::default()).unwrap();
-        assert_eq!(r.restored.len(), 3);
+        assert_eq!(r.restored.len(), 4);
         let s: Value = serde_json::from_slice(&std::fs::read(dst.join("settings.json")).unwrap()).unwrap();
         assert_eq!(s["blocked_channels"][0], "Spam");
         let g = crate::channel_groups::Store::load_from(&dst.join(crate::channel_groups::FILE_NAME));
         assert_eq!(g.groups[0].channels[0].id, "UC1");
+        let l = crate::local_playlists::Store::load_from(&dst.join(crate::local_playlists::FILE_NAME));
+        assert_eq!(l.lists[0].items[0].video_id, "vid1");
 
         // Accounts only with opt-in, both ways.
         let ba = create_bundle_from(&src, BackupOptions { include_accounts: true }).unwrap();

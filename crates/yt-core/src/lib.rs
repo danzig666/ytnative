@@ -13,6 +13,7 @@ pub mod ext;
 pub mod fsutil;
 pub mod gdrive;
 pub mod innertube;
+pub mod local_playlists;
 pub mod lounge;
 pub mod memory;
 pub mod model;

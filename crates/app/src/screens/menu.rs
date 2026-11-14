@@ -1,7 +1,7 @@
 //! Modal menus: a card's actions (hold OK on a card) and the player options (Up in the player).
 //! A panel on the right; OK runs an action, Left/Right change a player option in place.
 
-use crate::host::{UserAction, YtArg, YtFx, YtHost};
+use crate::host::{LocalOp, NamePurpose, UserAction, YtArg, YtFx, YtHost};
 use crate::i18n::tr;
 use crate::settings::{PlaybackMode, SLEEP_MINS, SPEEDS};
 use crate::store::FeedKey;
@@ -13,6 +13,7 @@ use plx_ui::frame::Budget;
 use plx_ui::screen::{At, Dir, DrawFrame, Focusable, GroupSpec, Placed, RenderStrategy, Screen, Step};
 use plx_ui::Rect;
 use std::borrow::Cow;
+use yt_core::local_playlists::{Move, Video};
 use yt_core::model::Endpoint;
 
 const G: GroupId = GroupId(1);
@@ -28,8 +29,8 @@ enum Act {
     UnblockChannel(String),
     /// Play (video id) from the start and / or without watch history.
     PlayWith(String, bool, bool),
-    /// Add to / remove from "Play next": (video id, title, add).
-    PlayNext(String, String, bool),
+    /// Add to / remove from "Play next": (video, add).
+    PlayNext(Video, bool),
     Pin(String, String, Option<String>),
     AddToGroup(Option<String>, String, String, Option<String>),
     Unpin(String),
@@ -38,9 +39,32 @@ enum Act {
     Comments(String),
     Info,
     Filter(u8),
-    PickPlaylist(String, String),
+    PickPlaylist(Video),
     TogglePlaylist(String, String, bool),
     NewPlaylist(String, String),
+    /// A row that only labels the rows under it ("On this TV").
+    Header,
+    /// A row that only tells something ("Loading your playlists").
+    Note,
+    /// Add a video to a playlist on this TV (true) or take it out: (list id, video, add).
+    ToggleLocal(String, Video, bool),
+    /// A new playlist on this TV holding this video (asks for its name).
+    NewLocal(Video),
+    /// In a playlist on this TV: take a video out, or move it: (list id, video id).
+    LocalRemove(String, String),
+    LocalMove(String, String, Move),
+    /// Play a playlist on this TV from its first video, or shuffled: (list id, shuffle).
+    PlayList(String, bool),
+    /// (list id, current title).
+    RenameLocal(String, String),
+    /// (list id, title): a second OK deletes.
+    DeleteLocal(String, String),
+    /// A YouTube playlist (browse id, title) becomes a playlist on this TV.
+    CopyToTv(String, String),
+    /// A playlist on this TV (list id) becomes a private YouTube playlist.
+    CopyToYouTube(String),
+    /// "Play next" becomes a playlist on this TV (asks for its name).
+    SaveQueue,
     ApplyFilters(String),
     Speed,
     AudioTrack,
@@ -73,7 +97,7 @@ impl LogicalState for State {
 
 pub struct MenuScreen {
     /// Set on the playlist picker: rows are rebuilt when the playlists arrive.
-    picker_for: Option<String>,
+    picker_for: Option<Video>,
     title: String,
     acts: Vec<(String, Act)>,
     list: VList,
@@ -82,6 +106,8 @@ pub struct MenuScreen {
     closed_row: std::cell::Cell<usize>,
     /// Row to put focus on at the next reconcile (the playlist picker after its list changed).
     refocus: std::cell::Cell<Option<usize>>,
+    /// The row of a "Delete" the first OK was pressed on (the second one deletes).
+    armed: Option<usize>,
     state: State,
 }
 
@@ -91,16 +117,20 @@ const SUB_STYLES: &[&str] = &["outline", "shadow", "box"];
 const SUB_FONTS: &[&str] = &["default", "sans", "serif", "mono", "roboto"];
 
 /// Card-menu item kinds, in the default order, with their settings labels.
-pub const CARD_ITEMS: [(&str, &str); 15] = [
+pub const CARD_ITEMS: [(&str, &str); 19] = [
     ("play", "Card menu: Play"),
     ("play_start", "Card menu: Play from the start"),
     ("play_private", "Card menu: Play without history"),
     ("play_next", "Card menu: Play next"),
+    ("play_all", "Card menu: Play all and Shuffle"),
+    ("tv_order", "Card menu: Remove and move videos in a playlist on this TV"),
     ("open", "Card menu: Open channel / playlist"),
+    ("tv_manage", "Card menu: Rename and delete a playlist on this TV"),
     ("groups", "Card menu: Channel groups"),
     ("pin", "Card menu: Pin to sidebar"),
     ("watch_later", "Card menu: Save to Watch later"),
     ("playlist", "Card menu: Save to playlist"),
+    ("copy_list", "Card menu: Copy a playlist"),
     ("youtube", "Card menu: YouTube's items"),
     ("more_from", "Card menu: More from channel"),
     ("block", "Card menu: Block channel"),
@@ -116,6 +146,7 @@ impl MenuScreen {
             choice: None,
             closed_row: std::cell::Cell::new(0),
             refocus: std::cell::Cell::new(None),
+            armed: None,
             state: State(title.clone()),
             title,
             acts,
@@ -136,14 +167,48 @@ impl MenuScreen {
                 tagged.push((kind, tr("Play").to_string(), Act::Play(v.to_string())));
                 tagged.push(("play_start", tr("Play from the start").to_string(), Act::PlayWith(v.to_string(), true, false)));
                 tagged.push(("play_private", tr("Play without history").to_string(), Act::PlayWith(v.to_string(), false, true)));
-                if cx.views.store.play_next.iter().any(|(q, _)| q == v) {
-                    tagged.push(("play_next", tr("Remove from Play next").to_string(), Act::PlayNext(v.to_string(), card.title.clone(), false)));
+                let video = card.local_video().unwrap_or_else(|| Video::new(v));
+                if cx.views.store.play_next.iter().any(|q| q.video_id == v) {
+                    tagged.push(("play_next", tr("Remove from Play next").to_string(), Act::PlayNext(video, false)));
                 } else {
-                    tagged.push(("play_next", tr("Play next").to_string(), Act::PlayNext(v.to_string(), card.title.clone(), true)));
+                    tagged.push(("play_next", tr("Play next").to_string(), Act::PlayNext(video, true)));
+                }
+                // A video of a playlist on this TV: take it out, or move it in the list.
+                let store = cx.views.store;
+                let in_list = store.feeds.iter().find_map(|(k, f)| match k {
+                    FeedKey::Local(id) if f.cards.iter().any(|c| c.elem == elem) => Some(id.clone()),
+                    _ => None,
+                });
+                if let Some(list) = in_list.as_ref().and_then(|id| store.local.get(id)) {
+                    if let Some(i) = list.items.iter().position(|x| x.video_id == v) {
+                        let (id, vid) = (list.id.clone(), v.to_string());
+                        tagged.push(("tv_order", tr("Remove from this playlist").to_string(), Act::LocalRemove(id.clone(), vid.clone())));
+                        if i > 0 {
+                            tagged.push(("tv_order", tr("Move to the top").to_string(), Act::LocalMove(id.clone(), vid.clone(), Move::Top)));
+                            tagged.push(("tv_order", tr("Move up").to_string(), Act::LocalMove(id.clone(), vid.clone(), Move::Up)));
+                        }
+                        if i + 1 < list.items.len() {
+                            tagged.push(("tv_order", tr("Move down").to_string(), Act::LocalMove(id, vid, Move::Down)));
+                        }
+                    }
                 }
                 if !cx.views.store.settings.child_mode {
                     tagged.push(("comments", tr("Comments").to_string(), Act::Comments(v.to_string())));
                 }
+            }
+            // A playlist on this TV (a card of the Library's "On this TV" row).
+            if let Some(list) = card.local_list().and_then(|id| cx.views.store.local.get(id)) {
+                if !list.items.is_empty() {
+                    tagged.push(("play_all", tr("Play all").to_string(), Act::PlayList(list.id.clone(), false)));
+                    tagged.push(("play_all", tr("Shuffle").to_string(), Act::PlayList(list.id.clone(), true)));
+                }
+                tagged.push(("tv_manage", tr("Rename").to_string(), Act::RenameLocal(list.id.clone(), list.title.clone())));
+                tagged.push(("tv_manage", tr("Delete").to_string(), Act::DeleteLocal(list.id.clone(), list.title.clone())));
+                if cx.views.store.signed_in && !list.items.is_empty() {
+                    tagged.push(("copy_list", tr("Copy to YouTube").to_string(), Act::CopyToYouTube(list.id.clone())));
+                }
+            } else if let Some(browse_id) = youtube_playlist(card) {
+                tagged.push(("copy_list", tr("Copy to this TV").to_string(), Act::CopyToTv(browse_id, card.title.clone())));
             }
             if let Some(Endpoint::Browse { browse_id, params }) = &card.item.endpoint {
                 if browse_id.starts_with("UC") {
@@ -174,7 +239,7 @@ impl MenuScreen {
             }
             if let Some(v) = card.video_id() {
                 tagged.push(("watch_later", tr("Save to Watch later").to_string(), Act::User(UserAction::WatchLater(v.to_string()))));
-                tagged.push(("playlist", tr("Save to playlist\u{2026}").to_string(), Act::PickPlaylist(v.to_string(), card.title.clone())));
+                tagged.push(("playlist", tr("Save to playlist\u{2026}").to_string(), Act::PickPlaylist(card.local_video().unwrap_or_else(|| Video::new(v)))));
             }
             // The card's own YouTube menu (Not interested, Don't recommend channel, Remove from
             // history, ...). Lazy "More" panels and plain navigation entries are left out.
@@ -209,17 +274,35 @@ impl MenuScreen {
         Self::make(entry, title, acts)
     }
 
-    /// "Save to playlist": one row per playlist (ticked when it already holds the video).
-    pub fn playlists(entry: EntryId, video_id: String, title: String, cx: &Cx<'_, YtHost>) -> Self {
+    /// "Save to playlist": one row per playlist (ticked when it already holds the video): the
+    /// YouTube playlists first (signed in), then the playlists on this TV.
+    pub fn playlists(entry: EntryId, video: Video, cx: &Cx<'_, YtHost>) -> Self {
+        let store = cx.views.store;
         let mut acts = Vec::new();
-        for o in cx.views.store.playlist_options.get(&video_id).into_iter().flatten() {
-            let mark = if o.contains { "\u{2713}  " } else { "     " };
-            acts.push((format!("{mark}{}", o.title), Act::TogglePlaylist(o.playlist_id.clone(), video_id.clone(), !o.contains)));
+        if store.signed_in {
+            match store.playlist_options.get(&video.video_id) {
+                None => acts.push((tr("Loading your playlists\u{2026}").to_string(), Act::Note)),
+                Some(opts) => {
+                    for o in opts {
+                        let mark = if o.contains { "\u{2713}  " } else { "     " };
+                        acts.push((format!("{mark}{}", o.title), Act::TogglePlaylist(o.playlist_id.clone(), video.video_id.clone(), !o.contains)));
+                    }
+                }
+            }
+            acts.push((tr("+  New private playlist").to_string(), Act::NewPlaylist(video.title.clone(), video.video_id.clone())));
         }
-        acts.push((tr("+  New private playlist").to_string(), Act::NewPlaylist(title.clone(), video_id.clone())));
+        acts.push((tr("On this TV").to_string(), Act::Header));
+        for l in &store.local.lists {
+            let has = l.contains(&video.video_id);
+            let mark = if has { "\u{2713}  " } else { "     " };
+            acts.push((format!("{mark}{}", l.title), Act::ToggleLocal(l.id.clone(), video.clone(), !has)));
+        }
+        acts.push((tr("+  New playlist on this TV").to_string(), Act::NewLocal(video.clone())));
         acts.push((tr("Close").to_string(), Act::Close));
         let mut m = Self::make(entry, tr("Save to playlist").to_string(), acts);
-        m.picker_for = Some(video_id);
+        // Focus starts on the first row that does something.
+        m.refocus.set(m.acts.iter().position(|a| !matches!(a.1, Act::Header | Act::Note)));
+        m.picker_for = Some(video);
         m
     }
 
@@ -278,7 +361,10 @@ impl MenuScreen {
                 ));
             }
             acts.push((tr("Save to Watch later").to_string(), Act::User(UserAction::WatchLater(st.video_id.clone()))));
-            acts.push((tr("Save to playlist\u{2026}").to_string(), Act::PickPlaylist(st.video_id.clone(), st.title.clone())));
+            acts.push((tr("Save to playlist\u{2026}").to_string(), Act::PickPlaylist(super::player::playing_video(st))));
+            if !cx.views.store.play_next.is_empty() {
+                acts.push((tr("Save the queue as a playlist on this TV").to_string(), Act::SaveQueue));
+            }
             acts.push((tr("Video info & chapters").to_string(), Act::Info));
             if !cx.views.store.settings.child_mode {
                 acts.push((tr("Comments").to_string(), Act::Comments(st.video_id.clone())));
@@ -447,7 +533,7 @@ impl MenuScreen {
             }
             Act::OpenChannel(id) | Act::OpenPlaylist(id) => {
                 fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
-                fx.push(Fx::Nav(NavOp::Push(YtArg::Feed(FeedKey::Browse { id: id.clone(), params: None }))));
+                fx.push(Fx::Nav(NavOp::Push(YtArg::Feed(FeedKey::browse(id, None)))));
             }
             Act::SearchFor(q) => {
                 fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
@@ -551,10 +637,63 @@ impl MenuScreen {
                 fx.push(Fx::App(YtFx::Act(a.clone())));
                 fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
             }
-            Act::PickPlaylist(v, t) => {
-                fx.push(Fx::App(YtFx::LoadPlaylists(v.clone())));
+            Act::PickPlaylist(v) => {
                 fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
-                fx.push(Fx::Nav(NavOp::Present(YtArg::PlaylistPicker(v.clone(), t.clone()))));
+                fx.push(Fx::Nav(NavOp::Present(YtArg::PlaylistPicker(v.clone()))));
+            }
+            Act::Header | Act::Note => {}
+            Act::ToggleLocal(list_id, video, add) => {
+                fx.push(Fx::App(YtFx::Local(LocalOp::Toggle { list_id: list_id.clone(), video: video.clone(), add: *add })));
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
+            }
+            Act::NewLocal(video) => {
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
+                fx.push(Fx::Nav(NavOp::Push(YtArg::NameEntry(NamePurpose::NewLocal(vec![video.clone()])))));
+            }
+            Act::SaveQueue => {
+                if cx.views.player.phase == crate::player::Phase::Playing {
+                    fx.push(Fx::App(YtFx::TogglePause));
+                }
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
+                fx.push(Fx::Nav(NavOp::Push(YtArg::NameEntry(NamePurpose::NewLocal(cx.views.store.play_next.clone())))));
+            }
+            Act::LocalRemove(list_id, video_id) => {
+                fx.push(Fx::App(YtFx::Local(LocalOp::Remove { list_id: list_id.clone(), video_id: video_id.clone() })));
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
+            }
+            Act::LocalMove(list_id, video_id, to) => {
+                fx.push(Fx::App(YtFx::Local(LocalOp::Move { list_id: list_id.clone(), video_id: video_id.clone(), to: *to })));
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
+            }
+            Act::PlayList(list_id, shuffle) => {
+                let mut ids = cx.views.store.local.get(list_id).map(|l| l.video_ids()).unwrap_or_default();
+                if *shuffle {
+                    shuffle_ids(&mut ids, cx.views.now_ms);
+                }
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
+                if let Some(first) = ids.first().cloned() {
+                    fx.push(Fx::App(YtFx::SetLocalQueue(ids)));
+                    fx.push(Fx::Nav(NavOp::Push(YtArg::Player { video_id: first, playlist: None })));
+                }
+            }
+            Act::RenameLocal(list_id, title) => {
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
+                fx.push(Fx::Nav(NavOp::Push(YtArg::NameEntry(NamePurpose::RenameLocal(list_id.clone(), title.clone())))));
+            }
+            Act::DeleteLocal(list_id, _) => {
+                fx.push(Fx::App(YtFx::Local(LocalOp::Delete(list_id.clone()))));
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
+            }
+            Act::CopyToTv(browse_id, title) => {
+                fx.push(Fx::App(YtFx::Act(UserAction::CopyToTv { browse_id: browse_id.clone(), title: title.clone() })));
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
+            }
+            Act::CopyToYouTube(list_id) => {
+                if let Some(l) = cx.views.store.local.get(list_id) {
+                    fx.push(Fx::App(YtFx::Toast(tr("Copying the playlist\u{2026}").to_string())));
+                    fx.push(Fx::App(YtFx::Act(UserAction::CopyToYouTube { title: l.title.clone(), video_ids: l.video_ids() })));
+                }
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
             }
             Act::TogglePlaylist(pl, v, add) => {
                 fx.push(Fx::App(YtFx::Act(UserAction::Playlist { playlist_id: pl.clone(), video_id: v.clone(), add: *add })));
@@ -568,8 +707,8 @@ impl MenuScreen {
                 fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
                 fx.push(Fx::Nav(NavOp::Push(YtArg::Info)));
             }
-            Act::PlayNext(v, title, add) => {
-                fx.push(Fx::App(YtFx::PlayNext { video_id: v.clone(), title: title.clone(), add: *add }));
+            Act::PlayNext(v, add) => {
+                fx.push(Fx::App(YtFx::PlayNext { video: v.clone(), add: *add }));
                 fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
             }
             Act::Comments(v) => {
@@ -613,12 +752,62 @@ impl MenuScreen {
     }
 }
 
+/// The YouTube playlist a card opens, as a browse id ("VL..."); not mixes, which never end.
+fn youtube_playlist(card: &crate::store::Card) -> Option<String> {
+    use yt_core::model::ItemKind;
+    match &card.item.endpoint {
+        Some(Endpoint::Browse { browse_id, .. }) if browse_id.starts_with("VL") => Some(browse_id.clone()),
+        Some(Endpoint::Watch { playlist_id: Some(pl), .. }) if card.item.kind == ItemKind::Playlist && !pl.starts_with("RD") => Some(format!("VL{pl}")),
+        None if card.item.kind == ItemKind::Playlist && !card.item.id.is_empty() => Some(format!("VL{}", card.item.id)),
+        _ => None,
+    }
+}
+
+/// Shuffles `ids` in place (Fisher and Yates, seeded from the clock).
+fn shuffle_ids(ids: &mut [String], now_ms: u32) {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
+    let mut seed = (nanos as u64 ^ ((now_ms as u64) << 32)) | 1;
+    for i in (1..ids.len()).rev() {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        ids.swap(i, (seed % (i as u64 + 1)) as usize);
+    }
+}
+
+impl MenuScreen {
+    /// The playlist picker: rebuilds its rows when the playlists they show changed (YouTube's
+    /// arrived, or one on this TV changed). Checked before each draw, since a worker's answer
+    /// reaches the store and wakes a frame but is not delivered to this screen.
+    fn refresh_picker(&mut self, cx: &Cx<'_, YtHost>) {
+        let Some(v) = self.picker_for.clone() else { return };
+        let fresh = Self::playlists(self.list.entry, v, cx);
+        if fresh.acts.iter().map(|a| &a.0).eq(self.acts.iter().map(|a| &a.0)) {
+            return;
+        }
+        // The row under focus, by label: it must stay under focus when rows are inserted above
+        // it (an OK right then must not hit a different playlist).
+        let focused_label = self.list.focused(cx, self.acts.len()).and_then(|i| self.acts.get(i)).map(|a| a.0.clone());
+        self.acts = fresh.acts;
+        match focused_label.and_then(|l| self.acts.iter().position(|a| a.0 == l)) {
+            Some(i) => self.refocus.set(Some(i)),
+            // Focus was on the loading row, which is gone: the first row that does something.
+            None => self.refocus.set(fresh.refocus.take()),
+        }
+    }
+}
+
 impl Machine<YtHost> for MenuScreen {
     type Ev = ScreenEvent<YtHost>;
     fn step(&mut self, ev: &Self::Ev, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) -> Handled {
         match ev {
             ScreenEvent::Mount => {
                 ui::MENUS_OPEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // The picker asks for the YouTube playlists itself: the answer comes back to the
+                // screen that asked, and only the picker rebuilds its rows with it.
+                if let Some(v) = self.picker_for.as_ref().filter(|_| cx.views.store.signed_in) {
+                    fx.push(Fx::App(YtFx::LoadPlaylists(v.video_id.clone())));
+                }
             }
             ScreenEvent::Unmount => {
                 ui::MENUS_OPEN.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
@@ -627,26 +816,6 @@ impl Machine<YtHost> for MenuScreen {
         }
         if let Some(a) = super::common::press_commit_as_activate(ev, cx, |_| true) {
             return self.step(&a, cx, fx);
-        }
-        if let (Some(v), ScreenEvent::Async(..)) = (&self.picker_for, ev) {
-            // The row under focus, by label: it must stay under focus when rows are inserted
-            // above it (an OK right then must not hit a different playlist).
-            let focused_label = self.list.focused(cx, self.acts.len()).and_then(|i| self.acts.get(i)).map(|a| a.0.clone());
-            let fresh = Self::playlists(self.list.entry, v.clone(), String::new(), cx);
-            // keep the title used for "New playlist"
-            let keep_title = self.acts.iter().find_map(|a| if let Act::NewPlaylist(t, _) = &a.1 { Some(t.clone()) } else { None });
-            self.acts = fresh.acts;
-            if let Some(l) = focused_label {
-                self.refocus.set(self.acts.iter().position(|a| a.0 == l));
-            }
-            if let Some(t) = keep_title {
-                for a in self.acts.iter_mut() {
-                    if let Act::NewPlaylist(tt, _) = &mut a.1 {
-                        *tt = t.clone();
-                    }
-                }
-            }
-            fx.invalidate(plx_machine::present::Provenance::Lifecycle);
         }
         let n = self.acts.len();
         match ev {
@@ -664,6 +833,16 @@ impl Machine<YtHost> for MenuScreen {
             ScreenEvent::Activate(e) => {
                 if let Some(i) = self.list.index(*e, n) {
                     let act = self.acts[i].1.clone();
+                    // Delete asks for a second OK (as removing an account does).
+                    if let Act::DeleteLocal(_, title) = &act {
+                        if self.armed != Some(i) {
+                            self.armed = Some(i);
+                            fx.push(Fx::App(YtFx::Toast(tr("Press OK again to delete {}").replace("{}", &format!("\u{201C}{title}\u{201D}")))));
+                            fx.invalidate(plx_machine::present::Provenance::Input);
+                            return Handled::Yes;
+                        }
+                    }
+                    self.armed = None;
                     match self.choices(&act, cx) {
                         Some((v, cur)) => {
                             let anchor = self.list.place(*e, n, Some(i)).map(|p| p.rect).unwrap_or(self.list.rect);
@@ -755,23 +934,21 @@ impl Screen<YtHost> for MenuScreen {
     fn crumb(&self, _cx: &Cx<'_, YtHost>) -> Option<Cow<'_, str>> {
         None
     }
-    fn prepare(&mut self, _b: &mut Budget, _cx: &Cx<'_, YtHost>) {}
+    fn prepare(&mut self, _b: &mut Budget, cx: &Cx<'_, YtHost>) {
+        self.refresh_picker(cx);
+    }
     fn draw(&mut self, f: &mut DrawFrame<'_, '_, YtHost>) {
         let p = f.painter;
         let cx = f.cx;
         let _dim = ui::HdrDim::begin(ui::hdr_playing(cx.views.player));
         ui::fill(p, PANEL, 0.0, ui::PANEL);
         ui::text_raw(p, &f.measure.fit_line(&self.title, PANEL.w - 104.0, 30, true).to_string_lossy(), PANEL.x + 52.0, 62.0, 30, ui::WHITE, ui::ALIGN_LEFT, true);
-        if let Some(v) = &self.picker_for {
-            if !cx.views.store.playlist_options.contains_key(v) {
-                ui::text(p, "Loading your playlists\u{2026}", PANEL.x + 60.0, 150.0, 24, ui::FAINT, ui::ALIGN_LEFT, false);
-            }
-        }
         let rows: Vec<Row> = self
             .acts
             .iter()
             .map(|(label, act)| {
-                let r = Row::new(label.clone()).raw();
+                // A heading row is marked like the active choice of a list.
+                let r = Row::new(label.clone()).raw().active(matches!(act, Act::Header));
                 match self.value(act, cx) {
                     Some(v) => r.value(v),
                     None => r,

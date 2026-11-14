@@ -224,6 +224,11 @@ impl PlayerScreen {
             go_to(v, None, fx);
             return;
         }
+        // A playlist on this TV: its next video, in the list's order.
+        if in_local_list(cx, &self.video_id) {
+            self.step_queue(1, cx, fx);
+            return;
+        }
         match next_video(cx, &self.video_id, false) {
             Some((v, pl)) => go_to(v, pl.or(self.playlist.clone()), fx),
             None => self.step_queue(1, cx, fx),
@@ -233,6 +238,10 @@ impl PlayerScreen {
     /// Previous: the playlist's previous video, else the one played before this, else the
     /// previous one in the opened list.
     fn prev(&mut self, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
+        if in_local_list(cx, &self.video_id) {
+            self.step_queue(-1, cx, fx);
+            return;
+        }
         if let Some(pl) = cx.views.player.extras.watch.as_ref().and_then(|w| w.playlist.as_ref()) {
             if let Some(i) = pl.items.iter().position(|it| it.id == self.video_id).filter(|i| *i > 0) {
                 let video_id = pl.items[i - 1].id.clone();
@@ -288,6 +297,11 @@ impl PlayerScreen {
                 fx.push(Fx::Nav(NavOp::Pop));
                 return;
             }
+            // A playlist on this TV plays on in its order, then YouTube's pick (as a YouTube
+            // playlist does).
+            PlaybackMode::PlayNext if in_local_list(cx, &self.video_id) => {
+                list_step(cx, &self.video_id, 1, false).or_else(|| next_video(cx, &self.video_id, false))
+            }
             PlaybackMode::PlayNext => next_video(cx, &self.video_id, false),
             PlaybackMode::ListOnce => list_step(cx, &self.video_id, 1, false),
             PlaybackMode::ListRepeat => list_step(cx, &self.video_id, 1, true).or_else(|| next_video(cx, &self.video_id, true)),
@@ -340,8 +354,7 @@ impl PlayerScreen {
             OSD_CHANNEL => {}
             OSD_SAVE if !st.video_id.is_empty() => {
                 self.osd_sel = None;
-                fx.push(Fx::App(YtFx::LoadPlaylists(st.video_id.clone())));
-                fx.push(Fx::Nav(NavOp::Present(YtArg::PlaylistPicker(st.video_id.clone(), st.title.clone()))));
+                fx.push(Fx::Nav(NavOp::Present(YtArg::PlaylistPicker(playing_video(st)))));
             }
             OSD_SAVE => {}
             OSD_SUBSCRIBE if !st.channel_id.is_empty() => {
@@ -1604,7 +1617,24 @@ fn refusal_text(reason: &str) -> Option<&'static str> {
 
 /// The first video in "Play next" other than the one playing.
 fn queued_next(cx: &Cx<'_, YtHost>, current: &str) -> Option<String> {
-    cx.views.store.play_next.iter().map(|(v, _)| v).find(|v| v.as_str() != current).cloned()
+    cx.views.store.play_next.iter().map(|v| &v.video_id).find(|v| v.as_str() != current).cloned()
+}
+
+/// The video plays from a playlist on this TV (the opened list is one, and holds it).
+fn in_local_list(cx: &Cx<'_, YtHost>, current: &str) -> bool {
+    let s = cx.views.store;
+    s.queue_local && s.queue.iter().any(|v| v == current)
+}
+
+/// The playing video as a record for a playlist on this TV.
+pub fn playing_video(st: &crate::host::PlayerView) -> yt_core::local_playlists::Video {
+    yt_core::local_playlists::Video {
+        video_id: st.video_id.clone(),
+        title: st.title.clone(),
+        channel: st.author.clone(),
+        duration_secs: if st.live { 0 } else { st.duration_ms / 1000 },
+        thumbnail: None,
+    }
 }
 
 fn next_video(cx: &Cx<'_, YtHost>, current: &str, repeat_list: bool) -> Option<(String, Option<String>)> {

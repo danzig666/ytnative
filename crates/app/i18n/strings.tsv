@@ -447,3 +447,44 @@ in the afternoon	délután	nachmittags	de la tarde	de l'après-midi	дня
 in the evening	este	abends	de la noche	du soir	вечера
 at night	éjjel	nachts	de la madrugada	de la nuit	ночи
 Normal	Normál	Normal	Normal	Normale	Обычная
+On this TV	Ezen a tévén	Auf diesem Fernseher	En este televisor	Sur ce téléviseur	На этом телевизоре
+This playlist no longer exists	Ez a lejátszási lista már nem létezik	Diese Playlist gibt es nicht mehr	Esta lista ya no existe	Cette playlist n'existe plus	Этого плейлиста больше нет
+Created playlist “{}”	Elkészült a(z) „{}” lejátszási lista	Playlist „{}“ erstellt	Lista «{}» creada	Playlist « {} » créée	Плейлист «{}» создан
+Added to “{}”	Hozzáadva ehhez: „{}”	Zu „{}“ hinzugefügt	Añadido a «{}»	Ajouté à « {} »	Добавлено в «{}»
+This video is already in the playlist	Ez a videó már szerepel a lejátszási listában	Dieses Video ist schon in der Playlist	Este vídeo ya está en la lista	Cette vidéo est déjà dans la playlist	Это видео уже есть в плейлисте
+This playlist is full	Ez a lejátszási lista megtelt	Diese Playlist ist voll	Esta lista está llena	Cette playlist est pleine	Этот плейлист заполнен
+Removed from “{}”	Eltávolítva innen: „{}”	Aus „{}“ entfernt	Quitado de «{}»	Retiré de « {} »	Удалено из «{}»
+Removed from this playlist	Eltávolítva ebből a lejátszási listából	Aus dieser Playlist entfernt	Quitado de esta lista	Retiré de cette playlist	Удалено из этого плейлиста
+Renamed to “{}”	Új név: „{}”	Umbenannt in „{}“	Cambiado el nombre a «{}»	Renommée en « {} »	Переименовано в «{}»
+Playlist “{}” deleted	A(z) „{}” lejátszási lista törölve	Playlist „{}“ gelöscht	Lista «{}» eliminada	Playlist « {} » supprimée	Плейлист «{}» удалён
+This playlist has no videos to copy	Ebben a lejátszási listában nincs másolható videó	Diese Playlist hat keine Videos zum Kopieren	Esta lista no tiene vídeos que copiar	Cette playlist n'a aucune vidéo à copier	В этом плейлисте нет видео для копирования
+Copied to this TV: “{}”	Átmásolva erre a tévére: „{}”	Auf diesen Fernseher kopiert: „{}“	Copiada en este televisor: «{}»	Copiée sur ce téléviseur : « {} »	Скопировано на этот телевизор: «{}»
+Couldn't copy the playlist	Nem sikerült átmásolni a lejátszási listát	Die Playlist konnte nicht kopiert werden	No se ha podido copiar la lista	Impossible de copier la playlist	Не удалось скопировать плейлист
+Copied to YouTube: “{}”	Átmásolva a YouTube-ra: „{}”	Auf YouTube kopiert: „{}“	Copiada en YouTube: «{}»	Copiée sur YouTube : « {} »	Скопировано на YouTube: «{}»
+Couldn't copy the playlist to YouTube	Nem sikerült átmásolni a lejátszási listát a YouTube-ra	Die Playlist konnte nicht auf YouTube kopiert werden	No se ha podido copiar la lista en YouTube	Impossible de copier la playlist sur YouTube	Не удалось скопировать плейлист на YouTube
+Copying the playlist…	A lejátszási lista másolása…	Die Playlist wird kopiert…	Copiando la lista…	Copie de la playlist…	Копирование плейлиста…
+1 video	1 videó	1 Video	1 vídeo	1 vidéo	1 видео
+{} videos	{} videó	{} Videos	{} vídeos	{} vidéos	Видео: {}
+Keep Play next after closing	A következőként lejátszandók megtartása bezárás után	„Als Nächstes“ nach dem Schließen behalten	Conservar la cola al cerrar	Garder la file après la fermeture	Сохранять очередь после закрытия
+Card menu: Play all and Shuffle	Kártyamenü: Összes lejátszása és keverés	Kartenmenü: Alle abspielen und Zufallswiedergabe	Menú de tarjeta: Reproducir todo y Aleatorio	Menu de la carte : Tout lire et Lecture aléatoire	Меню карточки: Воспроизвести все и Перемешать
+Card menu: Remove and move videos in a playlist on this TV	Kártyamenü: Videók eltávolítása és áthelyezése a tévén tárolt lejátszási listában	Kartenmenü: Videos in einer Playlist auf diesem Fernseher entfernen und verschieben	Menú de tarjeta: Quitar y mover vídeos en una lista de este televisor	Menu de la carte : Retirer et déplacer des vidéos dans une playlist de ce téléviseur	Меню карточки: Удаление и перемещение видео в плейлисте на этом телевизоре
+Card menu: Rename and delete a playlist on this TV	Kártyamenü: A tévén tárolt lejátszási lista átnevezése és törlése	Kartenmenü: Playlist auf diesem Fernseher umbenennen und löschen	Menú de tarjeta: Cambiar el nombre y eliminar una lista de este televisor	Menu de la carte : Renommer et supprimer une playlist de ce téléviseur	Меню карточки: Переименование и удаление плейлиста на этом телевизоре
+Card menu: Copy a playlist	Kártyamenü: Lejátszási lista másolása	Kartenmenü: Playlist kopieren	Menú de tarjeta: Copiar una lista	Menu de la carte : Copier une playlist	Меню карточки: Копировать плейлист
+Save	Mentés	Speichern	Guardar	Enregistrer	Сохранить
+Type a name first	Előbb írj be egy nevet	Gib zuerst einen Namen ein	Escribe primero un nombre	Saisissez d'abord un nom	Сначала введите название
+Name of the new playlist on this TV	Az új, tévén tárolt lejátszási lista neve	Name der neuen Playlist auf diesem Fernseher	Nombre de la nueva lista de este televisor	Nom de la nouvelle playlist de ce téléviseur	Название нового плейлиста на этом телевизоре
+New name of the playlist	A lejátszási lista új neve	Neuer Name der Playlist	Nuevo nombre de la lista	Nouveau nom de la playlist	Новое название плейлиста
+Type the name with the keyboard below…	Írd be a nevet a lenti billentyűzettel…	Gib den Namen mit der Tastatur unten ein…	Escribe el nombre con el teclado de abajo…	Saisissez le nom avec le clavier ci-dessous…	Введите название с помощью клавиатуры ниже…
++  New playlist on this TV	+  Új lejátszási lista ezen a tévén	+  Neue Playlist auf diesem Fernseher	+  Nueva lista en este televisor	+  Nouvelle playlist sur ce téléviseur	+  Новый плейлист на этом телевизоре
+Save the queue as a playlist on this TV	A sor mentése lejátszási listaként ezen a tévén	Warteschlange als Playlist auf diesem Fernseher speichern	Guardar la cola como lista en este televisor	Enregistrer la file comme playlist sur ce téléviseur	Сохранить очередь как плейлист на этом телевизоре
+Remove from this playlist	Eltávolítás ebből a lejátszási listából	Aus dieser Playlist entfernen	Quitar de esta lista	Retirer de cette playlist	Удалить из этого плейлиста
+Move to the top	Áthelyezés a lista elejére	An den Anfang verschieben	Mover al principio	Déplacer en haut	Переместить в начало
+Move up	Feljebb helyezés	Nach oben verschieben	Subir	Monter	Переместить вверх
+Move down	Lejjebb helyezés	Nach unten verschieben	Bajar	Descendre	Переместить вниз
+Play all	Összes lejátszása	Alle abspielen	Reproducir todo	Tout lire	Воспроизвести все
+Shuffle	Keverés	Zufallswiedergabe	Aleatorio	Lecture aléatoire	Перемешать
+Rename	Átnevezés	Umbenennen	Cambiar el nombre	Renommer	Переименовать
+Delete	Törlés	Löschen	Eliminar	Supprimer	Удалить
+Copy to YouTube	Másolás a YouTube-ra	Auf YouTube kopieren	Copiar en YouTube	Copier sur YouTube	Копировать на YouTube
+Copy to this TV	Másolás erre a tévére	Auf diesen Fernseher kopieren	Copiar en este televisor	Copier sur ce téléviseur	Копировать на этот телевизор
+Press OK again to delete {}	Nyomd meg újra az OK gombot a(z) {} törléséhez	Drücke erneut OK, um {} zu löschen	Pulsa OK otra vez para eliminar {}	Appuyez de nouveau sur OK pour supprimer {}	Нажмите OK ещё раз, чтобы удалить {}

@@ -353,6 +353,8 @@ pub struct Settings {
     pub double_back_exit: bool,
     /// Show the controls when the next video starts by itself (or with next / previous).
     pub hud_on_next_video: bool,
+    /// "Play next" is kept when the app closes and comes back at the next start.
+    pub keep_play_next: bool,
     /// Preferred audio language code ("" = the video's original track).
     pub audio_language: String,
     // Subtitles
@@ -510,6 +512,7 @@ impl Default for Settings {
             seek_number_keys: true,
             double_back_exit: false,
             hud_on_next_video: false,
+            keep_play_next: false,
             audio_language: String::new(),
             subtitles: false,
             subtitle_language: "en".into(),
@@ -709,6 +712,19 @@ mod tests {
         assert!(Settings::from_json(Some(serde_json::json!({"codec": "Avc"}))).device_checked);
         assert!(!Settings::from_json(Some(serde_json::json!({"device_checked": false}))).device_checked);
         assert!(!Settings::from_json(None).device_checked);
+    }
+
+    #[test]
+    fn new_card_menu_kinds_go_where_the_default_order_has_them() {
+        let s = Settings::from_json(Some(serde_json::json!({"card_menu": ["comments", "play", "play_next", "open", "playlist"]})));
+        let pos = |k: &str| s.card_menu.iter().position(|x| x == k).unwrap();
+        assert_eq!(pos("comments"), 0);
+        assert_eq!(pos("play_all"), pos("play_next") + 1);
+        assert_eq!(pos("tv_order"), pos("play_all") + 1);
+        assert_eq!(pos("tv_manage"), pos("open") + 1);
+        assert_eq!(pos("copy_list"), pos("playlist") + 1);
+        assert_eq!(s.card_menu.len(), crate::screens::menu::CARD_ITEMS.len());
+        assert!(!s.keep_play_next);
     }
 
     #[test]

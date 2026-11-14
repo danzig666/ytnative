@@ -21,6 +21,15 @@ pub fn open_card_in(card: &Card, list: &[Card], fx: &mut Effects<'_, YtHost>) {
     open_card(card, fx);
 }
 
+/// Opens a card of a playlist on this TV: the list's order becomes the play queue, and Next /
+/// Previous follow it.
+pub fn open_card_in_local(card: &Card, list: &[Card], fx: &mut Effects<'_, YtHost>) {
+    if card.video_id().is_some() {
+        fx.push(Fx::App(YtFx::SetLocalQueue(list.iter().filter_map(|c| c.video_id().map(str::to_string)).collect())));
+    }
+    open_card(card, fx);
+}
+
 /// OK on a `Control` element (the sidebar, `VList` rows, the search keyboard) arms a press in the
 /// dispatcher, and its release is delivered as `PressCommit` — never as `Activate`, which only a
 /// `Bare` element gets (plx_ui `screen::ElemKind`). The screens are written against `Activate`, so
@@ -46,7 +55,7 @@ pub fn open_card(card: &Card, fx: &mut Effects<'_, YtHost>) {
             YtArg::Player { video_id: video_id.clone(), playlist: playlist_id.clone() }
         }
         (Some(Endpoint::Watch { playlist_id: Some(pl), .. }), _) => YtArg::Feed(FeedKey::Browse { id: format!("VL{pl}"), params: None }),
-        (Some(Endpoint::Browse { browse_id, params }), _) => YtArg::Feed(FeedKey::Browse { id: browse_id.clone(), params: params.clone() }),
+        (Some(Endpoint::Browse { browse_id, params }), _) => YtArg::Feed(FeedKey::browse(browse_id, params.clone())),
         (Some(Endpoint::Search { query, params }), _) => YtArg::Feed(FeedKey::Search { query: query.clone(), params: params.clone() }),
         (None, ItemKind::Video | ItemKind::Short | ItemKind::Live | ItemKind::Upcoming) => {
             YtArg::Player { video_id: card.item.id.clone(), playlist: None }

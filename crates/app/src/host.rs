@@ -4,7 +4,7 @@
 use crate::player::{Phase, Player, Status};
 use crate::screens;
 use crate::settings::Settings;
-use crate::store::{FeedKey, Store};
+use crate::store::{FeedKey, Section, Store};
 use plx_machine::machine::{
     Addr, Canon, Chrome, Cx, Effects, EntryId, Handled, Host, InputOwner, InstanceId, LogicalState, MachineId, RequestId,
     ScreenId, TimerId,
@@ -57,8 +57,10 @@ pub enum YtArg {
     Info,
     /// Chapter selector over the player.
     Chapters,
-    /// "Save to playlist" picker for a video: (video id, title).
-    PlaylistPicker(String, String),
+    /// "Save to playlist" picker for a video.
+    PlaylistPicker(yt_core::local_playlists::Video),
+    /// A name typed with the on-screen keyboard (a playlist on this TV).
+    NameEntry(NamePurpose),
     Pin(PinPurpose),
     SearchFilters(String),
 }
@@ -86,6 +88,7 @@ impl ScreenArg for YtArg {
             YtArg::Pin(_) => 15,
             YtArg::Chapters => 16,
             YtArg::SpeedMenu => 17,
+            YtArg::NameEntry(_) => 18,
         })
     }
     fn title(&self) -> Option<&str> {
@@ -115,6 +118,29 @@ pub enum PinPurpose {
     OpenSettings,
     /// Switch to an account protected by a password: (account id, stored hash).
     SwitchAccount(String, String),
+}
+
+/// What a name typed on the keyboard is for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NamePurpose {
+    /// A new playlist on this TV holding these videos (none, the video of "Save to playlist",
+    /// or the "Play next" queue).
+    NewLocal(Vec<yt_core::local_playlists::Video>),
+    /// Rename a playlist on this TV: (list id, current title).
+    RenameLocal(String, String),
+}
+
+/// Changes to the playlists on this TV (made at once on the main thread, saved in the
+/// background).
+#[derive(Clone, Debug)]
+pub enum LocalOp {
+    Create { title: String, videos: Vec<yt_core::local_playlists::Video> },
+    /// Add a video to a list (true) or take it out.
+    Toggle { list_id: String, video: yt_core::local_playlists::Video, add: bool },
+    Remove { list_id: String, video_id: String },
+    Move { list_id: String, video_id: String, to: yt_core::local_playlists::Move },
+    Rename { list_id: String, title: String },
+    Delete(String),
 }
 
 /// Sign-in progress, shown by the sign-in screen.
@@ -149,6 +175,10 @@ pub enum UserAction {
     Menu(yt_core::actions::MenuAction),
     SwitchAccount(String),
     RemoveAccount(String),
+    /// Make a playlist on this TV from a YouTube playlist (browse id "VL..."), all its videos.
+    CopyToTv { browse_id: String, title: String },
+    /// Make a private YouTube playlist from a playlist on this TV.
+    CopyToYouTube { title: String, video_ids: Vec<String> },
 }
 
 pub enum YtFx {
@@ -156,6 +186,9 @@ pub enum YtFx {
     LoadChannelInfo(String),
     LoadPlaylists(String),
     SetQueue(Vec<String>, bool),
+    /// The opened list is a playlist on this TV: its videos in order.
+    SetLocalQueue(Vec<String>),
+    Local(LocalOp),
     EditFilters(Box<dyn FnOnce(&mut yt_core::search_filters::Filters) + Send>),
     /// `key` names the list in the store: a video id (top-level comments) or a replies token.
     LoadComments { key: String, continuation: Option<String>, append: bool },
@@ -188,7 +221,7 @@ pub enum YtFx {
     SignOut,
     Toast(String),
     /// Add the video to "Play next" (or take it out).
-    PlayNext { video_id: String, title: String, add: bool },
+    PlayNext { video: yt_core::local_playlists::Video, add: bool },
 }
 
 pub enum YtMsg {
@@ -261,7 +294,8 @@ impl Mounter<YtHost> for Mount {
             YtArg::Info => Box::new(screens::info::InfoScreen::new(entry)),
             YtArg::Chapters => Box::new(screens::chapters::ChaptersScreen::new(entry)),
             YtArg::Pin(p) => Box::new(screens::pin::PinScreen::new(entry, p.clone())),
-            YtArg::PlaylistPicker(v, t) => Box::new(screens::menu::MenuScreen::playlists(entry, v.clone(), t.clone(), cx)),
+            YtArg::PlaylistPicker(v) => Box::new(screens::menu::MenuScreen::playlists(entry, v.clone(), cx)),
+            YtArg::NameEntry(p) => Box::new(screens::search::SearchScreen::name(entry, p.clone())),
             YtArg::SearchFilters(q) => Box::new(screens::menu::MenuScreen::filters(entry, q.clone())),
         }
     }
@@ -284,6 +318,8 @@ enum Work {
     Suggestions(Vec<String>),
     /// A sign-in worker's progress: (its run number, state). Only the latest run's count.
     SignIn(u32, SignIn),
+    /// A YouTube playlist's videos, read for "Copy to this TV": (title, videos or the error).
+    CopiedToTv(String, Result<Vec<yt_core::local_playlists::Video>, String>),
 }
 
 pub struct AppRig {
@@ -356,6 +392,9 @@ pub struct AppRig {
     /// "Play without history": asked for the next Play of this video / the one playing so.
     pending_private: Option<String>,
     private_video: Option<String>,
+    /// The Library's YouTube part as last loaded: the "On this TV" row is put in front of it
+    /// again whenever the playlists on this TV change.
+    library_page: Option<yt_core::model::Page>,
 }
 
 impl AppRig {
@@ -406,7 +445,13 @@ impl AppRig {
             phone_video: None,
             pending_private: None,
             private_video: None,
+            library_page: None,
         };
+        rig.store.local = yt_core::local_playlists::Store::load();
+        rig.local_feeds();
+        if rig.store.settings.keep_play_next {
+            rig.store.play_next = yt_core::local_playlists::load_queue();
+        }
         rig.refresh_accounts();
         rig.refresh_groups();
         // Fetch the client profiles (remote override, cached) off the main thread.
@@ -440,7 +485,107 @@ impl AppRig {
     /// old lists are ignored when they arrive.
     fn clear_feeds(&mut self) {
         self.store.feeds.clear();
+        self.library_page = None;
         self.feeds_epoch += 1;
+        self.local_feeds();
+    }
+
+    /// Every playlist on this TV as a ready grid, so a list's page has its cards when it opens
+    /// (focus lands on the first one at once); lists deleted since lose theirs.
+    fn local_feeds(&mut self) {
+        let ids: Vec<String> = self.store.local.lists.iter().map(|l| l.id.clone()).collect();
+        self.store.feeds.retain(|k, _| !matches!(k, FeedKey::Local(id) if !ids.contains(id)));
+        for id in ids {
+            self.show_local(&FeedKey::Local(id));
+        }
+    }
+
+    /// The playlists on this TV changed: save them and rebuild the lists that show them.
+    fn local_changed(&mut self) {
+        save_local(self.store.local.clone());
+        self.local_feeds();
+        if self.store.feeds.contains_key(&FeedKey::Section(Section::Library)) {
+            self.show_library();
+        }
+    }
+
+    /// A playlist on this TV as a grid of its videos (no network needed).
+    fn show_local(&mut self, key: &FeedKey) {
+        let FeedKey::Local(id) = key else { return };
+        match self.store.local.get(id).map(|l| l.to_page()) {
+            Some(page) => self.store.apply(key, page, false),
+            None => self.store.fail(key, crate::i18n::tr("This playlist no longer exists").to_string()),
+        }
+    }
+
+    /// The Library: the "On this TV" row first (when there are playlists on this TV), then the
+    /// YouTube part as last loaded.
+    fn show_library(&mut self) {
+        let mut page = self.library_page.clone().unwrap_or_default();
+        if !self.store.local.lists.is_empty() {
+            page.shelves.insert(0, self.store.local.shelf(crate::i18n::tr("On this TV"), &video_count));
+        }
+        self.store.apply(&FeedKey::Section(Section::Library), page, false);
+    }
+
+    /// "Play next" changed: kept for the next run when "Keep Play next after closing" is on.
+    fn play_next_changed(&self) {
+        if self.store.settings.keep_play_next {
+            save_queue(self.store.play_next.clone());
+        }
+    }
+
+    /// Applies a change to the playlists on this TV; returns the message to show.
+    fn local_op(&mut self, op: LocalOp) -> Option<String> {
+        use crate::i18n::tr;
+        use yt_core::local_playlists::Added;
+        let title_of = |st: &yt_core::local_playlists::Store, id: &str| st.get(id).map(|l| l.title.clone()).unwrap_or_default();
+        let st = &mut self.store.local;
+        let msg = match op {
+            LocalOp::Create { title, videos } => {
+                let id = st.create_with(&title, videos);
+                Some(tr("Created playlist \u{201C}{}\u{201D}").replace("{}", &title_of(st, &id)))
+            }
+            LocalOp::Toggle { list_id, video, add: true } => match st.add(&list_id, video) {
+                Some(Added::Added) => Some(tr("Added to \u{201C}{}\u{201D}").replace("{}", &title_of(st, &list_id))),
+                Some(Added::AlreadyThere) => Some(tr("This video is already in the playlist").to_string()),
+                Some(Added::Full) => Some(tr("This playlist is full").to_string()),
+                None => Some(tr("This playlist no longer exists").to_string()),
+            },
+            LocalOp::Toggle { list_id, video, add: false } => {
+                st.remove_item(&list_id, &video.video_id);
+                Some(tr("Removed from \u{201C}{}\u{201D}").replace("{}", &title_of(st, &list_id)))
+            }
+            LocalOp::Remove { list_id, video_id } => {
+                st.remove_item(&list_id, &video_id);
+                Some(tr("Removed from this playlist").to_string())
+            }
+            LocalOp::Move { list_id, video_id, to } => {
+                st.move_item(&list_id, &video_id, to);
+                None
+            }
+            LocalOp::Rename { list_id, title } => {
+                if !st.rename(&list_id, &title) {
+                    return None;
+                }
+                let t = title_of(st, &list_id);
+                // A pinned list keeps its new name in the sidebar.
+                for p in self.store.settings.pinned.iter_mut().filter(|p| p.1 == list_id) {
+                    p.0 = t.clone();
+                }
+                self.save_settings();
+                Some(tr("Renamed to \u{201C}{}\u{201D}").replace("{}", &t))
+            }
+            LocalOp::Delete(list_id) => {
+                let t = title_of(st, &list_id);
+                st.remove(&list_id);
+                self.store.settings.pinned.retain(|p| p.1 != list_id);
+                self.save_settings();
+                Some(tr("Playlist \u{201C}{}\u{201D} deleted").replace("{}", &t))
+            }
+        };
+        self.local_changed();
+        msg
     }
 
     /// Saves the settings, with the global subtitle state in place of a channel's remembered one
@@ -585,6 +730,30 @@ impl AppRig {
                 Work::Page { epoch, .. } | Work::Shelf { epoch, .. } if epoch != self.feeds_epoch => {
                     crate::log("feed: an answer for lists cleared since was dropped");
                 }
+                Work::Page { key, page, append, failed, .. } if key == FeedKey::Section(Section::Library) => {
+                    // The Library's YouTube part; the "On this TV" row goes in front of it. With
+                    // playlists on this TV a failed YouTube part leaves those (no error page).
+                    match failed {
+                        Some(e) if self.store.local.lists.is_empty() || append => {
+                            crate::log(&format!("feed {key:?} failed: {e}"));
+                            self.store.fail(&key, e.clone());
+                            out.push((addr, YtMsg::Failed(key, e)));
+                            continue;
+                        }
+                        Some(e) => {
+                            crate::log(&format!("library: YouTube's part failed ({e}); showing the playlists on this TV"));
+                            self.library_page = None;
+                        }
+                        None if append => {
+                            let lib = self.library_page.get_or_insert_with(Default::default);
+                            lib.shelves.extend(page.shelves);
+                            lib.continuation = page.continuation;
+                        }
+                        None => self.library_page = Some(page),
+                    }
+                    self.show_library();
+                    out.push((addr, YtMsg::Loaded(key)));
+                }
                 Work::Page { key, page, append, failed, .. } => {
                     if let Some(e) = failed {
                         crate::log(&format!("feed {key:?} failed: {e}"));
@@ -673,6 +842,22 @@ impl AppRig {
                 Work::Suggestions(s) => {
                     self.store.suggestions = s;
                     out.push((addr, YtMsg::Suggestions));
+                }
+                Work::CopiedToTv(title, r) => {
+                    let msg = match r {
+                        Ok(v) if v.is_empty() => crate::i18n::tr("This playlist has no videos to copy").to_string(),
+                        Ok(v) => {
+                            self.store.local.create_with(&title, v);
+                            self.local_changed();
+                            crate::i18n::tr("Copied to this TV: \u{201C}{}\u{201D}").replace("{}", &title)
+                        }
+                        Err(e) => {
+                            crate::log(&format!("copy to this TV: {e}"));
+                            crate::i18n::tr("Couldn't copy the playlist").to_string()
+                        }
+                    };
+                    self.store.toast(msg, now_ms);
+                    out.push((addr, YtMsg::Acted));
                 }
                 Work::SignIn(run, s) => {
                     if let SignIn::Done(_) = &s {
@@ -967,8 +1152,31 @@ fn run_action(session: &Mutex<Option<yt_core::session::Session>>, a: &UserAction
             }
         }),
         UserAction::NewPlaylist { title, video_id } => with_session(session, |s| {
-            s.create_playlist(title, yt_core::actions::Privacy::Private, &[video_id.as_str()]).map(|_| format!("Created playlist \u{201C}{title}\u{201D}"))
+            s.create_playlist(title, yt_core::actions::Privacy::Private, &[video_id.as_str()])
+                .map(|_| crate::i18n::tr("Created playlist \u{201C}{}\u{201D}").replace("{}", title))
         }),
+        UserAction::CopyToYouTube { title, video_ids } => {
+            // The playlist is made with the first videos, the others are added in batches.
+            const BATCH: usize = 50;
+            let r = with_session(session, |s| {
+                let ids: Vec<&str> = video_ids.iter().map(String::as_str).collect();
+                let first = &ids[..ids.len().min(BATCH)];
+                let pl = s.create_playlist(title, yt_core::actions::Privacy::Private, first)?;
+                for chunk in ids[first.len()..].chunks(BATCH) {
+                    s.add_many_to_playlist(&pl, chunk)?;
+                }
+                Ok(())
+            });
+            return match r {
+                Ok(()) => (crate::i18n::tr("Copied to YouTube: \u{201C}{}\u{201D}").replace("{}", title), false),
+                Err(e) => {
+                    crate::log(&format!("copy to YouTube: {e:#}"));
+                    (crate::i18n::tr("Couldn't copy the playlist to YouTube").to_string(), false)
+                }
+            };
+        }
+        // Read by its own worker (see `YtFx::Act` in `app_fx`).
+        UserAction::CopyToTv { .. } => Ok(String::new()),
         UserAction::Menu(m) => with_session(session, |s| s.run_menu_action(m)).map(|ok| if ok { "Done".to_string() } else { "Not available".to_string() }),
         UserAction::AddToGroup { group_id, channel_id, title, icon } => (|| {
             use yt_core::channel_groups::{ChannelRef, Store};
@@ -1049,6 +1257,94 @@ fn run_action(session: &Mutex<Option<yt_core::session::Session>>, a: &UserAction
     }
 }
 
+/// "{} videos" in the interface language ("1 video" for one).
+pub fn video_count(n: usize) -> String {
+    if n == 1 {
+        crate::i18n::tr("1 video").to_string()
+    } else {
+        crate::i18n::tr("{} videos").replace("{}", &n.to_string())
+    }
+}
+
+/// Saves the playlists on this TV off the main thread. Saves may finish out of order: an older
+/// copy never overwrites a newer one.
+fn save_local(st: yt_core::local_playlists::Store) {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static WRITTEN: Mutex<u64> = Mutex::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    let job = move || {
+        let mut w = WRITTEN.lock().unwrap();
+        if *w < n {
+            if let Err(e) = st.save() {
+                crate::log(&format!("playlists on this TV: saving failed: {e:#}"));
+            }
+            *w = n;
+        }
+    };
+    if plx_base::task::spawn("local-save", job).is_none() {
+        crate::log("playlists on this TV: could not start the saving thread");
+    }
+}
+
+/// Keeps the "Play next" queue for the next run (an empty queue forgets it), off the main thread
+/// and newest copy last, like [`save_local`].
+fn save_queue(q: Vec<yt_core::local_playlists::Video>) {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static WRITTEN: Mutex<u64> = Mutex::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    let _ = plx_base::task::spawn("queue-save", move || {
+        let mut w = WRITTEN.lock().unwrap();
+        if *w < n {
+            if let Err(e) = yt_core::local_playlists::save_queue(&q) {
+                crate::log(&format!("play next: saving failed: {e:#}"));
+            }
+            *w = n;
+        }
+    });
+}
+
+/// Worker: every video of a YouTube playlist (browse id "VL..."), up to the size of a playlist on
+/// this TV.
+fn playlist_videos(s: &mut yt_core::session::Session, browse_id: &str) -> anyhow::Result<Vec<yt_core::local_playlists::Video>> {
+    use yt_core::local_playlists::{Video, MAX_ITEMS};
+    use yt_core::model::ItemKind;
+    let mut out: Vec<Video> = Vec::new();
+    let mut page = s.browse(browse_id, None)?;
+    // A bound on the pages read, should YouTube keep answering with more.
+    for _ in 0..200 {
+        let mut shelf_token = None;
+        for sh in &page.shelves {
+            for it in sh.items.iter().filter(|it| matches!(it.kind, ItemKind::Video | ItemKind::Short | ItemKind::Live) && !it.id.is_empty()) {
+                if out.len() < MAX_ITEMS && !out.iter().any(|v| v.video_id == it.id) {
+                    out.push(Video {
+                        video_id: it.id.clone(),
+                        title: it.title.clone(),
+                        channel: it.channel.clone().or_else(|| it.lines.first().cloned()).unwrap_or_default(),
+                        duration_secs: it.badge.as_deref().and_then(crate::store::parse_duration).map_or(0, |ms| ms / 1000),
+                        thumbnail: it.thumbnail.clone(),
+                    });
+                }
+            }
+            shelf_token = sh.continuation.clone().or(shelf_token);
+        }
+        if out.len() >= MAX_ITEMS {
+            break;
+        }
+        page = match (page.continuation.clone(), shelf_token) {
+            (Some(c), _) => s.more("browse", &c)?,
+            (None, Some(t)) => {
+                let (items, next) = s.shelf_more("browse", &t)?;
+                yt_core::model::Page {
+                    shelves: vec![yt_core::model::Shelf { items, continuation: next.filter(|n| *n != t), ..Default::default() }],
+                    ..Default::default()
+                }
+            }
+            (None, None) => break,
+        };
+    }
+    Ok(out)
+}
+
 /// Worker: the shared signed-in session, created on first use.
 pub fn with_session<T>(
     session: &Mutex<Option<yt_core::session::Session>>,
@@ -1084,6 +1380,8 @@ fn load_page(session: &Mutex<Option<yt_core::session::Session>>, epoch: u64, key
         (None, FeedKey::Browse { id, params }) => s.browse(id, params.as_deref()),
         (None, FeedKey::Search { query, params }) => s.search(query, params.as_deref()),
         (None, FeedKey::Related(_)) => Ok(Default::default()),
+        // Playlists on this TV are built on the main thread (`AppRig::show_local`).
+        (None, FeedKey::Local(_)) => Ok(Default::default()),
         (None, FeedKey::Group(id)) => {
             let store = yt_core::channel_groups::Store::load();
             let g = store.get(id).ok_or_else(|| anyhow::anyhow!("this group no longer exists"))?;
@@ -1110,6 +1408,16 @@ impl Rig<YtHost> for AppRig {
     fn timer(&mut self, _o: MachineId, _id: TimerId, _p: &CxParts<u32>, _fx: &mut Effects<'_, YtHost>) {}
     fn app_fx(&mut self, from: MachineId, fx: YtFx, _p: &CxParts<u32>, _out: &mut Effects<'_, YtHost>) {
         match fx {
+            YtFx::Load(key @ FeedKey::Local(_)) => {
+                self.show_local(&key);
+                _out.invalidate(plx_machine::present::Provenance::Lifecycle);
+            }
+            // Signed out: the Library shows the playlists on this TV only.
+            YtFx::Load(FeedKey::Section(Section::Library)) if !self.store.signed_in => {
+                self.library_page = None;
+                self.show_library();
+                _out.invalidate(plx_machine::present::Provenance::Lifecycle);
+            }
             YtFx::Load(key) => {
                 if self.store.feed(&key).is_some_and(|f| f.loading) {
                     return;
@@ -1148,7 +1456,11 @@ impl Rig<YtHost> for AppRig {
             YtFx::Play { video_id, playlist } => {
                 crate::log(&format!("play {video_id} (playlist {playlist:?})"));
                 // A queued video leaves "Play next" once it plays, however it was started.
-                self.store.play_next.retain(|(v, _)| *v != video_id);
+                let queued = self.store.play_next.len();
+                self.store.play_next.retain(|v| v.video_id != video_id);
+                if self.store.play_next.len() != queued {
+                    self.play_next_changed();
+                }
                 // Without history: asked for this video, or the same playback starting again
                 // (repeat, another audio track).
                 let again = self.player_view.video_id == video_id && self.player_view.phase != Phase::Idle;
@@ -1276,8 +1588,13 @@ impl Rig<YtHost> for AppRig {
                 self.spawn(from, "suggest", move |s| Work::Suggestions(with_session(s, |s| s.suggestions(&prefix)).unwrap_or_default()));
             }
             YtFx::EditSettings(f) => {
+                let kept = self.store.settings.keep_play_next;
                 f(&mut self.store.settings);
                 self.save_settings();
+                // "Keep Play next after closing": switched on keeps the queue now, off forgets it.
+                if self.store.settings.keep_play_next != kept {
+                    save_queue(if self.store.settings.keep_play_next { self.store.play_next.clone() } else { Vec::new() });
+                }
             }
             YtFx::SignInStart => {
                 self.signin = SignIn::Starting;
@@ -1318,9 +1635,13 @@ impl Rig<YtHost> for AppRig {
             }
             YtFx::LoadPlaylists(v) => {
                 self.spawn(from, "playlists", move |s| {
-                    let opts = with_session(s, |s| s.playlists_for(&v)).unwrap_or_default();
+                    let opts = with_session(s, |s| s.playlists_for(&v)).map_err(|e| crate::log(&format!("playlists: {e:#}"))).unwrap_or_default();
                     Work::Playlists(v, opts)
                 });
+            }
+            YtFx::Act(UserAction::CopyToTv { browse_id, title }) => {
+                self.store.toast(crate::i18n::tr("Copying the playlist\u{2026}"), self.now_ms);
+                self.spawn(from, "copy", move |s| Work::CopiedToTv(title, with_session(s, |se| playlist_videos(se, &browse_id)).map_err(|e| format!("{e:#}"))));
             }
             YtFx::Act(action) => {
                 // Optimistic local state, so the UI reflects the action before YouTube's reads catch up.
@@ -1362,20 +1683,33 @@ impl Rig<YtHost> for AppRig {
                 });
             }
             YtFx::Toast(m) => self.store.toast(m, self.now_ms),
-            YtFx::PlayNext { video_id, title, add } => {
-                self.store.play_next.retain(|(v, _)| *v != video_id);
+            YtFx::PlayNext { video, add } => {
+                self.store.play_next.retain(|v| v.video_id != video.video_id);
                 let msg = if add {
-                    self.store.play_next.push((video_id, title));
+                    self.store.play_next.push(video);
                     let n = self.store.play_next.len();
                     if n == 1 { crate::i18n::tr("Plays next").to_string() } else { crate::i18n::tr("Plays next ({} in the queue)").replace("{}", &n.to_string()) }
                 } else {
                     crate::i18n::tr("Removed from Play next").to_string()
                 };
                 self.store.toast(msg, self.now_ms);
+                self.play_next_changed();
             }
             YtFx::SetQueue(q, shorts) => {
                 self.store.queue = q;
                 self.store.queue_shorts = shorts;
+                self.store.queue_local = false;
+            }
+            YtFx::SetLocalQueue(q) => {
+                self.store.queue = q;
+                self.store.queue_shorts = false;
+                self.store.queue_local = true;
+            }
+            YtFx::Local(op) => {
+                if let Some(m) = self.local_op(op) {
+                    self.store.toast(m, self.now_ms);
+                }
+                _out.invalidate(plx_machine::present::Provenance::Lifecycle);
             }
             YtFx::EditFilters(f) => f(&mut self.store.search_filters),
         }

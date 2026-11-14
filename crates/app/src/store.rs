@@ -108,9 +108,20 @@ pub enum FeedKey {
     Related(String),
     /// A local channel group (RSS-fed): group id.
     Group(String),
+    /// A playlist on this TV (`yt_core::local_playlists`): list id.
+    Local(String),
 }
 
 impl FeedKey {
+    /// The page a browse id opens: a playlist on this TV, or YouTube's page.
+    pub fn browse(id: &str, params: Option<String>) -> FeedKey {
+        if yt_core::local_playlists::is_local_id(id) {
+            FeedKey::Local(id.to_string())
+        } else {
+            FeedKey::Browse { id: id.to_string(), params }
+        }
+    }
+
     pub fn endpoint(&self) -> &'static str {
         match self {
             FeedKey::Search { .. } => "search",
@@ -136,6 +147,27 @@ impl Card {
             _ if matches!(self.item.kind, ItemKind::Video | ItemKind::Short | ItemKind::Live) && !self.item.id.is_empty() => {
                 Some(&self.item.id)
             }
+            _ => None,
+        }
+    }
+
+    /// The card's video as a record for a playlist on this TV (None for channels, playlists).
+    pub fn local_video(&self) -> Option<yt_core::local_playlists::Video> {
+        let id = self.video_id()?;
+        let it = &self.item;
+        Some(yt_core::local_playlists::Video {
+            video_id: id.to_string(),
+            title: if it.title.is_empty() { self.title.clone() } else { it.title.clone() },
+            channel: it.channel.clone().or_else(|| it.lines.first().cloned()).unwrap_or_default(),
+            duration_secs: it.badge.as_deref().and_then(parse_duration).map_or(0, |ms| ms / 1000),
+            thumbnail: it.thumbnail.clone().filter(|t| !t.is_empty()),
+        })
+    }
+
+    /// The playlist on this TV this card stands for (a card of the Library's "On this TV" row).
+    pub fn local_list(&self) -> Option<&str> {
+        match &self.item.endpoint {
+            Some(Endpoint::Browse { browse_id, .. }) if yt_core::local_playlists::is_local_id(browse_id) => Some(browse_id),
             _ => None,
         }
     }
@@ -201,9 +233,13 @@ pub struct Store {
     /// they are Shorts (Up/Down then switch videos, like YouTube's Shorts player).
     pub queue: Vec<String>,
     pub queue_shorts: bool,
-    /// "Play next": videos (id, title) the viewer queued, played in order before YouTube's up
-    /// next. For this run only.
-    pub play_next: Vec<(String, String)>,
+    /// The opened list is a playlist on this TV: Next and Previous follow its order.
+    pub queue_local: bool,
+    /// "Play next": videos the viewer queued, played in order before YouTube's up next. For
+    /// this run only, unless "Keep Play next after closing" is on.
+    pub play_next: Vec<yt_core::local_playlists::Video>,
+    /// The playlists on this TV (saved by the Rig after every change).
+    pub local: yt_core::local_playlists::Store,
     /// Filters of the last search (the filters panel edits these).
     pub search_filters: yt_core::search_filters::Filters,
     pub comments: HashMap<String, Comments>,
@@ -273,6 +309,13 @@ impl Store {
             page.shelves.iter().map(|s| (s.title.clone(), s.items.iter().collect(), s.continuation.clone())).collect()
         };
         let base = if append { self.cards(k).len() } else { 0 };
+        // Lists rebuilt after an edit on this TV keep their cards' elements, so focus stays on
+        // the same video (or list) when the order changes.
+        let reuse: HashMap<String, u32> = if !append && matches!(k, FeedKey::Local(_) | FeedKey::Section(Section::Library)) {
+            self.cards(k).iter().map(|c| (c.item.id.clone(), c.elem)).collect()
+        } else {
+            Default::default()
+        };
         let mut rows = Vec::new();
         for (title, items, continuation) in groups {
             let start = fresh.len();
@@ -280,9 +323,15 @@ impl Store {
                 if !seen.insert(it.id.clone()) || !filter.keep(it) {
                     continue;
                 }
-                self.next_elem += 1;
+                let elem = match reuse.get(&it.id) {
+                    Some(e) => *e,
+                    None => {
+                        self.next_elem += 1;
+                        self.next_elem
+                    }
+                };
                 fresh.push(Card {
-                    elem: self.next_elem,
+                    elem,
                     title: it.title.clone(),
                     detail: it.lines.join(" \u{2022} "),
                     thumb: card_thumb(&self.settings, it),
@@ -421,6 +470,8 @@ struct Filter<'a> {
     hide_watched: bool,
     hide_upcoming: bool,
     hide_streams: bool,
+    /// A playlist on this TV shows every video the viewer put in it.
+    everything: bool,
 }
 
 impl<'a> Filter<'a> {
@@ -441,10 +492,14 @@ impl<'a> Filter<'a> {
             hide_watched: (home && s.hide_watched_home) || (subs && s.hide_watched_subscriptions),
             hide_upcoming: (home && s.hide_upcoming_home) || (subs && s.hide_upcoming_subscriptions) || (channel && s.hide_upcoming_channels),
             hide_streams: subs && s.hide_streams_subscriptions,
+            everything: matches!(k, FeedKey::Local(_)),
         }
     }
 
     fn keep(&self, it: &Item) -> bool {
+        if self.everything {
+            return true;
+        }
         if self.hide_shorts && it.kind == ItemKind::Short {
             return false;
         }

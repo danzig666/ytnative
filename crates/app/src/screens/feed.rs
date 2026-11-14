@@ -72,8 +72,8 @@ impl FeedScreen {
         use crate::i18n::tr;
         if let Some(t) = cx.views.store.feed(&self.key).map(|f| f.title.clone()).filter(|t| !t.is_empty()) {
             // YouTube's own pages come back with English names ("History", "Watch later"), which
-            // the table translates; a channel's name is shown as it is.
-            return if self.channel().is_some() { t } else { tr(&t).to_string() };
+            // the table translates; a channel's name and a playlist on this TV are shown as they are.
+            return if self.channel().is_some() || matches!(self.key, FeedKey::Local(_)) { t } else { tr(&t).to_string() };
         }
         match &self.key {
             FeedKey::Search { query, .. } => tr("Results for \u{201C}{}\u{201D}").replace("{}", query),
@@ -82,6 +82,7 @@ impl FeedScreen {
             FeedKey::Section(s) => tr(s.title()).into(),
             FeedKey::Related(_) => tr("Up next").into(),
             FeedKey::Group(id) => cx.views.store.groups.iter().find(|g| &g.0 == id).map(|g| g.1.clone()).unwrap_or_else(|| tr("Group").into()),
+            FeedKey::Local(id) => cx.views.store.local.get(id).map(|l| l.title.clone()).unwrap_or_else(|| tr("Playlist").into()),
         }
     }
 }
@@ -181,7 +182,11 @@ impl Machine<YtHost> for FeedScreen {
         match self.grid.on(ev, cx, &src, fx) {
             Some(CardEvent::Activate(e)) => {
                 if let Some(card) = cx.views.store.card(e) {
-                    common::open_card_in(card, src.cards, fx);
+                    if matches!(self.key, FeedKey::Local(_)) {
+                        common::open_card_in_local(card, src.cards, fx);
+                    } else {
+                        common::open_card_in(card, src.cards, fx);
+                    }
                 }
                 return Handled::Yes;
             }

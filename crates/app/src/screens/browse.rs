@@ -44,6 +44,8 @@ fn shelf_style() -> &'static RowStyle {
     &SHELF_STYLES[ui::card_cols() - 3]
 }
 const SPACER: usize = usize::MAX;
+/// Room above the first row (the page title).
+const ROWS_TOP: f32 = 110.0;
 
 /// The section's titled rows as a plx `Stack` page.
 struct Rows {
@@ -57,7 +59,7 @@ impl StackPage<YtHost> for Rows {
         cx.views.store.feed(&self.key).map_or(0, |f| ((f.shelves.len() as u64) << 32) | f.gen as u64)
     }
     fn sections(&self, cx: &Cx<'_, YtHost>, out: &mut Vec<SectionSpec<usize>>) {
-        out.push(SectionSpec::new(SPACER, Kind::Custom { height: 110.0, focusable: false }, GroupId(90)));
+        out.push(SectionSpec::new(SPACER, Kind::Custom { height: ROWS_TOP, focusable: false }, GroupId(90)));
         if let Some(f) = cx.views.store.feed(&self.key) {
             for i in 0..f.shelves.len() {
                 out.push(SectionSpec::new(i, Kind::Shelf { style: shelf_style(), heading: 56.0 }, GroupId(100 + i as u32)));
@@ -72,6 +74,11 @@ impl StackPage<YtHost> for Rows {
         let r = f.shelves.get(k)?;
         // A row with a token asks for more as focus nears its end (plx's look-ahead).
         Some(CardsSrc { cards: &f.cards[r.range.clone()], more: r.continuation.is_some() })
+    }
+    /// The first row is revealed with the page at its top: its heading stays below the title
+    /// band (plx's usual margin would let a scroll kept from before hide it there).
+    fn reveal_margin(&self, k: usize) -> f32 {
+        if k == 0 { ROWS_TOP } else { plx_ui::consts::MARGIN_Y }
     }
     /// Room under every shelf for the caption of the shelf below (plx asserts at least this much).
     fn shelf_foot(&self, _cx: &Cx<'_, YtHost>, _k: usize) -> f32 {
@@ -154,6 +161,11 @@ pub struct BrowseScreen {
     state: State,
     /// Cards per row the grid / rows were built for.
     cols: usize,
+    /// The section's rows when another screen covered this one (`Feed::gen`): rows rebuilt
+    /// meanwhile (the Library's "On this TV" row after a change) are scrolled to again.
+    covered_gen: u32,
+    /// Frames left in which the focused row is revealed again (see `Uncover`).
+    reveal_ticks: u8,
 }
 
 fn nav_items(cx: &Cx<'_, YtHost>) -> Vec<NavItem> {
@@ -193,6 +205,8 @@ impl BrowseScreen {
             nav_last: std::cell::Cell::new(NAV_BASE),
             content_last: std::cell::Cell::new(0),
             state: State(section.key().into()),
+            covered_gen: 0,
+            reveal_ticks: 0,
         }
     }
 
@@ -232,7 +246,7 @@ impl BrowseScreen {
             }
             NavItem::Search => fx.push(Fx::Nav(NavOp::Push(YtArg::Search))),
             NavItem::Group(id, _) => fx.push(Fx::Nav(NavOp::Push(YtArg::Feed(FeedKey::Group(id.clone()))))),
-            NavItem::Pinned(_, id, params) => fx.push(Fx::Nav(NavOp::Push(YtArg::Feed(FeedKey::Browse { id: id.clone(), params: params.clone() })))),
+            NavItem::Pinned(_, id, params) => fx.push(Fx::Nav(NavOp::Push(YtArg::Feed(FeedKey::browse(id, params.clone()))))),
             NavItem::Settings => {
                 let locked = !cx.views.store.settings.settings_pin.is_empty();
                 fx.push(Fx::Nav(NavOp::Push(if locked {
@@ -334,7 +348,18 @@ impl Machine<YtHost> for BrowseScreen {
                     fx.push(Fx::App(YtFx::Load(self.key())));
                 }
             }
+            ScreenEvent::Cover => {
+                self.covered_gen = cx.views.store.feed(&self.key()).map_or(0, |f| f.gen);
+            }
             ScreenEvent::Uncover => {
+                // The rows changed while covered (a playlist on this TV made, renamed or copied
+                // from another screen): the scroll kept for the old rows would put the focused
+                // row's heading under the title band, so the focused row is revealed again, over the
+                // next few frames: the rows' own landing moves the scroll on the first of them.
+                let gen = cx.views.store.feed(&self.key()).map_or(0, |f| f.gen);
+                if self.rows_mode(cx) && gen != self.covered_gen {
+                    self.reveal_ticks = 6;
+                }
                 // Back from settings with another card size: rebuild the layouts.
                 if self.cols != ui::card_cols() {
                     self.cols = ui::card_cols();
@@ -403,7 +428,13 @@ impl Machine<YtHost> for BrowseScreen {
                     }
                 }
             }
-            match self.stack.on(&self.rows, ev, cx, fx) {
+            let ev_out = self.stack.on(&self.rows, ev, cx, fx);
+            if self.reveal_ticks > 0 && matches!(ev, ScreenEvent::Tick(..)) {
+                self.reveal_ticks -= 1;
+                self.stack.reveal(&self.rows, cx);
+                fx.invalidate(plx_machine::present::Provenance::Lifecycle);
+            }
+            match ev_out {
                 Some(StackEvent::Card(_, CardEvent::Activate(e))) => {
                     if let (Some(card), Some(f)) = (cx.views.store.card(e), cx.views.store.feed(&self.key())) {
                         let row = f.shelves.iter().find(|r| f.cards[r.range.clone()].iter().any(|c| c.elem == e));

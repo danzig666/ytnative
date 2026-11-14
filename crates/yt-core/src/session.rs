@@ -131,7 +131,9 @@ impl Session {
         let txt = self
             .http
             .get(url)
-            .query(&[("client", "youtube-lr"), ("ds", "yt"), ("hl", "en"), ("q", prefix)])
+            // The answer in UTF-8: by default it comes in Latin-1 (accented queries came back as
+            // broken letters).
+            .query(&[("client", "youtube-lr"), ("ds", "yt"), ("hl", "en"), ("ie", "utf-8"), ("oe", "utf-8"), ("q", prefix)])
             .send()?
             .text()?;
         // JSONP-ish: window.google.ac.h(["q",[["s1",0,[..]],...],...])
