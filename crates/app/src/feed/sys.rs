@@ -27,8 +27,10 @@ pub struct Events {
     pub eos: AtomicBool,
     pub load_completed: AtomicBool,
     pub error: Mutex<Option<(i64, String)>>,
-    /// Last `videoInfo`-like JSON string the pipeline reported (diagnostics).
-    pub info: Mutex<Option<String>>,
+    /// webOS 4 (ACB): the pipeline's media id, the first callback string's `context` / `mediaId`.
+    pub media_id: Mutex<Option<String>>,
+    /// webOS 4 (ACB): the first `{"video":…,"context":…}` envelope, verbatim, for setMediaVideoData.
+    pub source_info: Mutex<Option<std::ffi::CString>>,
     /// The pipeline's `video.hdrType` ("none", "HDR10", "HLG", ...), taken by the engine.
     pub hdr: Mutex<Option<String>>,
 }
@@ -97,10 +99,33 @@ pub extern "C" fn sf_on_event(epoch: c_uint, ty: c_int, num: i64, s: *const c_ch
         if text.contains("loadCompleted") || text.contains("\"loaded\"") {
             ev.load_completed.store(true, Relaxed);
         }
-        if text.contains("\"video\"") || text.contains("videoInfo") {
-            *ev.info.lock().unwrap() = Some(text);
+        // The ACB bind's two inputs, captured once per pipeline as plx-native does
+        // (`play-feed/src/sf_event.rs`): no getMediaID, no re-encoding of the envelope.
+        {
+            let mut mid = ev.media_id.lock().unwrap();
+            if mid.is_none() {
+                if let Some(id) = between(&text, "\"context\":\"").or_else(|| between(&text, "\"mediaId\":\"")) {
+                    crate::log(&format!("feed: SMP context/mediaId={id}"));
+                    *mid = Some(id.to_string());
+                }
+            }
+        }
+        if text.contains("\"video\":") && text.contains("\"context\":") {
+            let mut si = ev.source_info.lock().unwrap();
+            if si.is_none() {
+                if let Ok(c) = std::ffi::CString::new(text.as_bytes()) {
+                    crate::log(&format!("feed: sourceInfo captured ({} bytes)", text.len()));
+                    *si = Some(c);
+                }
+            }
         }
     }));
+}
+
+/// The text after `open` up to the next `"` (none when unterminated or empty).
+fn between<'a>(s: &'a str, open: &str) -> Option<&'a str> {
+    let rest = &s[s.find(open)? + open.len()..];
+    Some(&rest[..rest.find('"')?]).filter(|v| !v.is_empty())
 }
 
 fn short(s: &str) -> String {
@@ -222,9 +247,12 @@ pub fn feed(data: &[u8], pts_ns: i64, es: i32) -> FeedReply {
 /// Unload and, only with every proof the shim asks for (callback gate drained + intercepted
 /// callback + unload-completed), destruct; otherwise the object is quarantined forever (and
 /// engine B disabled for the rest of the process). Waits up to `wait` for the unload event.
-pub fn teardown(wait: std::time::Duration) -> bool {
+/// `release_plane` runs after the Unload (and the gate's retirement) and before D1 or the
+/// quarantine: the webOS 4 plane's `setState(UNLOADED)` (plx-native: Unload, 23, retire, UNLOADED, D1).
+pub fn teardown(wait: std::time::Duration, release_plane: impl FnOnce()) -> bool {
     unsafe {
         if ffi::sf_ready() == 0 {
+            release_plane();
             return true; // nothing was constructed
         }
         ffi::sf_unload();
@@ -234,10 +262,13 @@ pub fn teardown(wait: std::time::Duration) -> bool {
         }
         if ffi::sf_unload_completed() == 0 {
             crate::log("feed: no unload-completed event; quarantining the Starfish object");
+            release_plane();
             ffi::sf_quarantine();
             return false;
         }
-        if ffi::sf_callback_gate_retire() == 0 {
+        let retired = ffi::sf_callback_gate_retire() != 0;
+        release_plane();
+        if !retired {
             ffi::sf_quarantine();
             return false;
         }

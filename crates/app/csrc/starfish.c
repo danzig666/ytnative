@@ -9,7 +9,7 @@
  * ytnative changes: every method is resolved with dlopen/dlsym (no strong reference to any mangled
  * method, so the cxx11/COW Feed variants and missing methods are handled at runtime; the library is
  * still DT_NEEDED, see build.rs, because that is what exports the interposer); the private-offset in-place seek verbs (setTimeToDecode / setContentInfo /
- * sendSegmentEvent) and the ACB/video-plane code are not ported; logging goes to Rust (yt_sf_log).
+ * sendSegmentEvent) are not ported; the ACB/video-plane code is in video_plane.c; logging goes to Rust (yt_sf_log).
  *
  * starfish.c — buffer-feed StarfishMediaAPIs C++ ABI seam; see starfish.h. */
 #define _GNU_SOURCE

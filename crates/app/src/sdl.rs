@@ -53,7 +53,10 @@ extern "C" {
     pub fn SDL_GetVersion(ver: *mut u8);
 
     pub fn glViewport(x: c_int, y: c_int, w: c_int, h: c_int);
+    pub fn glGetIntegerv(pname: u32, params: *mut c_int);
 }
+
+pub const GL_ALPHA_BITS: u32 = 0x0D55;
 
 // Windows simulator only.
 #[cfg(windows)]

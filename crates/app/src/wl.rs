@@ -56,13 +56,19 @@ pub fn grab(win: *mut c_void) {
                 SURFACE.store(surface, Ordering::Relaxed);
             }
         }
+        // The framebuffer's alpha: without it a clear to alpha 0 is no hole for the video plane.
+        let mut alpha: c_int = -1;
+        sdl::glGetIntegerv(sdl::GL_ALPHA_BITS, &mut alpha);
         log(&format!(
-            "wl: sdl={}.{}.{} wm_ok={ok} subsystem={subsystem} surface={:p}",
+            "wl: sdl={}.{}.{} wm_ok={ok} subsystem={subsystem} surface={:p} alpha_bits={alpha}",
             info[0],
             info[1],
             info[2],
             SURFACE.load(Ordering::Relaxed)
         ));
+        if SURFACE.load(Ordering::Relaxed).is_null() {
+            log("wl: NO wl_surface: the UI plane cannot be made transparent; video would play invisibly beneath it");
+        }
     }
     clear_opaque_region();
 }
