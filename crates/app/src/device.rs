@@ -45,21 +45,46 @@ pub fn best(c: &Caps) -> (u32, Codec, bool, bool) {
     (h, codec, c.hdr && modern, modern)
 }
 
+/// The media server's decoder entries named `name` (None: not a decoder list).
+fn decoders(v: &serde_json::Value, name: &str) -> Option<Vec<serde_json::Value>> {
+    let list = v["videoCodecs"].as_array()?;
+    Some(list.iter().filter(|c| c["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(name))).cloned().collect())
+}
+
 /// The decoders' largest heights from the media server's list: `(av1, vp9)`.
 pub fn decoder_heights(json: &str) -> (u32, u32) {
     let v: serde_json::Value = serde_json::from_str(json).unwrap_or_default();
     let height = |name: &str| {
-        v["videoCodecs"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|c| c["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(name)))
+        decoders(&v, name)
+            .unwrap_or_default()
+            .iter()
             .filter(|c| c["maxFrameRate"].as_u64().unwrap_or(0) >= 50)
             .filter_map(|c| c["maxHeight"].as_u64())
             .max()
             .unwrap_or(0) as u32
     };
     (height("AV1"), height("VP9"))
+}
+
+/// Whether the media server's list has an `name` decoder at any size or frame rate (None: the
+/// text is not a decoder list).
+pub fn lists_decoder(json: &str, name: &str) -> Option<bool> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    decoders(&v, name).map(|d| !d.is_empty())
+}
+
+/// False only when the TV's decoder list is readable and names no AV1 (the webOS 4 sets: the C9's
+/// lists H.264, HEVC and VP9): engine B then never picks an AV1 format. Read once.
+#[cfg(not(windows))]
+pub fn av1_decoder() -> bool {
+    static AV1: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AV1.get_or_init(|| {
+        let listed = std::fs::read_to_string(CODEC_FILE).ok().and_then(|s| lists_decoder(&s, "AV1"));
+        if listed == Some(false) {
+            crate::log("device: no AV1 decoder in the media server's list; AV1 formats are never chosen");
+        }
+        listed.unwrap_or(true)
+    })
 }
 
 #[cfg(not(windows))]
@@ -154,6 +179,14 @@ mod tests {
     fn full_hd_set_without_modern_decoders_stays_h264() {
         let c = Caps { panel_height: 1080, hdr: false, av1_height: 0, vp9_height: 1088 };
         assert_eq!(best(&c), (1080, Codec::Avc, false, false));
+    }
+
+    #[test]
+    fn av1_decoder_listed() {
+        assert_eq!(lists_decoder(LG_C3, "AV1"), Some(true));
+        let c9 = r#"{"videoCodecs":[{"name":"H.264","maxHeight":2304,"maxFrameRate":60},{"name":"VP9","maxHeight":2304,"maxFrameRate":60}]}"#;
+        assert_eq!(lists_decoder(c9, "AV1"), Some(false));
+        assert_eq!(lists_decoder("not json", "AV1"), None);
     }
 
     #[test]

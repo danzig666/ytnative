@@ -109,6 +109,7 @@ impl FeedPlayer {
                 // webOS 4: a VP9 PQ stream stays SDR without plx's sourceInfo hdrType rewrite
                 // before setMediaVideoData (not ported; docs/feed-engine.md).
                 allow_hdr: prefs.allow_hdr && !crate::vplane::feed(),
+                allow_av1: crate::device::av1_decoder(),
                 need_url: matches!(prefs.transport, Transport::Direct),
             },
         )
