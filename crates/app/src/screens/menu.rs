@@ -57,6 +57,8 @@ enum Act {
     /// SponsorBlock on / off for a channel (by name).
     SbChannel(String),
     Close,
+    /// Play at this speed (the speed list).
+    SetSpeed(f32),
 }
 
 struct State(String);
@@ -234,6 +236,22 @@ impl MenuScreen {
             (tr("Apply").to_string(), Act::ApplyFilters(query)),
         ];
         Self::make(entry, tr("Search filters").to_string(), acts)
+    }
+
+    /// Every speed SmartTube offers, the current one selected.
+    pub fn speeds(entry: EntryId, cx: &Cx<'_, YtHost>) -> Self {
+        let cur = if cx.views.player.rate > 0.0 { cx.views.player.rate } else { 1.0 };
+        let acts: Vec<(String, Act)> = SPEEDS
+            .iter()
+            .map(|&r| {
+                let label = if (r - 1.0).abs() < 0.001 { tr("Normal").to_string() } else { format!("{r}x") };
+                let label = if (r - cur).abs() < 0.001 { format!("{label}  \u{2713}") } else { label };
+                (label, Act::SetSpeed(r))
+            })
+            .collect();
+        let m = Self::make(entry, tr("Playback speed").to_string(), acts);
+        m.refocus.set(Some(crate::settings::speed_index(cur)));
+        m
     }
 
     pub fn player(entry: EntryId, cx: &Cx<'_, YtHost>) -> Self {
@@ -584,6 +602,12 @@ impl MenuScreen {
                 fx.push(Fx::Nav(NavOp::Replace(YtArg::Feed(FeedKey::Search { query: q.clone(), params }))));
             }
             Act::Close => fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry))),
+            Act::SetSpeed(r) => {
+                fx.push(Fx::App(YtFx::SetSpeed(*r)));
+                let label = if (*r - 1.0).abs() < 0.001 { crate::i18n::tr("Normal").to_string() } else { format!("{r}x") };
+                fx.push(Fx::App(YtFx::Toast(label)));
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
+            }
         }
         fx.invalidate(plx_machine::present::Provenance::Input);
     }

@@ -47,6 +47,9 @@ pub struct Spec {
     /// Real frame rate (0 = unknown).
     pub fps: f64,
     pub audio: Option<AudioDecl>,
+    /// Load for client-side trick play (speed changes in place). Not for live streams, which
+    /// keep the live transmission.
+    pub trick_play: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -137,6 +140,15 @@ fn json_escape(s: &str) -> String {
 pub fn build(spec: &Spec) -> String {
     let env = sink_envelope(spec.video, spec.width, spec.height, spec.fps);
     let mut p = TEMPLATE.replace(r#""video":"H264""#, &format!(r#""video":"{}""#, spec.video.name()));
+    if spec.trick_play {
+        // Client-side trick play, as LG's own YouTube app loads its pipeline (found by the
+        // youtube-webos-cobalt-adfree project): SetPlayRate then changes the speed in place.
+        // Without it the C3 accepts SetPlayRate and stops the picture.
+        p = p.replace(
+            r#""transmission":{"contentsType":"LIVE"}"#,
+            r#""forcedPrerollOnPause":true,"seekMode":"keep-rate","transmission":{"trickType":"client-side"}"#,
+        );
+    }
     p = p
         .replace(r#""maxWidth":1920"#, &format!(r#""maxWidth":{}"#, env.w))
         .replace(r#""maxHeight":1080"#, &format!(r#""maxHeight":{}"#, env.h))
@@ -175,7 +187,7 @@ mod tests {
     use super::*;
 
     fn spec(video: VideoDecl, w: u32, h: u32, fps: f64, audio: Option<AudioDecl>) -> Spec {
-        Spec { app_id: "com.example.yt".into(), window_id: Some("_Window_Id_3".into()), video, width: w, height: h, fps, audio }
+        Spec { app_id: "com.example.yt".into(), window_id: Some("_Window_Id_3".into()), video, width: w, height: h, fps, audio, trick_play: false }
     }
 
     #[test]

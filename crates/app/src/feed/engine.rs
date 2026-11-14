@@ -358,6 +358,7 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
         height: vt.height,
         fps,
         audio: adecl,
+        trick_play: !live,
     };
     let payload = payload::build(&spec);
     let env = payload::sink_envelope(vdecl, vt.width, vt.height, fps);
@@ -391,6 +392,10 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
     // Playback speed asked for; applied once playing and again after every Play (a reload or a
     // seek that rebuilds the pipeline starts at normal speed).
     let mut rate: f32 = 1.0;
+    // The speed asked for. It is sent once the pipeline is playing and has shown a frame (a
+    // SetPlayRate before the first frame stalls the picture on the C3; youtube-webos-cobalt-adfree
+    // found the same), after every Play, seek and reload.
+    let mut wanted: f32 = 1.0;
     // Some TVs accept SetPlayRate and keep playing at normal speed: after a speed change the
     // reported position is timed against the clock, and a speed that did not take is refused.
     let mut probe_rate = false;
@@ -399,6 +404,8 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
     let mut seeking: Option<i64> = None;
     let mut gen = 0u64;
     let mut native_seek = true;
+    // The next seek reloads the pipeline instead of a native Seek (leaving a speed: see Rate).
+    let mut reload_seek = false;
     let mut play_at: Option<Instant> = None;
     let mut seek_started = Instant::now();
     let duration_ns = plan.duration_ms as i64 * 1_000_000;
@@ -443,20 +450,22 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
                     sys::set_volume(v);
                 }
                 Cmd::Rate(r) => {
-                    if priming {
-                        rate = r; // applied with Play
+                    if (r - wanted).abs() <= 0.001 {
+                        // The same speed again: nothing to do.
+                    } else if (r - 1.0).abs() > 0.01 || (rate - 1.0).abs() <= 0.01 {
+                        // Sent by the step below once a frame shows.
+                        wanted = r;
                     } else {
-                        let ok = sys::set_play_rate(r);
-                        crate::log(&format!("feed: SetPlayRate {r} -> {ok}"));
-                        if ok || (r - 1.0).abs() <= 0.01 {
-                            reanchor(&mut base, &mut play_at, rate, true);
-                            rate = r;
-                            probe_rate = (r - 1.0).abs() > 0.01;
-                            rate_probe = None;
-                        } else {
-                            // Still playing at the old speed; the host restarts on the system player.
-                            sh.status.lock().unwrap().rate_refused = true;
-                        }
+                        // Back to normal: the firmware answers SetPlayRate 1.0 with success and
+                        // keeps the old speed (youtube-webos-cobalt-adfree found the same), so the
+                        // pipeline is reloaded at the current position, which starts at 1x.
+                        crate::log(&format!("feed: speed {rate} -> 1: reloading at the current position"));
+                        reanchor(&mut base, &mut play_at, rate, true);
+                        rate = 1.0;
+                        wanted = 1.0;
+                        probe_rate = false;
+                        reload_seek = true;
+                        seek_to = Some(sh.status.lock().unwrap().position_ms);
                     }
                 }
             }
@@ -487,6 +496,8 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
             seeking = Some(t);
             seek_started = Instant::now();
             rate_probe = None;
+            probe_rate = false;
+            rate = 1.0;
             let mut s = sh.status.lock().unwrap();
             s.position_ms = t as u64 / 1_000_000;
             if !matches!(s.phase, Phase::Paused | Phase::Failed(_)) {
@@ -513,7 +524,8 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
                 std::thread::sleep(Duration::from_millis(5));
                 continue;
             };
-            let landed = native_seek && sys::seek_ms(k.max(0) / 1_000_000);
+            let forced_reload = std::mem::take(&mut reload_seek);
+            let landed = native_seek && !forced_reload && sys::seek_ms(k.max(0) / 1_000_000);
             if landed {
                 // A position report that arrived between the seek command and this Seek belongs
                 // to the old timeline (and the old shift): drop it.
@@ -521,7 +533,7 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
                 shift = 0;
                 base = k.max(0);
             } else {
-                if native_seek {
+                if native_seek && !forced_reload {
                     crate::log("feed: native Seek refused; reloading per seek from now on");
                     native_seek = false;
                 }
@@ -548,6 +560,20 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
                 break Err("the TV took the video decoder back".into());
             }
         }
+        if pres != PRES_NONE && !priming && !user_paused && seeking.is_none() && (wanted - rate).abs() > 0.001 && (wanted - 1.0).abs() > 0.01 {
+            let ok = sys::set_play_rate(wanted);
+            crate::log(&format!("feed: SetPlayRate {wanted} -> {ok}"));
+            if ok {
+                reanchor(&mut base, &mut play_at, rate, true);
+                rate = wanted;
+                probe_rate = true;
+                rate_probe = None;
+            } else {
+                // Refused: the host restarts the video on the system player.
+                wanted = rate;
+                sh.status.lock().unwrap().rate_refused = true;
+            }
+        }
         if pres != PRES_NONE && probe_rate && !priming && !user_paused && seeking.is_none() {
             match rate_probe {
                 None => rate_probe = Some((Instant::now(), pres)),
@@ -559,6 +585,7 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
                     crate::log(&format!("feed: speed {rate}: playing at {ratio:.2}x ({})", if took { "applied" } else { "not applied" }));
                     if !took {
                         rate = 1.0;
+                        wanted = 1.0;
                         sh.status.lock().unwrap().rate_refused = true;
                     }
                     probe_rate = false;
@@ -636,17 +663,6 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
             if !user_paused {
                 if !sys::play() {
                     crate::log("feed: Play refused");
-                }
-                if (rate - 1.0).abs() > 0.01 {
-                    let ok = sys::set_play_rate(rate);
-                    crate::log(&format!("feed: SetPlayRate {rate} -> {ok}"));
-                    if !ok {
-                        sh.status.lock().unwrap().rate_refused = true;
-                        rate = 1.0;
-                    } else {
-                        probe_rate = true;
-                        rate_probe = None;
-                    }
                 }
                 play_at = Some(Instant::now());
             }

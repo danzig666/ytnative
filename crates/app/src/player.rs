@@ -364,9 +364,9 @@ impl Player {
         crate::log(&format!("player: zoom {zoom:?} src {}x{} -> {r}", src.w, src.h));
     }
 
-    /// Playback speed (0.25..2.0) through uMediaServer's setPlayRate.
+    /// Playback speed (0.25..4.0, the speeds offered) through uMediaServer's setPlayRate.
     pub fn set_rate(&mut self, rate: f32) {
-        let rate = rate.clamp(0.25, 2.0);
+        let rate = rate.clamp(0.25, 4.0);
         if self.feed.active() {
             self.feed.set_rate(rate);
             return;

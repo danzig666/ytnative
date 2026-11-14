@@ -54,8 +54,6 @@ pub struct PlayerScreen {
     osd_sel: Option<usize>,
     /// Keyboard selection in the suggestions row under the controls (Down from the lower row).
     sugg_sel: Option<usize>,
-    /// The speed the speed button returns to (it toggles between 1x and this).
-    last_rate: f32,
     /// Screen dimming: the picture is dimmed now, and the last key press (views.now_ms clock).
     dimmed: bool,
     last_key_ms: u32,
@@ -85,7 +83,6 @@ impl PlayerScreen {
             pointer: None,
             osd_sel: None,
             sugg_sel: None,
-            last_rate: 1.5,
             dimmed: false,
             last_key_ms: 0,
             ptr_quiet: false,
@@ -324,16 +321,10 @@ impl PlayerScreen {
                 fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| s.playback_mode = next))));
                 fx.push(Fx::App(YtFx::Toast(next.label().into())));
             }
+            // The list of speeds, as SmartTube's speed button opens.
             OSD_SPEED => {
-                let rate = if st.rate > 0.0 { st.rate } else { 1.0 };
-                let to = if (rate - 1.0).abs() > 0.01 {
-                    self.last_rate = rate;
-                    1.0
-                } else {
-                    self.last_rate
-                };
-                fx.push(Fx::App(YtFx::SetSpeed(to)));
-                fx.push(Fx::App(YtFx::Toast(format!("{to}x"))));
+                self.osd_sel = None;
+                fx.push(Fx::Nav(NavOp::Present(YtArg::SpeedMenu)));
             }
             OSD_SEARCH if !cx.views.store.settings.child_mode => {
                 pause_if_playing(fx);

@@ -296,12 +296,17 @@ pub fn menu_open() -> bool {
     MENUS_OPEN.load(std::sync::atomic::Ordering::Relaxed) > 0
 }
 
+/// The pointer rests over the video info's description: the wheel and the top / bottom edges
+/// scroll it (elsewhere on that screen they step the chapter list).
+pub static INFO_DESC_HOVER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn wheel_scrolls_page(screen: Option<&str>) -> bool {
     if menu_open() {
         return false;
     }
     match screen {
         Some("player") | Some("comments") => true,
+        Some("info") => INFO_DESC_HOVER.load(std::sync::atomic::Ordering::Relaxed),
         Some("browse") => PAGE_SCROLLS.load(std::sync::atomic::Ordering::Relaxed),
         _ => false,
     }

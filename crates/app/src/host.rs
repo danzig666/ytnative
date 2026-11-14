@@ -47,6 +47,8 @@ pub enum YtArg {
     Menu(u32),
     /// Player options panel.
     PlayerMenu,
+    /// The list of playback speeds (the player's speed button, as in SmartTube).
+    SpeedMenu,
     Accounts,
     Comments(String),
     /// Replies to one comment: (replies continuation, parent author).
@@ -83,6 +85,7 @@ impl ScreenArg for YtArg {
             YtArg::PlaylistPicker(..) => 14,
             YtArg::Pin(_) => 15,
             YtArg::Chapters => 16,
+            YtArg::SpeedMenu => 17,
         })
     }
     fn title(&self) -> Option<&str> {
@@ -251,6 +254,7 @@ impl Mounter<YtHost> for Mount {
             YtArg::SignIn => Box::new(screens::signin::SignInScreen::new(entry)),
             YtArg::Menu(elem) => Box::new(screens::menu::MenuScreen::card(entry, *elem, cx)),
             YtArg::PlayerMenu => Box::new(screens::menu::MenuScreen::player(entry, cx)),
+            YtArg::SpeedMenu => Box::new(screens::menu::MenuScreen::speeds(entry, cx)),
             YtArg::Accounts => Box::new(screens::accounts::AccountsScreen::new(entry)),
             YtArg::Comments(v) => Box::new(screens::comments::CommentsScreen::new(entry, v.clone(), None)),
             YtArg::Replies(token, author) => Box::new(screens::comments::CommentsScreen::new(entry, token.clone(), Some(author.clone()))),
