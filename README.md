@@ -53,8 +53,11 @@ Root is not required.
 
 ### Requirements
 
-- An LG TV with webOS 5 or newer. Tested on an LG C3 (OLED65C3, webOS 23 / 10.2.2), where it is developed,
-  and an LG BX (OLED55BX, webOS 5.5).
+- An LG TV with webOS 4 or newer. Tested on an LG C3 (OLED65C3, webOS 23 / 10.2.2), where it is developed,
+  an LG BX (OLED55BX, webOS 5.5) and an LG C9 (OLED65C9, webOS 4.10.2; thanks to
+  [2esq](https://github.com/2esq)). On webOS 4 video plays through the 4K engine only: no HDR yet, the
+  picture stays full screen beside the comments, and speeds other than normal are not available.
+  webOS 3 is not supported.
 - Any GPU: the app links only the generic `libGLESv2`, loads EGL at runtime and falls back where
   an extension or shader precision is missing (developed on Mali; other GPUs are untested).
 - A Google account is optional: sign in with a code from **Settings > Account** to get your Home,
