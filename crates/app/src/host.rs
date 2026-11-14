@@ -665,10 +665,19 @@ impl AppRig {
         }
         self.player_view = self.player.status.lock().unwrap().clone();
         // Engine B refused the speed: play this video again on the system player, from here.
+        // webOS 4 has no other engine with a video plane (`vplane.rs`): back to normal speed.
+        #[cfg(not(windows))]
+        let acb = crate::vplane::feed();
+        #[cfg(windows)]
+        let acb = false;
         if self.player_view.rate_refused && self.system_restart.is_none() {
             self.player.status.lock().unwrap().rate_refused = false;
             let v = self.player_view.video_id.clone();
-            if !v.is_empty() {
+            if acb {
+                crate::log(&format!("speed {}x refused by engine B; webOS 4 has no other engine: back to 1x", self.player_view.rate));
+                self.player.set_rate(1.0);
+                self.store.toast("This speed is not available on this TV", now_ms);
+            } else if !v.is_empty() {
                 crate::log(&format!("speed {}x refused by engine B; restarting {v} on the system player", self.player_view.rate));
                 self.feed_no_rate = true;
                 self.restart_rate = Some((v.clone(), self.player_view.rate));

@@ -14,7 +14,7 @@ use crate::player::{Phase, Status};
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering::*};
-use std::sync::atomic::AtomicI64;
+use std::sync::atomic::{AtomicI64, AtomicU32};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use yt_core::demux::{Codec, Kind, TrackInfo};
@@ -52,6 +52,9 @@ const TRICK_FIRST_FRAME: Duration = Duration::from_secs(8);
 const RATE_PROBE: Duration = Duration::from_secs(4);
 /// Firmware number for "decoder taken back by policy" (plx-native, webOS 4.10).
 const DECODER_REVOKED: i64 = 600;
+/// webOS 4 (ACB): how long a teardown waits for the main thread to set the plane UNLOADED before
+/// the object is destroyed anyway (the main thread answers within a frame or two).
+const PLANE_RELEASE_WAIT: Duration = Duration::from_secs(2);
 
 pub enum Cmd {
     Pause,
@@ -90,11 +93,39 @@ pub struct Shared {
     pub stop: AtomicBool,
     /// Decoded raster to place the exported window for (taken by the main thread).
     pub place: Mutex<Option<(u32, u32)>>,
+    /// webOS 4 (ACB): what the main thread's plane bind reads and records (`FeedPlayer::acb_tick`).
+    pub plane: Mutex<PlaneLink>,
+    /// webOS 4: epoch of a pipeline whose plane binding the main thread must set UNLOADED now
+    /// (between the callback gate's retirement and the object's destruction), and its answer.
+    pub release_req: AtomicU32,
+    pub release_ack: AtomicU32,
+}
+
+/// webOS 4 (ACB). One lock so a pipeline is withdrawn and its binding read atomically: the main
+/// thread binds only while holding it, so once `pipe` is withdrawn no new binding of it can start.
+#[derive(Default)]
+pub struct PlaneLink {
+    /// The live pipeline's epoch and events (set after each Load, withdrawn before its teardown).
+    pub pipe: Option<(u32, Arc<Events>)>,
+    /// Epoch of the pipeline Play was last issued on (0: none yet). The plane binds only after it:
+    /// stricter than plx-native, which binds at loadCompleted (before Play on its prime path), so
+    /// a reload while paused stays black until the resume.
+    pub played: u32,
+    /// Epoch the main thread bound the plane to (0: none).
+    pub bound: u32,
 }
 
 impl Shared {
     pub fn new(status: Arc<Mutex<Status>>) -> Arc<Shared> {
-        Arc::new(Shared { status, cmds: Mutex::new(VecDeque::new()), stop: AtomicBool::new(false), place: Mutex::new(None) })
+        Arc::new(Shared {
+            status,
+            cmds: Mutex::new(VecDeque::new()),
+            stop: AtomicBool::new(false),
+            place: Mutex::new(None),
+            plane: Mutex::new(PlaneLink::default()),
+            release_req: AtomicU32::new(0),
+            release_ack: AtomicU32::new(0),
+        })
     }
 }
 
@@ -123,15 +154,16 @@ struct Pipe {
 }
 
 impl Pipe {
-    /// `stop`: the session is being stopped; the wait for loadCompleted gives up at once.
     /// `max_wait`: how long to wait for loadCompleted before feeding anyway (a trick-play
-    /// pipeline only completes once it has data: 4 to 10 s of nothing on the C3).
-    fn open(payload: &str, stop: &AtomicBool, max_wait: Duration) -> Result<Pipe, String> {
+    /// pipeline only completes once it has data: 4 to 10 s of nothing on the C3). The wait gives
+    /// up at once when the session is being stopped.
+    fn open(payload: &str, sh: &Shared, max_wait: Duration) -> Result<Pipe, String> {
+        let stop = &sh.stop;
         let ev = Events::new();
         let epoch = sys::route(ev.clone());
         let t0 = Instant::now();
         if !sys::load(payload, epoch) {
-            sys::teardown(Duration::from_secs(3));
+            sys::teardown(Duration::from_secs(3), || {});
             sys::unroute(epoch);
             return Err(if sys::blocked() { "Starfish is quarantined (restart the app)".into() } else { "Starfish refused the Load".into() });
         }
@@ -139,7 +171,7 @@ impl Pipe {
         while !(ev.load_completed.load(Relaxed) || sys::is_load_completed()) {
             if let Some((num, s)) = ev.error.lock().unwrap().clone() {
                 let p = Pipe { epoch, ev: ev.clone() };
-                p.close();
+                p.close(sh);
                 return Err(format!("pipeline refused the stream (error {num}: {})", s.chars().take(120).collect::<String>()));
             }
             if t0.elapsed() > max_wait {
@@ -154,14 +186,50 @@ impl Pipe {
         if ev.load_completed.load(Relaxed) || sys::is_load_completed() {
             crate::log(&format!("feed: loadCompleted after {} ms", t0.elapsed().as_millis()));
         }
+        sh.plane.lock().unwrap().pipe = Some((epoch, ev.clone()));
         Ok(Pipe { epoch, ev })
     }
 
-    fn close(self) {
-        let destroyed = sys::teardown(Duration::from_secs(3));
+    fn close(self, sh: &Shared) {
+        // webOS 4: withdraw the pipeline from the plane bind first; a binding made on it is set
+        // UNLOADED between the gate's retirement and D1 (plx-native's order, `native_release.rs`).
+        let bound = {
+            let mut link = sh.plane.lock().unwrap();
+            if link.pipe.as_ref().is_some_and(|(e, _)| *e == self.epoch) {
+                link.pipe = None;
+            }
+            link.bound == self.epoch
+        };
+        let destroyed = sys::teardown(Duration::from_secs(3), || {
+            if bound {
+                release_plane(sh, self.epoch);
+            }
+        });
         sys::unroute(self.epoch);
         crate::log(&format!("feed: pipeline closed (destroyed={destroyed})"));
     }
+}
+
+/// webOS 4 (ACB): the plane's `setState(UNLOADED)` is a main-thread verb, so ask the main thread
+/// (`FeedPlayer::tick`, or `FeedPlayer::stop` while it waits for this thread) and wait for its
+/// answer. Without one in time the object is destroyed first and the main thread unloads later.
+fn release_plane(sh: &Shared, epoch: u32) {
+    let t0 = Instant::now();
+    sh.release_req.store(epoch, Release);
+    wake();
+    while sh.release_ack.load(Acquire) != epoch {
+        if t0.elapsed() > PLANE_RELEASE_WAIT {
+            crate::log("feed: the main thread did not unload the video plane in time; destroying the pipeline first");
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    crate::log(&format!("feed: video plane unloaded before the pipeline's destruction ({} ms)", t0.elapsed().as_millis()));
+}
+
+/// Play was issued on `epoch`: the main thread may bind the plane to it now.
+fn played(sh: &Shared, epoch: u32) {
+    sh.plane.lock().unwrap().played = epoch;
 }
 
 #[derive(Default)]
@@ -391,7 +459,7 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
     crate::log(&format!("feed: speed in place {}", if trick_payload.is_some() { "possible (4K)" } else { "not possible" }));
     let env = payload::sink_envelope(vdecl, vt.width, vt.height, fps);
     crate::log(&format!(
-        "feed: Load {} {}x{}@{fps:.3} (declared {}x{}@{}) audio={:?} hdr={:?}",
+        "feed: Load {} {}x{}@{fps:.3} (declared {}x{}@{}) audio={:?} hdr={:?} window={}",
         vdecl.name(),
         vt.width,
         vt.height,
@@ -399,7 +467,8 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
         env.h,
         env.fps,
         at.as_ref().map(|t| &t.codec),
-        vt.color
+        vt.color,
+        plan.window_id.as_deref().unwrap_or("none (ACB)")
     ));
     {
         let mut s = sh.status.lock().unwrap();
@@ -410,7 +479,7 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
     *sh.place.lock().unwrap() = Some((vt.width, vt.height));
 
     let mut shift = video.peek_pts().unwrap_or(0).max(0);
-    let mut pipe = Pipe::open(&payload, &sh.stop, load_wait)?;
+    let mut pipe = Pipe::open(&payload, sh, load_wait)?;
     // Since when the current priming (Load or seek) has been waiting.
     let mut prime_since = Instant::now();
     let mut base = 0i64; // fed-timeline anchor of the current Load/seek
@@ -470,8 +539,8 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
                 }
                 Cmd::Resume => {
                     user_paused = false;
-                    if !priming && seeking.is_none() {
-                        sys::play();
+                    if !priming && seeking.is_none() && sys::play() {
+                        played(sh, pipe.epoch);
                     }
                     set_phase(sh, Phase::Playing);
                 }
@@ -572,8 +641,8 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
                     crate::log("feed: native Seek refused; reloading per seek from now on");
                     native_seek = false;
                 }
-                pipe.close();
-                pipe = Pipe::open(&payload, &sh.stop, load_wait)?;
+                pipe.close(sh);
+                pipe = Pipe::open(&payload, sh, load_wait)?;
                 shift = k.max(0);
                 base = 0;
             }
@@ -724,7 +793,9 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
             priming = false;
             crate::log(&format!("feed: primed v={} ms a={} ms", vbuf / 1_000_000, abuf / 1_000_000));
             if !user_paused {
-                if !sys::play() {
+                if sys::play() {
+                    played(sh, pipe.epoch);
+                } else {
                     crate::log("feed: Play refused");
                 }
                 play_at = Some(Instant::now());
@@ -748,6 +819,6 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
             std::thread::sleep(Duration::from_millis(5));
         }
     };
-    pipe.close();
+    pipe.close(sh);
     result
 }

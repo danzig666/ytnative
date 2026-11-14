@@ -5,9 +5,9 @@
  *
  * Ported to ytnative from plx-native (github.com/GLinnik21/plx-native, src/starfish.h,
  * GPL-3.0-or-later). Changes for ytnative: every StarfishMediaAPIs method is resolved with
- * dlopen/dlsym (no strong reference to a mangled method), the ACB / video-plane / in-place-seek
- * (private offset) verbs are not ported, and logging goes through a Rust callback instead of the
- * boot shim's FILE*. */
+ * dlopen/dlsym (no strong reference to a mangled method), the in-place-seek (private offset) verbs
+ * are not ported, the ACB / video-plane verbs live in video_plane.h, and logging goes through a
+ * Rust callback instead of the boot shim's FILE*. */
 /* starfish.h — flat ABI for starfish.c (buffer-feed). LG StarfishMediaAPIs (C++) behind flat C
  * verbs: hides the mangled symbols, the sret std::string in Feed, the never-reused 64 KB in-place
  * objects and the callback gate. Library-thread callbacks are forwarded to sf_on_event (Rust,

@@ -29,8 +29,13 @@ fn main() {
         println!("cargo:rustc-link-arg=-l:libplayerAPIs.so.1"); // stub from ci/symbols, real one on the TV
         println!("cargo:rerun-if-changed=csrc/starfish.c");
         println!("cargo:rerun-if-changed=csrc/starfish.h");
+        println!("cargo:rerun-if-changed=csrc/video_plane.c");
+        println!("cargo:rerun-if-changed=csrc/video_plane.h");
         cc::Build::new()
             .file("csrc/starfish.c")
+            // The webOS 4 video plane (ACB): libAcbAPI.so.1 is dlopen'd at runtime, never linked
+            // (webOS 5+ deleted it, and a DT_NEEDED would kill the process there before main).
+            .file("csrc/video_plane.c")
             .define("_GNU_SOURCE", None)
             .opt_level(2)
             .warnings(false)

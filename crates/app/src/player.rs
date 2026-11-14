@@ -1,6 +1,9 @@
 //! Playback engine A: a DASH manifest handed to the TV's media service (uMediaServer) with an SDL
 //! exported window as the video plane. Proven on the C3 by the step-2 prototype (`tvplay`).
 //!
+//! webOS 4 has no exported window: its plane is bound through ACB (`vplane.rs`), which only
+//! engine B does here, so on those sets every video goes to engine B.
+//!
 //! Threading: the exported window is created/destroyed on the main thread (SDL); stream
 //! resolution and every luna call run on a worker; media events update `Status`, which the
 //! player screen reads every frame.
@@ -128,6 +131,8 @@ pub struct Status {
 pub struct Player {
     pub status: Arc<Mutex<Status>>,
     window: Option<CString>,
+    /// webOS 4: this session has no exported window; engine B binds the ACB plane.
+    acb: bool,
     media_id: Arc<Mutex<Option<String>>>,
     luna: Option<&'static Luna>,
     /// Engine B settings; `Some` lets a video go to the Feed engine when it needs it (4K, VP9, AV1)
@@ -153,14 +158,15 @@ struct Handoff {
 }
 
 /// Engine B takes live streams (LG's HLS player stalls on YouTube's split-audio live playlists)
-/// and, when preferred, videos whose best format is above 1080p or not H.264.
+/// and, when preferred, videos whose best format is above 1080p or not H.264. On webOS 4 (`acb`)
+/// it takes everything it can play: engine A has no video plane there.
 #[cfg(not(windows))]
-fn wants_feed(resolved: &yt_core::streams::Resolved, prefs: &crate::feed::Prefs, prefer: bool) -> bool {
+fn wants_feed(resolved: &yt_core::streams::Resolved, prefs: &crate::feed::Prefs, prefer: bool, acb: bool) -> bool {
     if !crate::feed::FeedPlayer::available() {
         return false;
     }
     match crate::feed::FeedPlayer::choose(resolved, prefs) {
-        Some(_) if resolved.is_live => true,
+        Some(_) if acb || resolved.is_live => true,
         Some(c) => prefer && (c.video_codec != crate::feed::VideoCodec::H264 || c.video["height"].as_u64().unwrap_or(0) > 1080),
         None => false,
     }
@@ -172,6 +178,7 @@ impl Player {
         Player {
             status: Default::default(),
             window: None,
+            acb: false,
             media_id: Default::default(),
             luna: None,
             feed_prefs: None,
@@ -182,9 +189,9 @@ impl Player {
         }
     }
 
-    /// A playback session (and its video window) exists.
+    /// A playback session (and its video window, or on webOS 4 its ACB plane) exists.
     pub fn active(&self) -> bool {
-        self.window.is_some()
+        self.window.is_some() || self.acb
     }
 
     fn bus(&mut self) -> Option<&'static Luna> {
@@ -217,23 +224,38 @@ impl Player {
         // The video is known from the start (the phone's queue updates, history, a restart of the
         // same video compare against it), not only once it is resolved.
         *self.status.lock().unwrap() = Status { phase: Phase::Resolving, rate: 1.0, video_id: video_id.clone(), ..Default::default() };
-        let Some(create) = sdl_sym::<CreateFn>("SDL_webOSCreateExportedWindow") else {
-            self.fail("no SDL exported-window support on this TV");
-            return;
+        let window_id = match sdl_sym::<CreateFn>("SDL_webOSCreateExportedWindow") {
+            Some(create) => {
+                let wid = unsafe { create(0) };
+                if wid.is_null() {
+                    self.fail("could not create the video window");
+                    return;
+                }
+                let wid = unsafe { CStr::from_ptr(wid) }.to_owned();
+                if let Some(set) = sdl_sym::<SetFn>("SDL_webOSSetExportedWindow") {
+                    let mut src = SdlRect { x: 0, y: 0, w: 1920, h: 1080 };
+                    let mut dst = SdlRect { x: 0, y: 0, w: 1920, h: 1080 };
+                    unsafe { set(wid.as_ptr(), &mut src, &mut dst) };
+                }
+                let window_id = wid.to_string_lossy().into_owned();
+                self.window = Some(wid);
+                Some(window_id)
+            }
+            None => {
+                crate::vplane::boot(); // normally done after the first frame; a launch link can be quicker
+                if !crate::vplane::feed() {
+                    self.fail(if crate::vplane::acb() { "webOS 4: the video plane (ACB) did not initialize" } else { "no SDL exported-window support on this TV" });
+                    return;
+                }
+                // webOS 4: engine A's ACB bind is not ported, so its picture would be black.
+                if !self.prefer_feed {
+                    crate::log("player: webOS 4: the system player has no video plane here; 'Playback engine = system' plays on engine B");
+                }
+                crate::log("player: webOS 4 video plane: ACB (no SDL exported window); engine B");
+                self.acb = true;
+                None
+            }
         };
-        let wid = unsafe { create(0) };
-        if wid.is_null() {
-            self.fail("could not create the video window");
-            return;
-        }
-        let wid = unsafe { CStr::from_ptr(wid) }.to_owned();
-        if let Some(set) = sdl_sym::<SetFn>("SDL_webOSSetExportedWindow") {
-            let mut src = SdlRect { x: 0, y: 0, w: 1920, h: 1080 };
-            let mut dst = SdlRect { x: 0, y: 0, w: 1920, h: 1080 };
-            unsafe { set(wid.as_ptr(), &mut src, &mut dst) };
-        }
-        let window_id = wid.to_string_lossy().into_owned();
-        self.window = Some(wid);
         let Some(luna) = self.bus() else {
             self.fail("media bus unavailable");
             return;
@@ -245,7 +267,7 @@ impl Player {
             if refused {
                 *session.lock().unwrap() = None;
             }
-            match run(luna, &video_id, &window_id, &session, &status, &media_id, prefs, start_ms, feed, &live, my_gen) {
+            match run(luna, &video_id, window_id.as_deref(), &session, &status, &media_id, prefs, start_ms, feed, &live, my_gen) {
                 Ok(true) => {
                     if extras.history {
                         let (v, s2, st2, g2) = (video_id.clone(), session.clone(), status.clone(), gen.clone());
@@ -268,7 +290,8 @@ impl Player {
         }
     }
 
-    /// Main thread, every frame: starts a handed-off engine B session, drives engine B.
+    /// Main thread, every frame: starts a handed-off engine B session, drives engine B (and keeps
+    /// the webOS 4 plane owner pumped while a binding or its release is outstanding).
     pub fn tick(&mut self) {
         let h = self.handoff.lock().unwrap().take();
         let h = h.filter(|h| h.gen == self.gen.load(std::sync::atomic::Ordering::SeqCst));
@@ -298,6 +321,7 @@ impl Player {
         if self.feed.active() {
             self.feed.tick();
         }
+        crate::vplane::tick();
     }
 
     fn fail(&mut self, why: &str) {
@@ -342,6 +366,12 @@ impl Player {
 
     /// Picture fit: re-places the exported window with a cropped source rectangle.
     pub fn set_zoom(&mut self, zoom: Zoom) {
+        if self.acb {
+            // webOS 4: the ACB plane stays full screen (setCustomDisplayWindow is not mapped), so
+            // the setting would show a fit the picture does not have.
+            crate::log(&format!("player: zoom {zoom:?} not available on webOS 4"));
+            return;
+        }
         let (w, h) = {
             let mut s = self.status.lock().unwrap();
             s.zoom = zoom;
@@ -422,6 +452,7 @@ impl Player {
                 unsafe { destroy(w.as_ptr()) };
             }
         }
+        self.acb = false;
         self.status.lock().unwrap().phase = Phase::Idle;
     }
 }
@@ -436,7 +467,7 @@ fn json_str(s: &str) -> String {
 fn run(
     luna: &'static Luna,
     video_id: &str,
-    window_id: &str,
+    window_id: Option<&str>,
     session: &Arc<Mutex<Option<yt_core::session::Session>>>,
     status: &Arc<Mutex<Status>>,
     media_id: &Arc<Mutex<Option<String>>>,
@@ -487,7 +518,7 @@ fn run(
             .unwrap_or(0) as u32;
     }
     if let Some((fp, prefer, slot)) = feed {
-        if wants_feed(&resolved, &fp, prefer) {
+        if wants_feed(&resolved, &fp, prefer, window_id.is_none()) {
             crate::log("player: handing the video to engine B (Feed)");
             if !live() {
                 return Ok(false);
@@ -504,6 +535,14 @@ fn run(
             return Ok(true);
         }
     }
+    // webOS 4 (no exported window): engine A would play sound over a black screen.
+    let Some(window_id) = window_id else {
+        anyhow::bail!(if crate::feed::FeedPlayer::available() {
+            "webOS 4: this video has no stream engine B can play"
+        } else {
+            "webOS 4: engine B (Starfish) is not available, and the system player has no video plane here"
+        });
+    };
     std::fs::create_dir_all("/tmp/ytnative")?;
     // Live: the HLS master reduced to H.264 renditions (DASH-from-formats only works for VOD).
     // Needs TV validation: LG's hlsdemux2 stalled on YouTube's VOD TS playlists in early tests.

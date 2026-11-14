@@ -31,6 +31,8 @@ mod signin;
 mod sim;
 mod store;
 mod ui;
+#[cfg(not(windows))]
+mod vplane;
 #[cfg_attr(windows, path = "sim/wl.rs")]
 mod wl;
 
@@ -285,6 +287,8 @@ fn main() {
         let mut last_input = sdl::SDL_GetTicks();
         let mut blanked = false;
         let mut foreground = true;
+        #[cfg(not(windows))]
+        let mut plane_booted = false;
         while running {
             let now = sdl::SDL_GetTicks();
             let dt = if prev == 0 { 0.016 } else { ((now - prev) as f32 / 1000.0).min(0.05) };
@@ -659,6 +663,11 @@ fn main() {
                 if std::env::var_os("YTNATIVE_FRAME_DEBUG").is_some() {
                     log(&format!("framedbg draw {} us at {}", draw_t0.elapsed().as_micros(), now));
                 }
+                // While a webOS 4 (ACB) plane is slaved to this surface: re-assert the empty opaque
+                // region on every frame, committed by the swap (plx-native does the same).
+                if plx_machine::idle::video_plane_bound() {
+                    wl::clear_opaque_region();
+                }
                 sdl::SDL_GL_SwapWindow(win);
                 plx_gfx::gfx::blur_frame_end();
                 plx_gfx::gfx::region_frame_end();
@@ -666,6 +675,13 @@ fn main() {
                 plx_gfx::gfx::field_frame_end();
                 plx_gfx::gfx::ground_probes_frame_end();
                 plx_machine::idle::note_present(now);
+                // The video plane's boot (webOS 4: the ACB handle) once a frame is up: after GL,
+                // SDL's app registration and the LS2 bus, as plx-native boots it.
+                #[cfg(not(windows))]
+                if !plane_booted {
+                    plane_booted = true;
+                    vplane::boot();
+                }
             } else {
                 plx_gfx::text::warm_fonts_idle(2000, now_us);
                 sdl::SDL_Delay(plx_machine::idle::IDLE_POLL_MS);

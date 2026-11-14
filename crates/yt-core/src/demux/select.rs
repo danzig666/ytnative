@@ -15,6 +15,8 @@ pub struct Request {
     pub codec: VideoCodec,
     /// Consider HDR (PQ/HLG) formats, and prefer them at equal height.
     pub allow_hdr: bool,
+    /// False on a TV with no AV1 decoder (the webOS 4 sets): AV1 formats are never chosen.
+    pub allow_av1: bool,
     /// Only formats with a direct `url` (ranged mode); false for SABR.
     pub need_url: bool,
 }
@@ -90,6 +92,9 @@ pub fn choose(adaptive: &[Value], r: Request) -> Option<Choice> {
     };
     let mut best: Option<((u64, u8), Value, VideoCodec)> = None;
     for c in &order {
+        if *c == VideoCodec::Av1 && !r.allow_av1 {
+            continue;
+        }
         if let Some(f) = best_of(adaptive, *c, &r) {
             let rank = (crate::mpd::rung(&f), hdr_rank(&f, *c));
             if best.as_ref().map_or(true, |(br, _, _)| rank > *br) {
@@ -130,7 +135,7 @@ mod tests {
     }
 
     fn req(max_height: u32, codec: VideoCodec) -> Request {
-        Request { max_height, codec, allow_hdr: false, need_url: true }
+        Request { max_height, codec, allow_hdr: false, allow_av1: true, need_url: true }
     }
 
     #[test]
@@ -165,6 +170,20 @@ mod tests {
         f.push(json!({"itag":701,"url":"u","mimeType":"video/mp4; codecs=\"av01.0.13M.10.0.110.09.16.09.0\"","height":2160,"fps":60,"bitrate":20000000,"colorInfo":{"transferCharacteristics":"COLOR_TRANSFER_CHARACTERISTICS_SMPTEST2084"}}));
         assert_eq!(choose(&f, r).unwrap().video_itag(), 701);
         r.allow_hdr = false;
+        assert_eq!(choose(&f, r).unwrap().video_itag(), 315);
+    }
+
+    #[test]
+    fn no_av1_without_a_decoder() {
+        let mut f = fmts();
+        f.push(json!({"itag":701,"url":"u","mimeType":"video/mp4; codecs=\"av01.0.13M.10.0.110.09.16.09.0\"","height":2160,"fps":60,"bitrate":20000000,"colorInfo":{"transferCharacteristics":"COLOR_TRANSFER_CHARACTERISTICS_SMPTEST2084"}}));
+        let mut r = req(2160, VideoCodec::Vp9);
+        r.allow_hdr = true;
+        r.allow_av1 = false;
+        assert_eq!(choose(&f, r).unwrap().video_itag(), 337);
+        // Preferred AV1 on such a set: the best other codec.
+        let mut r = req(2160, VideoCodec::Av1);
+        r.allow_av1 = false;
         assert_eq!(choose(&f, r).unwrap().video_itag(), 315);
     }
 
