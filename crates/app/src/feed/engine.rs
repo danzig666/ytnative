@@ -34,6 +34,13 @@ const BLIND_AHEAD_NS: i64 = 4_000_000_000;
 const LANE_SLICE: Duration = Duration::from_millis(3);
 /// How long a seek may wait for the first video unit of its generation (slow networks included).
 const SEEK_LANDING_TIMEOUT: Duration = Duration::from_secs(30);
+/// Load for client-side trick play (speed changes in place, in 4K; found by
+/// youtube-webos-cobalt-adfree). Off: on the C3 it reports loadCompleted only after 4 to 10 s,
+/// and fed early (after `TRICK_LOAD_WAIT`) some videos never show a picture (a 720p AV1 one
+/// stayed on the spinner), while 4K played and changed speed in place. Speeds other than 1x
+/// go to the system player instead.
+const TRICK_PLAY: bool = false;
+const TRICK_LOAD_WAIT: Duration = Duration::from_millis(300);
 /// How long playback is timed after a speed change to see whether the TV applied it.
 const RATE_PROBE: Duration = Duration::from_secs(4);
 /// Firmware number for "decoder taken back by policy" (plx-native, webOS 4.10).
@@ -110,7 +117,9 @@ struct Pipe {
 
 impl Pipe {
     /// `stop`: the session is being stopped; the wait for loadCompleted gives up at once.
-    fn open(payload: &str, stop: &AtomicBool) -> Result<Pipe, String> {
+    /// `max_wait`: how long to wait for loadCompleted before feeding anyway (a trick-play
+    /// pipeline only completes once it has data: 4 to 10 s of nothing on the C3).
+    fn open(payload: &str, stop: &AtomicBool, max_wait: Duration) -> Result<Pipe, String> {
         let ev = Events::new();
         let epoch = sys::route(ev.clone());
         let t0 = Instant::now();
@@ -126,8 +135,8 @@ impl Pipe {
                 p.close();
                 return Err(format!("pipeline refused the stream (error {num}: {})", s.chars().take(120).collect::<String>()));
             }
-            if t0.elapsed() > Duration::from_secs(10) {
-                crate::log("feed: no loadCompleted after 10 s; feeding anyway");
+            if t0.elapsed() > max_wait {
+                crate::log(&format!("feed: no loadCompleted after {} ms; feeding anyway", max_wait.as_millis()));
                 break;
             }
             if stop.load(Relaxed) {
@@ -135,7 +144,9 @@ impl Pipe {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        crate::log(&format!("feed: loadCompleted after {} ms", t0.elapsed().as_millis()));
+        if ev.load_completed.load(Relaxed) || sys::is_load_completed() {
+            crate::log(&format!("feed: loadCompleted after {} ms", t0.elapsed().as_millis()));
+        }
         Ok(Pipe { epoch, ev })
     }
 
@@ -358,11 +369,10 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
         height: vt.height,
         fps,
         audio: adecl,
-        // Off: with the trick-play options the C3 took 4 to 10 s to report loadCompleted, so
-        // every video started slowly or not at all (0.2.20). Speeds go to the system player.
-        trick_play: false,
+        trick_play: TRICK_PLAY && !live,
     };
     let payload = payload::build(&spec);
+    let load_wait = if spec.trick_play { TRICK_LOAD_WAIT } else { Duration::from_secs(10) };
     let env = payload::sink_envelope(vdecl, vt.width, vt.height, fps);
     crate::log(&format!(
         "feed: Load {} {}x{}@{fps:.3} (declared {}x{}@{}) audio={:?} hdr={:?}",
@@ -384,7 +394,7 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
     *sh.place.lock().unwrap() = Some((vt.width, vt.height));
 
     let mut shift = video.peek_pts().unwrap_or(0).max(0);
-    let mut pipe = Pipe::open(&payload, &sh.stop)?;
+    let mut pipe = Pipe::open(&payload, &sh.stop, load_wait)?;
     let mut base = 0i64; // fed-timeline anchor of the current Load/seek
     let mut floor = shift; // content-time: no audio before the video anchor
     let mut vf = LaneFeed::default();
@@ -540,7 +550,7 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
                     native_seek = false;
                 }
                 pipe.close();
-                pipe = Pipe::open(&payload, &sh.stop)?;
+                pipe = Pipe::open(&payload, &sh.stop, load_wait)?;
                 shift = k.max(0);
                 base = 0;
             }
