@@ -1,2 +1,1 @@
-- Fixed: playback speed on the 4K engine: the app now checks that the TV really plays faster, and if it does not (the LG C3 accepts the speed but ignores it) the video continues at that speed on the system player
-- Fixed: with SponsorBlock's "skip again" on, a skipped segment no longer skips over and over (the skip lands on a keyframe just before the segment's end)
+- Fixed: on the LG C3 the 4K engine stops the picture at 1.5x instead of playing faster; the app now sees that and continues the video at the chosen speed on the system player

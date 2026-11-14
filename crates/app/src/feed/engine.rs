@@ -553,7 +553,9 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
                 None => rate_probe = Some((Instant::now(), pres)),
                 Some((t0, p0)) if t0.elapsed() >= RATE_PROBE => {
                     let ratio = (pres - p0) as f64 / t0.elapsed().as_nanos() as f64;
-                    let took = (ratio - 1.0).abs() >= (rate as f64 - 1.0).abs() / 2.0;
+                    // Taken only when playback runs near the asked speed: the C3 accepts 1.5x and
+                    // stops the picture (0x), which is no more a speed change than 1x is.
+                    let took = (ratio - rate as f64).abs() < (rate as f64 - 1.0).abs() / 2.0;
                     crate::log(&format!("feed: speed {rate}: playing at {ratio:.2}x ({})", if took { "applied" } else { "not applied" }));
                     if !took {
                         rate = 1.0;
