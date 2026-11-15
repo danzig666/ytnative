@@ -17,8 +17,16 @@ fn num(v: &Value) -> Option<u64> {
     v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
 }
 
-/// Fetches bytes `start..=end` (inclusive), in requests of at most [`MAX_RANGE`], retrying each
-/// a few times. `sink` receives the data chunk by chunk.
+/// Parallel requests per range: YouTube limits each connection (about 9 to 18 Mbit/s measured
+/// in November 2026, less than a 1440p60 AV1 stream's 13.8 Mbit/s peak), not the line (four
+/// connections at once got 26 Mbit/s), so one connection left high-bitrate videos stalling.
+pub const PARALLEL: u64 = 3;
+/// Ranges smaller than this go in one request.
+const MIN_PART: u64 = 512 << 10;
+
+/// Fetches bytes `start..=end` (inclusive), in requests of at most [`MAX_RANGE`], up to
+/// [`PARALLEL`] at a time, retrying each a few times. `sink` receives the data in order, chunk by
+/// chunk.
 pub fn fetch_range_with(
     http: &reqwest::blocking::Client,
     url: &str,
@@ -29,32 +37,67 @@ pub fn fetch_range_with(
 ) -> Result<()> {
     let mut at = start;
     while at <= end {
-        let to = end.min(at + MAX_RANGE - 1);
-        let mut tries = 0;
-        let data = loop {
-            match fetch_once(http, url, user_agent, at, to) {
-                Ok(d) => break d,
-                Err(e) => {
-                    tries += 1;
-                    if tries >= 3 {
-                        return Err(e);
-                    }
-                    std::thread::sleep(Duration::from_millis(300 * tries));
-                }
-            }
+        let parts = plan_parts(at, end);
+        let results: Vec<Result<Vec<u8>>> = if parts.len() == 1 {
+            vec![fetch_retry(http, url, user_agent, parts[0].0, parts[0].1)]
+        } else {
+            std::thread::scope(|sc| {
+                let hs: Vec<_> = parts.iter().map(|&(a, b)| sc.spawn(move || fetch_retry(http, url, user_agent, a, b))).collect();
+                hs.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("range thread panicked")))).collect()
+            })
         };
-        if data.is_empty() {
-            bail!("empty range response at {at}");
+        for ((a, b), r) in parts.iter().zip(results) {
+            let data = r?;
+            if data.is_empty() {
+                bail!("empty range response at {a}");
+            }
+            sink(&data)?;
+            if (data.len() as u64) < b + 1 - a {
+                // A short answer (the end of the file): carry on from where it stopped.
+                at = a + data.len() as u64;
+                break;
+            }
+            at = b + 1;
         }
-        at += data.len() as u64;
-        sink(&data)?;
     }
     Ok(())
 }
 
+/// The next window of up to [`PARALLEL`] requests from `at` towards `end` (inclusive bounds).
+fn plan_parts(at: u64, end: u64) -> Vec<(u64, u64)> {
+    let left = end + 1 - at;
+    let window = left.min(PARALLEL * MAX_RANGE);
+    let n = if window < 2 * MIN_PART { 1 } else { PARALLEL.min(window / MIN_PART).max(1) };
+    let part = window.div_ceil(n);
+    let mut out = Vec::new();
+    let mut a = at;
+    while a < at + window {
+        let b = (a + part).min(at + window) - 1;
+        out.push((a, b));
+        a = b + 1;
+    }
+    out
+}
+
+fn fetch_retry(http: &reqwest::blocking::Client, url: &str, user_agent: &str, a: u64, b: u64) -> Result<Vec<u8>> {
+    let mut tries = 0;
+    loop {
+        match fetch_once(http, url, user_agent, a, b) {
+            Ok(d) => return Ok(d),
+            Err(e) => {
+                tries += 1;
+                if tries >= 3 {
+                    return Err(e);
+                }
+                std::thread::sleep(Duration::from_millis(300 * tries));
+            }
+        }
+    }
+}
+
 pub fn fetch_range(http: &reqwest::blocking::Client, url: &str, user_agent: &str, start: u64, end: u64) -> Result<Vec<u8>> {
     let len = (end + 1).checked_sub(start).filter(|l| *l > 0).with_context(|| format!("bad byte range {start}-{end}"))?;
-    let mut out = Vec::with_capacity(len.min(MAX_RANGE) as usize);
+    let mut out = Vec::with_capacity(len.min(PARALLEL * MAX_RANGE) as usize);
     fetch_range_with(http, url, user_agent, start, end, &mut |d| {
         out.extend_from_slice(d);
         Ok(())
@@ -207,5 +250,40 @@ impl RangedTrack {
             }
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+
+    fn covers(at: u64, end: u64) {
+        let mut a = at;
+        while a <= end {
+            let parts = plan_parts(a, end);
+            assert!(!parts.is_empty() && parts.len() as u64 <= PARALLEL);
+            for w in parts.windows(2) {
+                assert_eq!(w[0].1 + 1, w[1].0, "contiguous");
+            }
+            for (x, y) in &parts {
+                assert!(x <= y && y - x < MAX_RANGE, "{x}-{y}");
+            }
+            assert_eq!(parts[0].0, a);
+            a = parts.last().unwrap().1 + 1;
+        }
+        assert_eq!(a, end + 1, "ends exactly at the end");
+    }
+
+    #[test]
+    fn parts_cover_the_range_without_gaps_or_overlap() {
+        for (at, end) in [(0, 0), (0, 100), (10, 600_000), (0, (1 << 20) - 1), (5, 9_000_000), (0, 40 << 20), (123, 123 + 3 * MAX_RANGE)] {
+            covers(at, end);
+        }
+    }
+
+    #[test]
+    fn small_ranges_take_one_request_and_large_ones_several() {
+        assert_eq!(plan_parts(0, 1000).len(), 1);
+        assert_eq!(plan_parts(0, (8 << 20) - 1).len(), PARALLEL as usize);
     }
 }
