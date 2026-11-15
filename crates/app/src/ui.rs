@@ -135,21 +135,20 @@ pub fn draw_focused_caption(p: Painter, m: &dyn plx_machine::machine::Measure, _
         Some(l2) if l2.ends_with('\u{2026}') => {
             text_raw(p, &l1, ix, iy, SIZE, PANEL_FOCUS_INK, ALIGN_LEFT, true);
             let rest = title.get(l1.len()..).unwrap_or("").trim_start();
-            marquee(p, m, rest, Some(l2), ix, iy + 31.0, w, TITLE_LINE);
+            marquee(p, m, rest, ix, iy + 31.0, w, TITLE_LINE);
         }
         Some(l2) => {
             text_raw(p, &l1, ix, iy, SIZE, PANEL_FOCUS_INK, ALIGN_LEFT, true);
             text_raw(p, l2, ix, iy + 31.0, SIZE, PANEL_FOCUS_INK, ALIGN_LEFT, true);
         }
-        None if l1 != title => marquee(p, m, &title, Some(&l1), ix, iy, w, TITLE_LINE),
+        None if l1 != title => marquee(p, m, &title, ix, iy, w, TITLE_LINE),
         None => {
             text_raw(p, &l1, ix, iy, SIZE, PANEL_FOCUS_INK, ALIGN_LEFT, true);
         }
     }
     if !d.is_empty() {
         // The channel, views and age: gliding too when the whole line does not fit.
-        let still = m.fit_line(&detail, w, 20, false).to_string_lossy().into_owned();
-        marquee(p, m, &detail, Some(&still), ix, iy + 67.0, w, DETAIL_LINE);
+        marquee(p, m, &detail, ix, iy + 67.0, w, DETAIL_LINE);
     }
 }
 
@@ -164,8 +163,9 @@ const TITLE_LINE: Line = Line { size: 24, bold: true, ink: PANEL_FOCUS_INK, cloc
 const DETAIL_LINE: Line = Line { size: 20, bold: false, ink: PANEL_FOCUS_DIM, clock: 1 };
 
 /// A line that does not fit, gliding back and forth (hold, glide to the end, hold, glide back).
-/// `still` is what shows while it holds at the start (the line as the card had it, with its "…").
-fn marquee(p: Painter, m: &dyn plx_machine::machine::Measure, title: &str, still: Option<&str>, ix: f32, iy: f32, w: f32, line: Line) {
+/// It shows as much as the focused panel holds, with no "…": the cut edge fades softly into the
+/// panel instead, on whichever side has more text.
+fn marquee(p: Painter, m: &dyn plx_machine::machine::Measure, title: &str, ix: f32, iy: f32, w: f32, line: Line) {
     let Line { size, bold, ink, clock } = line;
     let tw = CString::new(title).map_or(0.0, |c| m.width(&c, size, bold));
     // The lines were broken at the card's resting width; the focused panel is wider, so the rest
@@ -180,7 +180,7 @@ fn marquee(p: Painter, m: &dyn plx_machine::machine::Measure, title: &str, still
         // line that is only a little too long.
         const HOLD: f32 = 2.5;
         const SPEED: f32 = 45.0;
-        let dist = tw - w + 24.0;
+        let dist = tw - w + 2.0;
         let t = MARQUEE.with(|mq| {
             let mq = &mut mq.borrow_mut()[clock];
             if mq.0 != title || mq.1.is_none() {
@@ -189,18 +189,36 @@ fn marquee(p: Painter, m: &dyn plx_machine::machine::Measure, title: &str, still
             mq.1.unwrap().elapsed().as_secs_f32()
         });
         let off = glide_offset(t, dist, HOLD, SPEED);
-        if off <= 0.0 {
-            if let Some(still) = still {
-                text_raw(p, still, ix, iy, size, ink, ALIGN_LEFT, bold);
-                animating();
-                return;
-            }
-        }
         {
             let _scope = plx_ui::screen::ClipScope::open_in(p, Rect::new(ix, iy - 4.0, w, 40.0));
             text_raw(p, title, ix - off, iy, size, ink, ALIGN_LEFT, bold);
         }
+        // The fades come and go with the text: full while there is more than a fade's width
+        // hidden on that side, gone once the line's end (or start) is in view.
+        let band = (iy - 4.0, size as f32 * 1.6);
+        edge_fade(p, ix + w - FADE, band, ((dist - off) / FADE).min(1.0), true);
+        edge_fade(p, ix, band, (off / FADE).min(1.0), false);
         animating();
+    }
+}
+
+/// How wide the soft edge of a cut line is.
+const FADE: f32 = 44.0;
+
+/// A soft edge over a cut line: the panel's colour fading in towards `x + FADE` (towards the
+/// right edge) or out from `x` (at the left edge), at `strength` (0 = none).
+fn edge_fade(p: Painter, x: f32, (y, h): (f32, f32), strength: f32, rightward: bool) {
+    if strength <= 0.01 {
+        return;
+    }
+    const STEPS: usize = 22;
+    let sw = FADE / STEPS as f32;
+    for i in 0..STEPS {
+        let k = (i as f32 + 0.5) / STEPS as f32;
+        let a = if rightward { k } else { 1.0 - k };
+        let mut c = PANEL_FOCUS;
+        c[3] = strength * a * a * (3.0 - 2.0 * a);
+        fill(p, Rect::new(x + i as f32 * sw, y, sw + 0.5, h), 0.0, c);
     }
 }
 

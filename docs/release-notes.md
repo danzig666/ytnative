@@ -1,1 +1,1 @@
-- Fixed: a long title on the selected video glides its second line slowly back and forth, with a pause at each end, instead of jumping
+- Changed: a long title or detail line on the selected video uses the full width of its panel and fades softly at the cut edge instead of ending in "…", so nothing jumps when it starts to glide
