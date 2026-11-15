@@ -1,1 +1,2 @@
-- Fixed: the preview picture shown while seeking is drawn over the player controls instead of under them, so the buttons no longer cover it
+- New: the focused card's channel, views and age line glides back and forth when it does not fit, like the title
+- Changed: a long title on the focused card now glides back smoothly instead of jumping back to the start

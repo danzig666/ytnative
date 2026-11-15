@@ -72,8 +72,8 @@ thread_local! {
     /// The focused card's caption, deferred to the end of the page draw: (card rect on screen,
     /// title, detail).
     static FOCUSED_CAPTION: std::cell::RefCell<Option<(Rect, f32, String, String)>> = const { std::cell::RefCell::new(None) };
-    /// Marquee clock: (title it runs for, start).
-    static MARQUEE: std::cell::RefCell<(String, Option<std::time::Instant>)> = const { std::cell::RefCell::new((String::new(), None)) };
+    /// Marquee clocks, one per line (title, detail): (text it runs for, start).
+    static MARQUEE: std::cell::RefCell<[(String, Option<std::time::Instant>); 2]> = const { std::cell::RefCell::new([(String::new(), None), (String::new(), None)]) };
 }
 
 thread_local! {
@@ -135,31 +135,44 @@ pub fn draw_focused_caption(p: Painter, m: &dyn plx_machine::machine::Measure, _
         Some(l2) if l2.ends_with('\u{2026}') => {
             text_raw(p, &l1, ix, iy, SIZE, PANEL_FOCUS_INK, ALIGN_LEFT, true);
             let rest = title.get(l1.len()..).unwrap_or("").trim_start();
-            marquee(p, m, rest, Some(l2), ix, iy + 31.0, w, SIZE);
+            marquee(p, m, rest, Some(l2), ix, iy + 31.0, w, TITLE_LINE);
         }
         Some(l2) => {
             text_raw(p, &l1, ix, iy, SIZE, PANEL_FOCUS_INK, ALIGN_LEFT, true);
             text_raw(p, l2, ix, iy + 31.0, SIZE, PANEL_FOCUS_INK, ALIGN_LEFT, true);
         }
-        None if l1 != title => marquee(p, m, &title, Some(&l1), ix, iy, w, SIZE),
+        None if l1 != title => marquee(p, m, &title, Some(&l1), ix, iy, w, TITLE_LINE),
         None => {
             text_raw(p, &l1, ix, iy, SIZE, PANEL_FOCUS_INK, ALIGN_LEFT, true);
         }
     }
     if !d.is_empty() {
-        text_raw(p, &d, ix, iy + 67.0, 20, PANEL_FOCUS_DIM, ALIGN_LEFT, false);
+        // The channel, views and age: gliding too when the whole line does not fit.
+        let still = m.fit_line(&detail, w, 20, false).to_string_lossy().into_owned();
+        marquee(p, m, &detail, Some(&still), ix, iy + 67.0, w, DETAIL_LINE);
     }
 }
 
-/// A title that does not fit, gliding on one line (hold, glide to the end, hold, start over).
+/// How a gliding line looks: its size, weight, ink and its own clock.
+struct Line {
+    size: i32,
+    bold: bool,
+    ink: [f32; 4],
+    clock: usize,
+}
+const TITLE_LINE: Line = Line { size: 24, bold: true, ink: PANEL_FOCUS_INK, clock: 0 };
+const DETAIL_LINE: Line = Line { size: 20, bold: false, ink: PANEL_FOCUS_DIM, clock: 1 };
+
+/// A line that does not fit, gliding back and forth (hold, glide to the end, hold, glide back).
 /// `still` is what shows while it holds at the start (the line as the card had it, with its "…").
-fn marquee(p: Painter, m: &dyn plx_machine::machine::Measure, title: &str, still: Option<&str>, ix: f32, iy: f32, w: f32, size: i32) {
-    let tw = CString::new(title).map_or(0.0, |c| m.width(&c, size, true));
+fn marquee(p: Painter, m: &dyn plx_machine::machine::Measure, title: &str, still: Option<&str>, ix: f32, iy: f32, w: f32, line: Line) {
+    let Line { size, bold, ink, clock } = line;
+    let tw = CString::new(title).map_or(0.0, |c| m.width(&c, size, bold));
     // The lines were broken at the card's resting width; the focused panel is wider, so the rest
     // may fit there whole. Then it is drawn as it is: gliding it meant a negative distance, and
     // `clamp(0.0, dist)` panicked, which left the rest of the page undrawn.
     if tw <= w {
-        text_raw(p, title, ix, iy, size, PANEL_FOCUS_INK, ALIGN_LEFT, true);
+        text_raw(p, title, ix, iy, size, ink, ALIGN_LEFT, bold);
         return;
     }
     {
@@ -167,26 +180,65 @@ fn marquee(p: Painter, m: &dyn plx_machine::machine::Measure, title: &str, still
         const SPEED: f32 = 70.0;
         let dist = tw - w + 24.0;
         let t = MARQUEE.with(|mq| {
-            let mut mq = mq.borrow_mut();
+            let mq = &mut mq.borrow_mut()[clock];
             if mq.0 != title || mq.1.is_none() {
                 *mq = (title.to_string(), Some(std::time::Instant::now()));
             }
             mq.1.unwrap().elapsed().as_secs_f32()
         });
-        let cycle = 2.0 * HOLD + dist / SPEED;
-        let off = ((t % cycle - HOLD) * SPEED).clamp(0.0, dist.max(0.0));
+        let off = glide_offset(t, dist, HOLD, SPEED);
         if off <= 0.0 {
             if let Some(still) = still {
-                text_raw(p, still, ix, iy, size, PANEL_FOCUS_INK, ALIGN_LEFT, true);
+                text_raw(p, still, ix, iy, size, ink, ALIGN_LEFT, bold);
                 animating();
                 return;
             }
         }
         {
             let _scope = plx_ui::screen::ClipScope::open_in(p, Rect::new(ix, iy - 4.0, w, 40.0));
-            text_raw(p, title, ix - off, iy, size, PANEL_FOCUS_INK, ALIGN_LEFT, true);
+            text_raw(p, title, ix - off, iy, size, ink, ALIGN_LEFT, bold);
         }
         animating();
+    }
+}
+
+/// How far a gliding line is moved `t` seconds after it started: hold at the start, glide out
+/// (eased), hold at the end, glide back, and again.
+fn glide_offset(t: f32, dist: f32, hold: f32, speed: f32) -> f32 {
+    let dist = dist.max(0.0);
+    let run = dist / speed;
+    let cycle = 2.0 * (hold + run);
+    if run <= 0.0 {
+        return 0.0;
+    }
+    let ease = |x: f32| x * x * (3.0 - 2.0 * x);
+    let t = t % cycle;
+    let share = if t < hold {
+        0.0
+    } else if t < hold + run {
+        ease((t - hold) / run)
+    } else if t < 2.0 * hold + run {
+        1.0
+    } else {
+        1.0 - ease((t - 2.0 * hold - run) / run)
+    };
+    share * dist
+}
+
+#[cfg(test)]
+mod glide_tests {
+    use super::glide_offset;
+
+    #[test]
+    fn glides_out_holds_and_glides_back() {
+        let (d, h, s) = (140.0, 1.5, 70.0); // 2 s each way
+        assert_eq!(glide_offset(0.0, d, h, s), 0.0);
+        assert_eq!(glide_offset(1.4, d, h, s), 0.0, "holds at the start");
+        assert!((glide_offset(2.5, d, h, s) - 70.0).abs() < 0.01, "halfway out");
+        assert_eq!(glide_offset(4.0, d, h, s), d, "holds at the end");
+        assert!((glide_offset(6.0, d, h, s) - 70.0).abs() < 0.01, "halfway back");
+        assert_eq!(glide_offset(7.0, d, h, s), 0.0, "back at the start, and again");
+        assert_eq!(glide_offset(3.0, 0.0, h, s), 0.0, "nothing to glide");
     }
 }
 
