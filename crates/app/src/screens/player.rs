@@ -923,6 +923,7 @@ impl Screen<YtHost> for PlayerScreen {
             return;
         }
         let s = &cx.views.store.settings;
+        let mut preview: Option<(Rect, f32)> = None;
         // Browsing the suggestions: they take the screen (SmartTube scrolls them up under a dark
         // veil), the title stays on top.
         if let Some(sel) = self.sugg_sel {
@@ -1015,9 +1016,9 @@ impl Screen<YtHost> for PlayerScreen {
                     ui::fill(p, Rect::new(x0, bar.y, (x1 - x0).max(3.0), bar.h), 2.0, col);
                 }
             }
-            // Storyboard preview above the playhead while seeking.
+            // Storyboard preview above the playhead while seeking (drawn last, over the controls).
             if cx.views.now_ms < self.preview_until {
-                storyboard_preview(p, st, bar, frac);
+                preview = Some((bar, frac));
             }
         }
         ui::fill(p, Rect::new(bar.x + bar.w * frac - 11.0, bar.y - 7.0, 22.0, 22.0), 11.0, ui::WHITE);
@@ -1152,6 +1153,9 @@ impl Screen<YtHost> for PlayerScreen {
         if !suggestions(cx).is_empty() && self.osd_sel.is_some_and(|i| i >= OSD_ROW_B) {
             ui::text(p, &format!("\u{25BC}  {}", crate::i18n::tr("Suggestions")), 960.0, 1030.0, 24, ui::DIM, ui::ALIGN_CENTER, false);
         }
+        if let Some((bar, frac)) = preview {
+            storyboard_preview(p, st, bar, frac);
+        }
         common::toast_at(p, cx, 540.0); // above the title and the controls
     }
     fn render(&self) -> RenderStrategy {
@@ -1198,6 +1202,7 @@ impl PlayerScreen {
         use ui::icon::Kind;
         let st = cx.views.player;
         let s = &cx.views.store.settings;
+        let mut preview: Option<(Rect, f32)> = None;
         let ex = &st.extras;
         let w = ex.watch.as_ref();
         let items = suggestions(cx);
@@ -1291,7 +1296,7 @@ impl PlayerScreen {
                 }
             }
             if cx.views.now_ms < self.preview_until {
-                storyboard_preview(p, st, bar, frac);
+                preview = Some((bar, frac));
             }
         }
         if bar_focus {
@@ -1417,6 +1422,9 @@ impl PlayerScreen {
                     }
                 }
             }
+        }
+        if let Some((bar, frac)) = preview {
+            storyboard_preview(p, st, bar, frac);
         }
         common::toast_at(p, cx, 560.0 + dy);
     }

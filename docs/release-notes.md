@@ -1,2 +1,1 @@
-- Fixed: the screen no longer goes black after 2 minutes without input; blanking the screen when idle is now off by default
-- New: Settings, Interface, "Blank screen when idle (OLED)" turns it on after 2, 5, 10 or 30 minutes
+- Fixed: the preview picture shown while seeking is drawn over the player controls instead of under them, so the buttons no longer cover it
