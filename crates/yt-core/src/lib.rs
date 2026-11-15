@@ -7,6 +7,7 @@ pub mod bootstrap;
 pub mod captions;
 pub mod channel_groups;
 pub mod clients;
+pub mod comment_threads;
 pub mod comments;
 pub mod demux;
 pub mod ext;

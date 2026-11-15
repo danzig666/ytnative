@@ -36,3 +36,4 @@ mp4url.txt
 /sysroots
 # Windows simulator third-party libraries (tools/fetch-sim-deps.ps1; never committed)
 /third_party/win/
+web_comments.json

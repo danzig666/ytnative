@@ -40,6 +40,9 @@ pub struct CommentsPage {
 impl Session {
     /// A page of comments (or of replies) from a continuation token.
     pub fn comments(&mut self, continuation: &str) -> Result<CommentsPage> {
+        if let Some(web) = continuation.strip_prefix(crate::comment_threads::PREFIX) {
+            return crate::comment_threads::replies(&self.http, web);
+        }
         Ok(parse_comments(&self.raw("next", json!({ "continuation": continuation }))?))
     }
 }
@@ -79,10 +82,12 @@ fn count(s: &str) -> Option<u32> {
 
 fn comment(r: &Value) -> Option<Comment> {
     let id = r["commentId"].as_str()?.to_string();
-    // Only a comment with a replies label ("12 replies") has replies to open, as SmartTube
-    // reads it. A reply carries a bare `replyCount` and a detail view too, but YouTube returns
-    // nothing under it (the TV service has no third level), so it is not offered.
+    // A comment with a replies label ("12 replies") opens its replies through the TV service. A
+    // reply carries only a bare `replyCount`: the TV service returns nothing under it, so its
+    // replies come from the web's threaded comments (`comment_threads`).
     let has_replies = r.get("repliesCount").is_some();
+    let nested = if has_replies { 0 } else { r["replyCount"].as_u64().unwrap_or(0) as u32 };
+    let nested_token = (nested > 0).then(|| first_token(&r["detailViewEndpoint"]).and_then(|t| crate::comment_threads::token_for_reply(&t))).flatten();
     Some(Comment {
         id,
         author: text(&r["authorText"]).unwrap_or_default(),
@@ -91,8 +96,14 @@ fn comment(r: &Value) -> Option<Comment> {
         text: text(&r["contentText"]).unwrap_or_default(),
         published_text: text(&r["publishedTimeText"]).unwrap_or_default(),
         like_count_text: text(&r["voteCount"]).filter(|s| !s.is_empty()),
-        reply_count: if has_replies { r["replyCount"].as_u64().map(|n| n as u32).or_else(|| text(&r["repliesCount"]).and_then(|s| count(&s))).unwrap_or(0) } else { 0 },
-        replies_continuation: if has_replies { first_token(&r["detailViewEndpoint"]) } else { None },
+        reply_count: if has_replies {
+            r["replyCount"].as_u64().map(|n| n as u32).or_else(|| text(&r["repliesCount"]).and_then(|s| count(&s))).unwrap_or(0)
+        } else if nested_token.is_some() {
+            nested
+        } else {
+            0
+        },
+        replies_continuation: if has_replies { first_token(&r["detailViewEndpoint"]) } else { nested_token },
         is_pinned: r.get("pinnedCommentBadge").is_some() || r.get("pinnedText").is_some() || r["isPinned"].as_bool() == Some(true),
         is_hearted: hearted(r),
         liked: r["isLiked"].as_bool() == Some(true) || r["voteStatus"].as_str() == Some("LIKE"),
@@ -173,10 +184,10 @@ mod tests {
         assert_eq!(p.next.as_deref(), Some("NEXT"));
     }
 
-    /// A reply (in a replies page) carries a bare `replyCount` and a detail view, but YouTube
-    /// returns nothing under it: it must not offer an empty page.
+    /// A reply (in a replies page) carries a bare `replyCount` and a detail view the TV service
+    /// returns nothing for: without a usable detail token it offers no replies.
     #[test]
-    fn replies_of_a_reply_are_not_offered() {
+    fn replies_of_a_reply_without_a_token_are_not_offered() {
         let mut r = thread("P.r1", json!({"replyCount": 41}));
         r["commentThreadRenderer"]["comment"]["commentRenderer"].as_object_mut().unwrap().remove("repliesCount");
         let v = json!({"continuationContents": {"itemSectionContinuation": {"contents": [
@@ -248,4 +259,5 @@ mod count_tests {
         assert_eq!(super::count("replies"), None);
     }
 }
+
 

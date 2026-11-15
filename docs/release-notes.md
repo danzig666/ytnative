@@ -1,1 +1,1 @@
-- Fixed: a reply no longer shows a reply count and opens an empty page; YouTube's TV service has no replies under replies, so only comments with replies offer them (as in SmartTube)
+- Fixed: replies to replies load. YouTube's TV service has none, so they come from YouTube's website, up to five levels deep, with "more" pages for long threads
