@@ -519,8 +519,13 @@ impl Focusable<YtHost> for BrowseScreen {
             };
         }
         if key.elem >= NAV_BASE {
-            if dir == Dir::Right && !self.src(cx).cards.is_empty() {
-                return Step::Move(FocusKey { entry: self.entry, elem: self.src(cx).cards[0].elem });
+            // Right closes the sidebar, back to the card focus left (as BACK and a click beside it
+            // do); the first card when that one is gone (another section was opened meanwhile).
+            let src = self.src(cx);
+            if dir == Dir::Right && !src.cards.is_empty() {
+                let last = self.content_last.get();
+                let elem = if src.cards.iter().any(|c| c.elem == last) { last } else { src.cards[0].elem };
+                return Step::Move(FocusKey { entry: self.entry, elem });
             }
             return self.nav.neighbour(key, dir, items.len());
         }
