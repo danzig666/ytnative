@@ -242,6 +242,7 @@ fn lockup(l: &Value) -> Option<Item> {
     }
     let mut kind = match l["contentType"].as_str().unwrap_or("") {
         "LOCKUP_CONTENT_TYPE_VIDEO" => ItemKind::Video,
+        "LOCKUP_CONTENT_TYPE_SHORT" => ItemKind::Short,
         "LOCKUP_CONTENT_TYPE_PLAYLIST" => ItemKind::Playlist,
         "LOCKUP_CONTENT_TYPE_ALBUM" => ItemKind::Playlist,
         "LOCKUP_CONTENT_TYPE_PODCAST" => ItemKind::Playlist,

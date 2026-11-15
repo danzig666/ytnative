@@ -123,8 +123,7 @@ fn filters_summary(f: &yt_core::search_filters::Filters) -> String {
         parts.push("HDR");
     }
     parts.extend(match f.sort {
-        Sort::Relevance => None,
-        Sort::Rating => Some("by rating"),
+        Sort::Relevance | Sort::Rating => None,
         Sort::UploadDate => Some("newest first"),
         Sort::ViewCount => Some("most viewed"),
     });

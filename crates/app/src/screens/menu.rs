@@ -502,8 +502,8 @@ impl MenuScreen {
                     })
                     .to_string(),
                     3 => crate::i18n::tr(match f.sort {
-                        Sort::Relevance => "Relevance",
-                        Sort::Rating => "Rating",
+                        // YouTube no longer sorts by rating: an old saved choice is relevance.
+                        Sort::Relevance | Sort::Rating => "Relevance",
                         Sort::UploadDate => "Upload date",
                         Sort::ViewCount => "View count",
                     })
@@ -755,7 +755,7 @@ impl MenuScreen {
                         0 => f.upload_date = step(&[UploadDate::Any, UploadDate::Hour, UploadDate::Today, UploadDate::Week, UploadDate::Month, UploadDate::Year], f.upload_date, dir),
                         1 => f.kind = step(&[Kind::Any, Kind::Video, Kind::Channel, Kind::Playlist, Kind::Movie], f.kind, dir),
                         2 => f.duration = step(&[Duration::Any, Duration::Short, Duration::Medium, Duration::Long], f.duration, dir),
-                        3 => f.sort = step(&[Sort::Relevance, Sort::UploadDate, Sort::ViewCount, Sort::Rating], f.sort, dir),
+                        3 => f.sort = step(&[Sort::Relevance, Sort::UploadDate, Sort::ViewCount], f.sort, dir),
                         4 => f.live = !f.live,
                         5 => f.hd_4k = !f.hd_4k,
                         6 => f.hdr = !f.hdr,

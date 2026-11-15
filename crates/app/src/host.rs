@@ -1396,6 +1396,15 @@ fn load_page(session: &Mutex<Option<yt_core::session::Session>>, epoch: u64, key
             yt_core::channel_groups::group_feed(&s.http, g, yt_core::channel_groups::FeedCache::global())
         }
     });
+    // YouTube no longer orders search results by upload date: newest first is done here.
+    let r = r.map(|mut page| {
+        if let FeedKey::Search { params: Some(p), .. } = key {
+            if yt_core::search_filters::newest_first(p) {
+                yt_core::search_filters::sort_newest_first(&mut page);
+            }
+        }
+        page
+    });
     match r {
         Ok(page) => Work::Page { epoch, key: key.clone(), page, append: continuation.is_some(), failed: None },
         Err(e) => Work::Page { epoch, key: key.clone(), page: Default::default(), append: false, failed: Some(format!("{e:#}")) },

@@ -1,1 +1,3 @@
-- Fixed: with the speed remembered per channel, a video opened without its card (the next video played automatically, or one sent from a phone) now starts at its channel's speed
+- Fixed: search sorted by upload date now shows the newest videos first; YouTube stopped sorting search results by date, so the TV sorts each page of results itself
+- Fixed: Shorts in search results are recognised as Shorts again, so "Hide Shorts" hides them there and they open as Shorts
+- Changed: the "Rating" sort order is gone from the search filters, as YouTube no longer supports it
