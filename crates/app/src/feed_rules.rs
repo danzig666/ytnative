@@ -90,6 +90,60 @@ pub fn rebuffered(video_ahead_ns: i64, all_fed: bool) -> bool {
     all_fed || video_ahead_ns >= REBUFFER_TARGET_NS
 }
 
+/// Two rebufferings within this time: the connection cannot carry this quality.
+pub const SLOW_WINDOW_MS: u64 = 60_000;
+
+/// Counts rebufferings; `note` says when the video should drop a quality step.
+#[derive(Default)]
+pub struct SlowWatch {
+    last: Option<u64>,
+}
+
+impl SlowWatch {
+    /// A rebuffering began at `now_ms`: true when it is the second within [`SLOW_WINDOW_MS`].
+    pub fn note(&mut self, now_ms: u64) -> bool {
+        let slow = self.last.is_some_and(|t| now_ms.saturating_sub(t) <= SLOW_WINDOW_MS);
+        self.last = Some(now_ms);
+        slow
+    }
+}
+
+/// The quality steps (the short side of the picture) a too slow video drops through.
+pub const QUALITY_STEPS: [u32; 6] = [2160, 1440, 1080, 720, 480, 360];
+
+/// The next step below a picture of `width` x `height` (its short side), if any.
+pub fn lower_quality(width: u32, height: u32) -> Option<u32> {
+    let short = if width > 0 && height > 0 { width.min(height) } else { height.max(width) };
+    QUALITY_STEPS.into_iter().find(|q| *q < short.saturating_sub(8))
+}
+
+#[cfg(test)]
+mod slow_tests {
+    use super::*;
+
+    #[test]
+    fn two_rebufferings_within_a_minute_mean_too_slow() {
+        let mut w = SlowWatch::default();
+        assert!(!w.note(1_000), "one is a hiccup");
+        assert!(w.note(40_000));
+        let mut w = SlowWatch::default();
+        assert!(!w.note(0));
+        assert!(!w.note(61_000), "a minute apart: still fine");
+        assert!(w.note(100_000));
+    }
+
+    #[test]
+    fn the_quality_drops_one_step_at_a_time() {
+        assert_eq!(lower_quality(3840, 2160), Some(1440));
+        assert_eq!(lower_quality(2560, 1440), Some(1080));
+        assert_eq!(lower_quality(1920, 1080), Some(720));
+        assert_eq!(lower_quality(1920, 1036), Some(720), "a cropped 1080p");
+        assert_eq!(lower_quality(1080, 1920), Some(720), "portrait: its short side");
+        assert_eq!(lower_quality(640, 360), None, "nothing lower");
+        assert_eq!(lower_quality(0, 0), None);
+    }
+}
+
 #[cfg(test)]
 mod stall_tests {
     use super::*;

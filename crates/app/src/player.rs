@@ -109,6 +109,9 @@ pub struct Status {
     /// Engine B: the TV refused a speed change (SetPlayRate), so this video needs the system
     /// player for it.
     pub rate_refused: bool,
+    /// Engine B: the download keeps falling behind (rebuffered twice within a minute); the host
+    /// restarts the video a quality step lower.
+    pub too_slow: bool,
     /// A live stream (engine B): `position_ms` is stream time, `live_edge_ms` the newest media.
     pub live: bool,
     pub live_edge_ms: u64,

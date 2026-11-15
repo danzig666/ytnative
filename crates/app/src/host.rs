@@ -387,6 +387,8 @@ pub struct AppRig {
     pub system_restart: Option<(String, Option<String>)>,
     /// The speed that restart keeps, for that video only.
     restart_rate: Option<(String, f32)>,
+    /// A video the connection could not carry: (video id, the highest quality it may use).
+    quality_cap: Option<(String, u32)>,
     /// The account's missing name was looked up again once this run (see Work::Page).
     name_refreshed: bool,
     /// The playlist the current video was started with.
@@ -441,6 +443,7 @@ impl AppRig {
             feed_no_rate: false,
             system_restart: None,
             restart_rate: None,
+            quality_cap: None,
             name_refreshed: false,
             current_playlist: None,
             audio_choice: None,
@@ -687,6 +690,21 @@ impl AppRig {
                 self.pending_start = Some((v.clone(), self.player_view.position_ms));
                 self.system_restart = Some((v, self.current_playlist.clone()));
                 self.store.toast("This speed needs the system player: switching", now_ms);
+            }
+        }
+        // The download keeps falling behind: the same video a quality step lower, from here.
+        if self.player_view.too_slow && self.system_restart.is_none() {
+            self.player.status.lock().unwrap().too_slow = false;
+            let v = self.player_view.video_id.clone();
+            match crate::feed_rules::lower_quality(self.player_view.width, self.player_view.height) {
+                Some(h) if !v.is_empty() => {
+                    crate::log(&format!("slow connection: restarting {v} at {h}p"));
+                    self.quality_cap = Some((v.clone(), h));
+                    self.pending_start = Some((v.clone(), self.player_view.position_ms));
+                    self.system_restart = Some((v, self.current_playlist.clone()));
+                    self.store.toast(crate::i18n::tr("Slow connection: playing in {}p").replace("{}", &h.to_string()), now_ms);
+                }
+                _ => crate::log("slow connection: no lower quality to switch to"),
             }
         }
         self.raw_extras = self.player_view.extras.clone();
@@ -1489,7 +1507,14 @@ impl Rig<YtHost> for AppRig {
                 let s = &self.store.settings;
                 let audio_track = self.audio_choice.as_ref().filter(|(v, _)| *v == video_id).map(|(_, t)| t.clone());
                 let audio_language = (!s.audio_language.is_empty()).then(|| s.audio_language.clone());
-                let prefs = yt_core::streams::Prefs { min_height: s.min_height as u64, max_height: s.max_height as u64, codec: "avc1", audio_track, audio_language };
+                // A quality the connection could not carry for this video stays off (until another
+                // video plays).
+                let cap = self.quality_cap.as_ref().filter(|(v, _)| *v == video_id).map_or(u32::MAX, |(_, h)| *h);
+                if cap == u32::MAX {
+                    self.quality_cap = None;
+                }
+                let max_height = (s.max_height as u32).min(cap);
+                let prefs = yt_core::streams::Prefs { min_height: (s.min_height as u64).min(max_height as u64), max_height: max_height as u64, codec: "avc1", audio_track, audio_language };
                 let extras = crate::player::ExtrasPrefs {
                     subtitles: s.subtitles,
                     language: s.subtitle_language.clone(),
@@ -1531,7 +1556,7 @@ impl Rig<YtHost> for AppRig {
                         crate::settings::Codec::Vp9 => crate::feed::VideoCodec::Vp9,
                         crate::settings::Codec::Av1 => crate::feed::VideoCodec::Av1,
                     };
-                    let mut fp = crate::feed::Prefs::new(s.max_height as u32, codec);
+                    let mut fp = crate::feed::Prefs::new(max_height, codec);
                     fp.allow_hdr = s.hdr;
                     self.player.feed_prefs = Some(fp);
                     // A speed other than 1x on a TV whose engine B refused one: the system player.

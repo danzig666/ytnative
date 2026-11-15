@@ -512,6 +512,8 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
     let mut rebuffering: Option<Instant> = None;
     // A stall with media at hand was logged (once per stall).
     let mut stall_logged = false;
+    let mut slow_watch = crate::feed_rules::SlowWatch::default();
+    let started = Instant::now();
     let duration_ns = plan.duration_ms as i64 * 1_000_000;
 
     let result = loop {
@@ -820,6 +822,11 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
                     reanchor(&mut base, &mut play_at, rate, false);
                     rebuffering = Some(Instant::now());
                     set_buffering(sh, true);
+                    if slow_watch.note(started.elapsed().as_millis() as u64) {
+                        crate::log("feed: rebuffered twice within a minute: asking for a lower quality");
+                        sh.status.lock().unwrap().too_slow = true;
+                        wake();
+                    }
                 }
             }
         }
