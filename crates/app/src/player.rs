@@ -125,6 +125,9 @@ pub struct Status {
     pub fps: u32,
     /// YouTube marks the video as containing paid promotion.
     pub paid_promotion: bool,
+    /// Engine B: paused while the download catches up (since this app time, ms), the picture
+    /// kept on screen.
+    pub buffering_since: Option<u32>,
 }
 
 #[cfg(not(windows))]

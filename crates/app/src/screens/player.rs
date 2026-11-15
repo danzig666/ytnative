@@ -839,6 +839,7 @@ impl Screen<YtHost> for PlayerScreen {
             let res = if st.height > 0 { format!("{}p  \u{00B7}  ", st.height) } else { String::new() };
             ui::text(p, &format!("{res}fake clock, HUD and menus only"), 960.0, 530.0, 26, ui::DIM, ui::ALIGN_CENTER, false);
         }
+        let no_picture = centre.is_some();
         if let Some(msg) = centre {
             ui::fill(p, Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, [0.0, 0.0, 0.0, 1.0]);
             if msg.is_empty() {
@@ -853,6 +854,15 @@ impl Screen<YtHost> for PlayerScreen {
                 for (i, line) in ui::wrap_lines(f.measure, &msg, 1300.0, 28, false, 4).iter().enumerate() {
                     ui::text(p, line, 960.0, 510.0 + i as f32 * 42.0, 28, ui::DIM, ui::ALIGN_CENTER, false);
                 }
+            }
+        }
+        // Rebuffering (the download fell behind): the picture stays, a spinner over it, and after a
+        // moment the reason.
+        if let (Some(since), false) = (st.buffering_since, no_picture) {
+            ui::fill(p, Rect::new(910.0, 490.0, 100.0, 100.0), 50.0, [0.0, 0.0, 0.0, 0.45]);
+            ui::spinner(p, cx.views.now_ms, 960.0, 540.0);
+            if cx.views.now_ms.wrapping_sub(since) > 2000 {
+                ui::text(p, "Slow connection", 960.0, 610.0, 30, ui::WHITE, ui::ALIGN_CENTER, true);
             }
         }
         // Everything below (captions, OSD, toasts) is dimmed over HDR video.

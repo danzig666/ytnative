@@ -132,6 +132,15 @@ fn set_phase(sh: &Shared, p: Phase) {
     }
 }
 
+/// The rebuffering spinner over the kept picture (see `Status::buffering_since`).
+fn set_buffering(sh: &Shared, on: bool) {
+    let now = unsafe { crate::sdl::SDL_GetTicks() };
+    let mut s = sh.status.lock().unwrap();
+    s.buffering_since = if on { s.buffering_since.or(Some(now)) } else { None };
+    drop(s);
+    wake();
+}
+
 fn fail(sh: &Shared, why: String) {
     crate::log(&format!("feed: {why}"));
     set_phase(sh, Phase::Failed(why));
@@ -535,15 +544,11 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
                 }
                 Cmd::Resume => {
                     user_paused = false;
-                    if rebuffering.is_some() {
-                        // Playback starts when the rebuffering ends.
-                        set_phase(sh, Phase::Loading);
-                    } else {
-                        if !priming && seeking.is_none() && sys::play() {
-                            played(sh, pipe.epoch);
-                        }
-                        set_phase(sh, Phase::Playing);
+                    // During a rebuffering pause playback starts when it ends.
+                    if rebuffering.is_none() && !priming && seeking.is_none() && sys::play() {
+                        played(sh, pipe.epoch);
                     }
+                    set_phase(sh, Phase::Playing);
                 }
                 Cmd::Seek(ms) => seek_to = Some(ms), // coalesce: the last one wins
                 Cmd::Volume(v) => {
@@ -601,7 +606,9 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
             seek_started = Instant::now();
             prime_since = Instant::now();
             pres_seen = (PRES_NONE, Instant::now());
-            rebuffering = None;
+            if rebuffering.take().is_some() {
+                set_buffering(sh, false);
+            }
             stall_logged = false;
             rate_probe = None;
             probe_rate = false;
@@ -785,13 +792,13 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
             if rebuffered(v_ahead, v_all_fed) {
                 rebuffering = None;
                 pres_seen.1 = Instant::now();
+                set_buffering(sh, false);
                 crate::log(&format!("feed: rebuffered in {} ms ({} ms of video ahead)", since.elapsed().as_millis(), v_ahead / 1_000_000));
                 if !user_paused {
                     if sys::play() {
                         played(sh, pipe.epoch);
                     }
                     play_at = Some(Instant::now());
-                    set_phase(sh, Phase::Playing);
                 }
             }
         } else {
@@ -812,7 +819,7 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
                     sys::pause();
                     reanchor(&mut base, &mut play_at, rate, false);
                     rebuffering = Some(Instant::now());
-                    set_phase(sh, Phase::Loading);
+                    set_buffering(sh, true);
                 }
             }
         }
