@@ -79,6 +79,10 @@ fn count(s: &str) -> Option<u32> {
 
 fn comment(r: &Value) -> Option<Comment> {
     let id = r["commentId"].as_str()?.to_string();
+    // Only a comment with a replies label ("12 replies") has replies to open, as SmartTube
+    // reads it. A reply carries a bare `replyCount` and a detail view too, but YouTube returns
+    // nothing under it (the TV service has no third level), so it is not offered.
+    let has_replies = r.get("repliesCount").is_some();
     Some(Comment {
         id,
         author: text(&r["authorText"]).unwrap_or_default(),
@@ -87,8 +91,8 @@ fn comment(r: &Value) -> Option<Comment> {
         text: text(&r["contentText"]).unwrap_or_default(),
         published_text: text(&r["publishedTimeText"]).unwrap_or_default(),
         like_count_text: text(&r["voteCount"]).filter(|s| !s.is_empty()),
-        reply_count: r["replyCount"].as_u64().map(|n| n as u32).or_else(|| text(&r["repliesCount"]).and_then(|s| count(&s))).unwrap_or(0),
-        replies_continuation: first_token(&r["detailViewEndpoint"]),
+        reply_count: if has_replies { r["replyCount"].as_u64().map(|n| n as u32).or_else(|| text(&r["repliesCount"]).and_then(|s| count(&s))).unwrap_or(0) } else { 0 },
+        replies_continuation: if has_replies { first_token(&r["detailViewEndpoint"]) } else { None },
         is_pinned: r.get("pinnedCommentBadge").is_some() || r.get("pinnedText").is_some() || r["isPinned"].as_bool() == Some(true),
         is_hearted: hearted(r),
         liked: r["isLiked"].as_bool() == Some(true) || r["voteStatus"].as_str() == Some("LIKE"),
@@ -136,7 +140,7 @@ mod tests {
             "commentId": id, "authorText": {"simpleText": "@a"},
             "authorThumbnail": {"thumbnails": [{"url": "https://y/s48", "width": 48}, {"url": "https://y/s176", "width": 176}]},
             "contentText": {"runs": [{"text": "hello"}, {"text": "\n"}, {"text": "world"}]},
-            "publishedTimeText": {"simpleText": "1 day ago"}, "voteCount": {"simpleText": "5"}, "replyCount": 2,
+            "publishedTimeText": {"simpleText": "1 day ago"}, "voteCount": {"simpleText": "5"}, "replyCount": 2, "repliesCount": {"simpleText": "2"},
             "detailViewEndpoint": {"showEngagementPanelEndpoint": {"engagementPanel": {"engagementPanelSectionListRenderer": {"content": {"sectionListRenderer": {"contents": [{"itemSectionRenderer": {"continuations": [{"reloadContinuationData": {"continuation": format!("R-{id}")}}]}}]}}}}}}
         });
         for (k, v) in extra.as_object().unwrap() {
@@ -167,6 +171,21 @@ mod tests {
         assert!(a.is_pinned && !a.is_hearted);
         assert!(p.comments[1].is_hearted && !p.comments[1].is_pinned);
         assert_eq!(p.next.as_deref(), Some("NEXT"));
+    }
+
+    /// A reply (in a replies page) carries a bare `replyCount` and a detail view, but YouTube
+    /// returns nothing under it: it must not offer an empty page.
+    #[test]
+    fn replies_of_a_reply_are_not_offered() {
+        let mut r = thread("P.r1", json!({"replyCount": 41}));
+        r["commentThreadRenderer"]["comment"]["commentRenderer"].as_object_mut().unwrap().remove("repliesCount");
+        let v = json!({"continuationContents": {"itemSectionContinuation": {"contents": [
+            {"commentRenderer": {"commentId": "P", "contentText": {"simpleText": "parent"}}}, r
+        ]}}});
+        let p = parse_comments(&v);
+        assert_eq!(p.comments.len(), 1);
+        assert_eq!(p.comments[0].reply_count, 0);
+        assert_eq!(p.comments[0].replies_continuation, None);
     }
 
     #[test]
@@ -229,3 +248,4 @@ mod count_tests {
         assert_eq!(super::count("replies"), None);
     }
 }
+

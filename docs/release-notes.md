@@ -1,2 +1,1 @@
-- New: the focused card's channel, views and age line glides back and forth when it does not fit, like the title
-- Changed: a long title on the focused card now glides back smoothly instead of jumping back to the start
+- Fixed: a reply no longer shows a reply count and opens an empty page; YouTube's TV service has no replies under replies, so only comments with replies offer them (as in SmartTube)
