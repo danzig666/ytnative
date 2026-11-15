@@ -1,3 +1,1 @@
-- Fixed: the like and dislike buttons in the player show your rating: they change as soon as you press them, and a video you rated before shows it when it starts
-- Fixed: "Remove from Watch later" in a video's menu removes it, and the video leaves the list at once
-- New: videos in your own YouTube playlists have "Remove from <playlist>" in their menu
+- Fixed: a long title on the selected video glides its second line slowly back and forth, with a pause at each end, instead of jumping

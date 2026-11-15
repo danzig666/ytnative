@@ -176,8 +176,10 @@ fn marquee(p: Painter, m: &dyn plx_machine::machine::Measure, title: &str, still
         return;
     }
     {
-        const HOLD: f32 = 1.5;
-        const SPEED: f32 = 70.0;
+        // Calm enough to read along: a long hold, a slow glide, and never a quick flick for a
+        // line that is only a little too long.
+        const HOLD: f32 = 2.5;
+        const SPEED: f32 = 45.0;
         let dist = tw - w + 24.0;
         let t = MARQUEE.with(|mq| {
             let mq = &mut mq.borrow_mut()[clock];
@@ -202,11 +204,15 @@ fn marquee(p: Painter, m: &dyn plx_machine::machine::Measure, title: &str, still
     }
 }
 
+/// The shortest glide, one way.
+const MIN_GLIDE_SECS: f32 = 2.5;
+
 /// How far a gliding line is moved `t` seconds after it started: hold at the start, glide out
 /// (eased), hold at the end, glide back, and again.
 fn glide_offset(t: f32, dist: f32, hold: f32, speed: f32) -> f32 {
     let dist = dist.max(0.0);
-    let run = dist / speed;
+    // A short distance still takes a while, so it reads as a glide and not a jump.
+    let run = if dist > 0.0 { (dist / speed).max(MIN_GLIDE_SECS) } else { 0.0 };
     let cycle = 2.0 * (hold + run);
     if run <= 0.0 {
         return 0.0;
@@ -231,14 +237,17 @@ mod glide_tests {
 
     #[test]
     fn glides_out_holds_and_glides_back() {
-        let (d, h, s) = (140.0, 1.5, 70.0); // 2 s each way
+        let (d, h, s) = (175.0, 1.5, 70.0); // 2.5 s each way
         assert_eq!(glide_offset(0.0, d, h, s), 0.0);
         assert_eq!(glide_offset(1.4, d, h, s), 0.0, "holds at the start");
-        assert!((glide_offset(2.5, d, h, s) - 70.0).abs() < 0.01, "halfway out");
-        assert_eq!(glide_offset(4.0, d, h, s), d, "holds at the end");
-        assert!((glide_offset(6.0, d, h, s) - 70.0).abs() < 0.01, "halfway back");
-        assert_eq!(glide_offset(7.0, d, h, s), 0.0, "back at the start, and again");
+        assert!((glide_offset(2.75, d, h, s) - 87.5).abs() < 0.01, "halfway out");
+        assert_eq!(glide_offset(4.5, d, h, s), d, "holds at the end");
+        assert!((glide_offset(6.75, d, h, s) - 87.5).abs() < 0.01, "halfway back");
+        assert_eq!(glide_offset(8.0, d, h, s), 0.0, "back at the start, and again");
         assert_eq!(glide_offset(3.0, 0.0, h, s), 0.0, "nothing to glide");
+        // 35 px at 70 px/s would be half a second: it takes the shortest glide instead.
+        assert!(glide_offset(1.5 + 0.5, 35.0, h, s) < 5.0, "a short glide is not a jump");
+        assert!((glide_offset(1.5 + 1.25, 35.0, h, s) - 17.5).abs() < 0.01, "halfway at half the shortest glide");
     }
 }
 
