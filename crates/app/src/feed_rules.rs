@@ -51,6 +51,79 @@ pub fn landing_wait(video_drained: bool, waited: Duration) -> Result<(), &'stati
     }
 }
 
+/// No new picture for this long while playing: the picture has stalled.
+pub const STALL_AFTER: Duration = Duration::from_millis(700);
+/// A rebuffering pause ends once this much video is fed past the picture (or all of it is).
+pub const REBUFFER_TARGET_NS: i64 = 3_000_000_000;
+/// How much further than usual the feed may run while the picture is stalled with media at hand.
+pub const STALL_EXTRA_MAX_NS: i64 = 4_000_000_000;
+
+/// What to do about a picture that has not moved for `stalled_for` while playing.
+#[derive(Debug, PartialEq)]
+pub enum Stall {
+    Fine,
+    /// The download has media: the feed limit, which follows the picture, held it back. Feed
+    /// this much further than the limit (it grows with the stall).
+    FeedFurther(i64),
+    /// The download has run dry: pause audio and video together until enough is buffered. A
+    /// pipeline that kept its clock running (it is loaded as a live one) played the audio on and
+    /// showed the video seconds late afterwards: the picture froze and then ran out of sync.
+    Rebuffer,
+}
+
+/// Rebuffering only with less than this fed past the picture: a video of a few still pictures
+/// (long frames) has seconds fed ahead of a picture that rightly does not move.
+pub const REBUFFER_BELOW_NS: i64 = 500_000_000;
+
+pub fn stall(stalled_for: Duration, download_empty: bool, video_ahead_ns: i64) -> Stall {
+    if stalled_for < STALL_AFTER {
+        Stall::Fine
+    } else if download_empty && video_ahead_ns < REBUFFER_BELOW_NS {
+        Stall::Rebuffer
+    } else {
+        Stall::FeedFurther((stalled_for.as_nanos() as i64).min(STALL_EXTRA_MAX_NS))
+    }
+}
+
+/// Whether a rebuffering pause may end: enough video fed past the picture, or all of it.
+pub fn rebuffered(video_ahead_ns: i64, all_fed: bool) -> bool {
+    all_fed || video_ahead_ns >= REBUFFER_TARGET_NS
+}
+
+#[cfg(test)]
+mod stall_tests {
+    use super::*;
+
+    #[test]
+    fn a_short_gap_between_pictures_is_fine() {
+        assert_eq!(stall(Duration::from_millis(300), true, 0), Stall::Fine);
+        assert_eq!(stall(Duration::from_millis(699), false, 0), Stall::Fine);
+    }
+
+    #[test]
+    fn a_stall_with_an_empty_download_pauses_both_tracks() {
+        assert_eq!(stall(Duration::from_millis(800), true, 100_000_000), Stall::Rebuffer);
+    }
+
+    #[test]
+    fn a_still_picture_with_video_fed_ahead_is_not_rebuffered() {
+        assert_eq!(stall(Duration::from_millis(1200), true, 1_500_000_000), Stall::FeedFurther(1_200_000_000));
+    }
+
+    #[test]
+    fn a_stall_with_media_at_hand_feeds_further_up_to_a_cap() {
+        assert_eq!(stall(Duration::from_millis(1000), false, 0), Stall::FeedFurther(1_000_000_000));
+        assert_eq!(stall(Duration::from_secs(60), false, 0), Stall::FeedFurther(STALL_EXTRA_MAX_NS));
+    }
+
+    #[test]
+    fn rebuffering_ends_with_three_seconds_ahead_or_at_the_end() {
+        assert!(!rebuffered(2_999_000_000, false));
+        assert!(rebuffered(3_000_000_000, false));
+        assert!(rebuffered(0, true));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

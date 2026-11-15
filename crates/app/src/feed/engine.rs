@@ -23,7 +23,7 @@ use yt_core::demux::{Codec, Kind, TrackInfo};
 pub const MAX_FEED_AHEAD_NS: i64 = 1_600_000_000;
 /// Audio may run this much further ahead (it is the clock master, and cheap).
 pub const AUDIO_SLACK_NS: i64 = 2_000_000_000;
-use crate::feed_rules::{landing_wait, primed, Prime};
+use crate::feed_rules::{landing_wait, primed, rebuffered, stall, Prime, Stall};
 /// Cap on what is fed past the anchor while no position is known.
 const BLIND_AHEAD_NS: i64 = 4_000_000_000;
 /// Per-lane wall-clock budget per tick once the lane is healthy.
@@ -497,6 +497,12 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
     let mut reload_seek = false;
     let mut play_at: Option<Instant> = None;
     let mut seek_started = Instant::now();
+    // The last picture position reported and when it changed (a stalled picture stops it).
+    let mut pres_seen: (i64, Instant) = (PRES_NONE, Instant::now());
+    // A rebuffering pause (the download ran dry): since when.
+    let mut rebuffering: Option<Instant> = None;
+    // A stall with media at hand was logged (once per stall).
+    let mut stall_logged = false;
     let duration_ns = plan.duration_ms as i64 * 1_000_000;
 
     let result = loop {
@@ -529,10 +535,15 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
                 }
                 Cmd::Resume => {
                     user_paused = false;
-                    if !priming && seeking.is_none() && sys::play() {
-                        played(sh, pipe.epoch);
+                    if rebuffering.is_some() {
+                        // Playback starts when the rebuffering ends.
+                        set_phase(sh, Phase::Loading);
+                    } else {
+                        if !priming && seeking.is_none() && sys::play() {
+                            played(sh, pipe.epoch);
+                        }
+                        set_phase(sh, Phase::Playing);
                     }
-                    set_phase(sh, Phase::Playing);
                 }
                 Cmd::Seek(ms) => seek_to = Some(ms), // coalesce: the last one wins
                 Cmd::Volume(v) => {
@@ -589,6 +600,9 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
             seeking = Some(t);
             seek_started = Instant::now();
             prime_since = Instant::now();
+            pres_seen = (PRES_NONE, Instant::now());
+            rebuffering = None;
+            stall_logged = false;
             rate_probe = None;
             probe_rate = false;
             rate = 1.0;
@@ -747,7 +761,7 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
         } else {
             play_at.filter(|t| t.elapsed() > Duration::from_secs(2)).map(|t| base + (t.elapsed().as_nanos() as f64 * rate as f64) as i64)
         };
-        let vlimit = if priming {
+        let mut vlimit = if priming {
             base + BLIND_AHEAD_NS
         } else {
             match est {
@@ -755,6 +769,53 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
                 None => base + BLIND_AHEAD_NS,
             }
         };
+        // ---- a stalled picture ----
+        if pres != PRES_NONE && pres != pres_seen.0 {
+            pres_seen = (pres, Instant::now());
+            stall_logged = false;
+        }
+        let v_ahead = match (vf.fed_max, pres != PRES_NONE) {
+            (Some(m), true) => m - pres,
+            _ => 0,
+        };
+        let v_all_fed = video.drained() && vf.pending.is_none();
+        if let Some(since) = rebuffering {
+            // Fed on while paused; playback resumes with enough at hand.
+            vlimit = vlimit.max(pres.max(base) + crate::feed_rules::REBUFFER_TARGET_NS + 1_000_000_000);
+            if rebuffered(v_ahead, v_all_fed) {
+                rebuffering = None;
+                pres_seen.1 = Instant::now();
+                crate::log(&format!("feed: rebuffered in {} ms ({} ms of video ahead)", since.elapsed().as_millis(), v_ahead / 1_000_000));
+                if !user_paused {
+                    if sys::play() {
+                        played(sh, pipe.epoch);
+                    }
+                    play_at = Some(Instant::now());
+                    set_phase(sh, Phase::Playing);
+                }
+            }
+        } else {
+            let running = !priming && !user_paused && seeking.is_none() && !eos_pushed && pres != PRES_NONE && play_at.is_some_and(|t| t.elapsed() > Duration::from_secs(2));
+            let stalled_for = if running { pres_seen.1.elapsed() } else { Duration::ZERO };
+            let download_empty = video.is_empty() && vf.pending.is_none() && !video.drained();
+            match stall(stalled_for, download_empty, v_ahead) {
+                Stall::Fine => {}
+                Stall::FeedFurther(extra) => {
+                    if !stall_logged {
+                        stall_logged = true;
+                        crate::log(&format!("feed: picture stalled at {} ms with video at hand ({} ms fed ahead): feeding further", pres / 1_000_000, v_ahead / 1_000_000));
+                    }
+                    vlimit += extra;
+                }
+                Stall::Rebuffer => {
+                    crate::log(&format!("feed: picture stalled at {} ms, the download ran dry ({} ms fed ahead): rebuffering", pres / 1_000_000, v_ahead / 1_000_000));
+                    sys::pause();
+                    reanchor(&mut base, &mut play_at, rate, false);
+                    rebuffering = Some(Instant::now());
+                    set_phase(sh, Phase::Loading);
+                }
+            }
+        }
         let vstarved = priming || est.is_some_and(|p| vf.fed_max.map_or(true, |m| m - p < 250_000_000));
         let nv = match feed_lane(video, &mut vf, 1, shift, i64::MIN, vlimit, vstarved) {
             Ok(n) => n,
