@@ -5,6 +5,7 @@
 
 mod crashtrace; // fatal-signal tracer -> /tmp/ytnative/crash.log (see `cargo xtask crash`)
 mod device;
+mod edge;
 #[cfg(not(windows))]
 mod feed;
 mod host;
@@ -255,7 +256,7 @@ fn main() {
         let mut clock_minute = 0u64;
         let mut perf = Perf::default();
         let mut pointer_at: Option<(f32, f32)> = None;
-        let mut edge_step_at = 0u32;
+        let (mut edge_v, mut edge_h) = (edge::Glide::default(), edge::Glide::default());
         let (mut cursor_motion_at, mut cursor_hidden) = (0u32, true);
 
         let mut remote = remote::Remote::open();
@@ -563,28 +564,47 @@ fn main() {
                     _ => {}
                 }
             }
-            if let Some((x, y)) = pointer_at {
-                // Top / bottom edge: scroll the page (or step a list) while the pointer rests there.
+            // Top / bottom edge: scroll the page (or step a list); left / right edge on Home: slide
+            // the shelf under the pointer. Both after a short rest, easing in, and faster the
+            // nearer the pointer is to the very edge (plx-native's edge glide).
+            {
+                const V_BAND: f32 = 48.0;
+                const L_BAND: f32 = 110.0;
+                const R_BAND: f32 = 80.0;
                 let top = d.top_screen().map(|s| s.name());
-                let vdir = if y <= 24.0 { 1.0 } else if y >= 1056.0 { -1.0 } else { 0.0 };
-                if vdir != 0.0 && !mouse_down && (top != Some("player") || ui::comments_open() || ui::menu_open()) {
-                    if ui::wheel_scrolls_page(top) {
-                        inputs.push(input::wheel_event(vdir * if ui::comments_open() { 4.0 } else { 2.5 } * dt, tick));
-                    } else if now.wrapping_sub(edge_step_at) > 220 {
-                        edge_step_at = now;
-                        inputs.extend(input::wheel(vdir as i32, tick));
+                let v_side = pointer_at.filter(|_| !mouse_down && (top != Some("player") || ui::comments_open() || ui::menu_open())).and_then(|(_, y)| {
+                    if y < V_BAND {
+                        Some((1i8, y, V_BAND))
+                    } else if y >= 1080.0 - V_BAND {
+                        Some((-1i8, 1080.0 - y, V_BAND))
+                    } else {
+                        None
                     }
+                });
+                if ui::wheel_scrolls_page(top) {
+                    if let Some((dir, share, dt)) = edge_v.frame(v_side, now) {
+                        let rows_per_s = if ui::comments_open() { 6.0 } else { 3.5 };
+                        inputs.push(input::wheel_event(dir as f32 * rows_per_s * share * dt, tick));
+                    }
+                } else if let Some(dir) = edge_v.step(v_side, now, 6.0) {
+                    inputs.extend(input::wheel(dir as i32, tick));
                 }
-                if !mouse_down && top == Some("browse") && (120.0..1056.0).contains(&y) {
-                    let speed = 900.0 * dt;
-                    let dx = if x >= 1860.0 { speed } else if x < 110.0 && !ui::sidebar_shown() { -speed } else { 0.0 };
-                    if dx != 0.0 {
-                        inputs.push(plx_machine::machine::InputEvent {
-                            at: tick,
-                            source: plx_machine::machine::Source::Sdl,
-                            kind: plx_machine::machine::InputKind::Pan { dx, x, y },
-                        });
+                let h_side = pointer_at.filter(|&(_, y)| !mouse_down && top == Some("browse") && (120.0..1056.0).contains(&y)).and_then(|(x, _)| {
+                    if x >= 1920.0 - R_BAND {
+                        Some((1i8, 1920.0 - x, R_BAND))
+                    } else if x < L_BAND && !ui::sidebar_shown() {
+                        Some((-1i8, x, L_BAND))
+                    } else {
+                        None
                     }
+                });
+                if let (Some((dir, share, dt)), Some((x, y))) = (edge_h.frame(h_side, now), pointer_at) {
+                    let dx = dir as f32 * 1300.0 * share * dt;
+                    inputs.push(plx_machine::machine::InputEvent {
+                        at: tick,
+                        source: plx_machine::machine::Source::Sdl,
+                        kind: plx_machine::machine::InputKind::Pan { dx, x, y },
+                    });
                 }
             }
             // Idle pointer: hide it after a few seconds without motion (sooner while a video plays).

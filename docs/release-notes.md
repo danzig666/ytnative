@@ -1,4 +1,1 @@
-- New: webOS 4 support (tested by a contributor on an LG C9, webOS 4.10.2): video through the 4K engine, with pause and seek. On webOS 4 there is no HDR yet, the video stays full screen beside the comments, and speeds other than normal are not available
-- Fixed: on webOS 4 the app crashed in the background at start (sign-in and phone pairing could not get random numbers in the Developer Mode jail)
-- Changed: AV1 is never chosen on a TV whose decoder list has no AV1 decoder
-- Thanks to 2esq for both contributions
+- Changed: pointer edge scrolling now starts after a short rest, eases in, and goes faster the nearer the pointer is to the edge of the screen (as in plx-native), for page scrolling, list stepping and sliding the shelves on Home
