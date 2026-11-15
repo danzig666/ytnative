@@ -1,1 +1,1 @@
-- Changed: pointer edge scrolling now starts after a short rest, eases in, and goes faster the nearer the pointer is to the edge of the screen (as in plx-native), for page scrolling, list stepping and sliding the shelves on Home
+- Fixed: with the speed remembered per channel, a video opened without its card (the next video played automatically, or one sent from a phone) now starts at its channel's speed

@@ -26,6 +26,15 @@ pub fn start_speed(remember: RememberSpeed, default: f32, channel: Option<&str>,
     .unwrap_or(default)
 }
 
+/// "Remember speed per channel" for a video that started without knowing its channel: once the
+/// channel is known, its remembered speed, when it differs from the speed the video plays at.
+pub fn late_channel_speed(remember: RememberSpeed, channel: &str, by_channel: &HashMap<String, f32>, playing_at: f32) -> Option<f32> {
+    if remember != RememberSpeed::PerChannel {
+        return None;
+    }
+    by_channel.get(channel).copied().filter(|r| (r - playing_at).abs() > NORMAL)
+}
+
 /// What a chosen speed changes in the settings.
 #[derive(Debug, PartialEq)]
 pub enum SpeedMemory {
@@ -240,6 +249,24 @@ mod tests {
         assert_eq!(start_speed(RememberSpeed::PerChannel, 1.0, None, &ch, None, None), 1.0, "no card: the default");
         assert_eq!(start_speed(RememberSpeed::PerVideo, 1.0, None, &ch, Some(2.0), None), 2.0);
         assert_eq!(start_speed(RememberSpeed::PerVideo, 1.0, None, &ch, Some(2.0), Some(0.5)), 0.5, "a reload keeps its speed");
+    }
+
+    #[test]
+    fn a_video_without_a_card_gets_its_channels_speed_once_the_channel_is_known() {
+        let mut ch = HashMap::new();
+        ch.insert("Chan".to_string(), 1.5);
+        assert_eq!(late_channel_speed(RememberSpeed::PerChannel, "Chan", &ch, 1.0), Some(1.5));
+        assert_eq!(late_channel_speed(RememberSpeed::PerChannel, "Chan", &ch, 1.5), None, "already at it");
+        assert_eq!(late_channel_speed(RememberSpeed::PerChannel, "Other", &ch, 1.0), None);
+        assert_eq!(late_channel_speed(RememberSpeed::PerVideo, "Chan", &ch, 1.0), None);
+        // Stored under the name the player shows, looked up under the same name.
+        match remember_speed(RememberSpeed::PerChannel, "v", "Chan", 2.0) {
+            SpeedMemory::Channel(c, r) => {
+                ch.insert(c, r);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(late_channel_speed(RememberSpeed::PerChannel, "Chan", &ch, 1.0), Some(2.0));
     }
 
     #[test]

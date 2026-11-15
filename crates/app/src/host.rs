@@ -336,6 +336,8 @@ pub struct AppRig {
     /// since (a change is the user's, remembered for the channel), and the global state to put
     /// back for channels without one.
     subs_applied_for: String,
+    /// The video whose channel speed was looked up ("remember speed per channel").
+    channel_speed_for: String,
     subs_seen: (bool, String),
     subs_global: Option<(bool, String)>,
     /// `ui_language` the translations were last switched to.
@@ -410,6 +412,7 @@ impl AppRig {
             subtitles_were: false,
             subtitle_language_was: String::new(),
             subs_applied_for: String::new(),
+            channel_speed_for: String::new(),
             subs_seen: (false, String::new()),
             subs_global: None,
             applied_language: String::new(),
@@ -724,6 +727,16 @@ impl AppRig {
             self.last_key_ms = now_ms;
             self.player.toggle_pause();
             self.store.toast("Sleep timer: playback paused", now_ms);
+        }
+        let v = &self.player_view;
+        if !v.video_id.is_empty() && !v.author.is_empty() && self.channel_speed_for != v.video_id && matches!(v.phase, Phase::Loading | Phase::Playing | Phase::Paused) {
+            self.channel_speed_for = v.video_id.clone();
+            let target = self.pending_rate.unwrap_or(if v.rate > 0.0 { v.rate } else { 1.0 });
+            let s = &self.store.settings;
+            if let Some(r) = crate::playback_rules::late_channel_speed(s.remember_speed, &v.author, &s.speed_by_channel, target) {
+                crate::log(&format!("speed: {}x remembered for {}", r, v.author));
+                self.pending_rate = Some(r);
+            }
         }
         if self.player_view.phase == Phase::Playing {
             if let Some(r) = self.pending_rate.take() {
@@ -1489,6 +1502,9 @@ impl Rig<YtHost> for AppRig {
                 self.highlight_for.clear();
                 let memory = yt_core::memory::PlayerMemory::load();
                 let channel = self.store.card_channel(&video_id);
+                // Without a card (the autoplay pick, a phone's video) the channel's speed is
+                // applied once the video's channel is known (`late_channel_speed`).
+                self.channel_speed_for = if channel.is_some() { video_id.clone() } else { String::new() };
                 let reload = self.restart_rate.take().filter(|(v, _)| *v == video_id).map(|(_, r)| r);
                 let speed = crate::playback_rules::start_speed(s.remember_speed, s.speed, channel.as_deref(), &s.speed_by_channel, memory.video_speed.peek(&video_id).copied(), reload);
                 self.pending_rate = (!crate::playback_rules::is_normal(speed)).then_some(speed);
