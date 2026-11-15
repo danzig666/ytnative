@@ -275,42 +275,28 @@ impl PlayerScreen {
         let store = cx.views.store;
         let s = &store.settings;
         let replay = YtFx::Replay { video_id: self.video_id.clone(), playlist: self.playlist.clone() };
-        // A Short in a Shorts list loops (as on YouTube).
-        if store.queue_shorts && s.loop_shorts && store.queue.contains(&self.video_id) {
-            fx.push(Fx::App(replay));
-            return;
-        }
-        // "Play next" goes first, unless this video repeats or the mode stops after each video.
-        if !matches!(s.playback_mode, PlaybackMode::RepeatOne | PlaybackMode::PauseEach | PlaybackMode::CloseEach) {
-            if let Some(v) = queued_next(cx, &self.video_id) {
-                go_to(v, None, fx);
-                return;
-            }
-        }
-        let target = match s.playback_mode {
-            PlaybackMode::RepeatOne => {
-                fx.push(Fx::App(replay));
-                return;
-            }
-            PlaybackMode::PauseEach => None,
-            PlaybackMode::CloseEach => {
-                fx.push(Fx::Nav(NavOp::Pop));
-                return;
-            }
-            // A playlist on this TV plays on in its order, then YouTube's pick (as a YouTube
-            // playlist does).
-            PlaybackMode::PlayNext if in_local_list(cx, &self.video_id) => {
-                list_step(cx, &self.video_id, 1, false).or_else(|| next_video(cx, &self.video_id, false))
-            }
-            PlaybackMode::PlayNext => next_video(cx, &self.video_id, false),
-            PlaybackMode::ListOnce => list_step(cx, &self.video_id, 1, false),
-            PlaybackMode::ListRepeat => list_step(cx, &self.video_id, 1, true).or_else(|| next_video(cx, &self.video_id, true)),
-            PlaybackMode::Shuffle => list_random(cx, &self.video_id).or_else(|| next_video(cx, &self.video_id, false)),
-            PlaybackMode::Reverse => list_step(cx, &self.video_id, -1, false),
+        let play_next: Vec<String> = store.play_next.iter().map(|v| v.video_id.clone()).collect();
+        let list = current_list(cx, &self.video_id);
+        let ex = cx.views.player.extras.clone();
+        let w = ex.watch.as_ref();
+        let yt_items: Option<(String, Vec<String>)> = w.and_then(|w| w.playlist.as_ref()).map(|pl| (pl.id.clone(), pl.items.iter().map(|i| i.id.clone()).collect()));
+        let c = crate::next_up::EndContext {
+            current: &self.video_id,
+            mode: s.playback_mode,
+            loop_short: store.queue_shorts && s.loop_shorts && store.queue.contains(&self.video_id),
+            play_next: &play_next,
+            in_local: in_local_list(cx, &self.video_id),
+            list: list.as_ref().map(|(ids, pl)| (ids.as_slice(), pl.as_deref())),
+            yt_playlist: yt_items.as_ref().map(|(id, v)| (id.as_str(), v.as_slice())),
+            autoplay: w.and_then(autoplay_pick),
         };
-        match target {
-            Some((v, pl)) => go_to(v, pl.or(self.playlist.clone()), fx),
-            None => self.show_hud(cx, fx),
+        use crate::next_up::EndAction;
+        match crate::next_up::on_ended(&c, random_seed(cx)) {
+            EndAction::Replay => fx.push(Fx::App(replay)),
+            EndAction::Queued(v) => go_to(v, None, fx),
+            EndAction::Go(v, pl) => go_to(v, pl.or(self.playlist.clone()), fx),
+            EndAction::Close => fx.push(Fx::Nav(NavOp::Pop)),
+            EndAction::Stay => self.show_hud(cx, fx),
         }
     }
 
@@ -1482,31 +1468,10 @@ fn current_list(cx: &Cx<'_, YtHost>, current: &str) -> Option<(Vec<String>, Opti
     q.iter().any(|v| v == current).then(|| (q.clone(), None))
 }
 
-/// The item `dir` places from `current` in its list; at an end, wraps (`wrap`) or stops.
-fn list_step(cx: &Cx<'_, YtHost>, current: &str, dir: i32, wrap: bool) -> Option<(String, Option<String>)> {
-    let (ids, pl) = current_list(cx, current)?;
-    let i = ids.iter().position(|v| v == current)? as i32 + dir;
-    let n = ids.len() as i32;
-    let j = if (0..n).contains(&i) {
-        i
-    } else if wrap {
-        i.rem_euclid(n)
-    } else {
-        return None;
-    };
-    Some((ids[j as usize].clone(), pl))
-}
-
-/// A random other item of the current list.
-fn list_random(cx: &Cx<'_, YtHost>, current: &str) -> Option<(String, Option<String>)> {
-    let (ids, pl) = current_list(cx, current)?;
-    let others: Vec<&String> = ids.iter().filter(|v| *v != current).collect();
-    if others.is_empty() {
-        return None;
-    }
+/// A seed for the shuffle.
+fn random_seed(cx: &Cx<'_, YtHost>) -> u64 {
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
-    let seed = (nanos as u64 ^ cx.views.now_ms as u64).wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-    Some((others[(seed >> 33) as usize % others.len()].clone(), pl))
+    nanos as u64 ^ cx.views.now_ms as u64
 }
 
 /// Next video when one ends: the next playlist item (or the first when repeating the list),
@@ -1640,24 +1605,17 @@ pub fn playing_video(st: &crate::host::PlayerView) -> yt_core::local_playlists::
 fn next_video(cx: &Cx<'_, YtHost>, current: &str, repeat_list: bool) -> Option<(String, Option<String>)> {
     let ex = cx.views.player.extras.clone();
     let w = ex.watch.as_ref()?;
-    if let Some(pl) = &w.playlist {
-        let ids: Vec<&str> = pl.items.iter().map(|i| i.id.as_str()).collect();
-        if let Some(i) = ids.iter().position(|v| *v == current) {
-            if let Some(n) = ids.get(i + 1) {
-                return Some((n.to_string(), Some(pl.id.clone())));
-            }
-            if repeat_list {
-                return ids.first().map(|v| (v.to_string(), Some(pl.id.clone())));
-            }
-        }
-    }
-    let n = w.autoplay_next.as_ref().filter(|n| n.id != current)?;
-    match &n.endpoint {
-        Some(yt_core::model::Endpoint::Watch { video_id, playlist_id, .. }) if !video_id.is_empty() => {
-            Some((video_id.clone(), playlist_id.clone()))
-        }
-        _ => Some((n.id.clone(), None)),
-    }
+    let items: Option<(String, Vec<String>)> = w.playlist.as_ref().map(|pl| (pl.id.clone(), pl.items.iter().map(|i| i.id.clone()).collect()));
+    crate::next_up::yt_next(items.as_ref().map(|(id, v)| (id.as_str(), v.as_slice())), autoplay_pick(w), current, repeat_list)
+}
+
+/// The watch page's autoplay pick as (video, playlist).
+fn autoplay_pick(w: &yt_core::watch::WatchInfo) -> Option<(String, Option<String>)> {
+    let n = w.autoplay_next.as_ref()?;
+    Some(match &n.endpoint {
+        Some(yt_core::model::Endpoint::Watch { video_id, playlist_id, .. }) if !video_id.is_empty() => (video_id.clone(), playlist_id.clone()),
+        _ => (n.id.clone(), None),
+    })
 }
 
 /// Subtitles: centred lines on a dark backing, `bottom` px above the screen's bottom edge.

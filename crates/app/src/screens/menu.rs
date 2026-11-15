@@ -111,6 +111,80 @@ pub struct MenuScreen {
     state: State,
 }
 
+/// The maximum video heights the quality row offers.
+const QUALITIES: &[u32] = &[480, 720, 1080, 1440, 2160];
+
+/// The values of a row that edits a setting, and the current one (`None` for other rows).
+fn setting_choices(act: &Act, s: &crate::settings::Settings) -> Option<(Vec<String>, usize)> {
+    Some(match act {
+        Act::MaxQuality => (QUALITIES.iter().map(|q| format!("{q}p")).collect(), QUALITIES.iter().position(|q| *q == s.max_height).unwrap_or(2)),
+        Act::Sleep => (
+            SLEEP_MINS.iter().map(|m| crate::settings::sleep_label(*m)).collect(),
+            SLEEP_MINS.iter().position(|m| *m == s.sleep_timer_mins).unwrap_or(0),
+        ),
+        Act::SubSize => (SUB_SIZES.iter().map(|v| v.to_string()).collect(), SUB_SIZES.iter().position(|v| *v == s.subtitle_size).unwrap_or(2)),
+        Act::SubColor => (SUB_COLORS.iter().map(|v| v.to_string()).collect(), SUB_COLORS.iter().position(|v| *v == s.subtitle_color).unwrap_or(0)),
+        Act::SubFont => (SUB_FONTS.iter().map(|v| v.to_string()).collect(), SUB_FONTS.iter().position(|v| *v == s.subtitle_font).unwrap_or(0)),
+        Act::SubStyle => (SUB_STYLES.iter().map(|v| v.to_string()).collect(), SUB_STYLES.iter().position(|v| *v == s.subtitle_style).unwrap_or(0)),
+        Act::RepeatMode => (
+            PlaybackMode::ALL.iter().map(|m| m.label().to_string()).collect(),
+            PlaybackMode::ALL.iter().position(|x| *x == s.playback_mode).unwrap_or(0),
+        ),
+        _ => return None,
+    })
+}
+
+/// A row that edits a setting, stepped `dir` values (LEFT / RIGHT, or a pick from its list).
+fn step_setting(act: &Act, s: &mut crate::settings::Settings, dir: i32) {
+    fn wrap(i: usize, dir: i32, n: usize) -> usize {
+        (i as i32 + dir).rem_euclid(n as i32) as usize
+    }
+    fn clamp(i: usize, dir: i32, n: usize) -> usize {
+        (i as i32 + dir).clamp(0, n as i32 - 1) as usize
+    }
+    match act {
+        Act::MaxQuality => {
+            let i = QUALITIES.iter().position(|q| *q == s.max_height).unwrap_or(2);
+            s.max_height = QUALITIES[clamp(i, dir, QUALITIES.len())];
+            s.min_height = s.min_height.min(s.max_height);
+        }
+        Act::Sleep => {
+            let i = SLEEP_MINS.iter().position(|m| *m == s.sleep_timer_mins).unwrap_or(0);
+            s.sleep_timer_mins = SLEEP_MINS[wrap(i, dir, SLEEP_MINS.len())];
+        }
+        Act::Subtitles => s.subtitles = !s.subtitles,
+        Act::SubBold => s.subtitle_bold = !s.subtitle_bold,
+        Act::SubSize => {
+            let i = SUB_SIZES.iter().position(|v| *v == s.subtitle_size).unwrap_or(2);
+            s.subtitle_size = SUB_SIZES[clamp(i, dir, SUB_SIZES.len())];
+        }
+        Act::SubColor => {
+            let i = SUB_COLORS.iter().position(|v| *v == s.subtitle_color).unwrap_or(0);
+            s.subtitle_color = SUB_COLORS[wrap(i, dir, SUB_COLORS.len())].into();
+        }
+        Act::SubFont => {
+            let i = SUB_FONTS.iter().position(|v| *v == s.subtitle_font).unwrap_or(0);
+            s.subtitle_font = SUB_FONTS[wrap(i, dir, SUB_FONTS.len())].into();
+        }
+        Act::SubStyle => {
+            let i = SUB_STYLES.iter().position(|v| *v == s.subtitle_style).unwrap_or(0);
+            s.subtitle_style = SUB_STYLES[wrap(i, dir, SUB_STYLES.len())].into();
+        }
+        Act::RepeatMode => {
+            let all = PlaybackMode::ALL;
+            let i = all.iter().position(|r| *r == s.playback_mode).unwrap_or(0);
+            s.playback_mode = all[wrap(i, dir, all.len())];
+        }
+        _ => {}
+    }
+}
+
+/// The speed `dir` steps from `current` in the speed list (stops at its ends).
+fn step_speed(current: f32, dir: i32) -> f32 {
+    let i = crate::settings::speed_index(current) as i32;
+    SPEEDS[(i + dir).clamp(0, SPEEDS.len() as i32 - 1) as usize]
+}
+
 const SUB_SIZES: &[u32] = &[32, 38, 44, 52, 60, 72];
 const SUB_COLORS: &[&str] = &["white", "light gray", "gray", "dark gray", "yellow", "light yellow", "cyan", "green", "orange", "pink"];
 const SUB_STYLES: &[&str] = &["outline", "shadow", "box"];
@@ -486,10 +560,6 @@ impl MenuScreen {
                 let r = if cx.views.player.rate > 0.0 { cx.views.player.rate } else { 1.0 };
                 (SPEEDS.iter().map(|v| format!("{v}x")).collect(), crate::settings::speed_index(r))
             }
-            Act::MaxQuality => {
-                const Q: &[u32] = &[480, 720, 1080, 1440, 2160];
-                (Q.iter().map(|q| format!("{q}p")).collect(), Q.iter().position(|q| *q == s.max_height).unwrap_or(2))
-            }
             Act::AudioTrack => {
                 let st = cx.views.player;
                 if st.audio_tracks.len() < 2 {
@@ -498,19 +568,7 @@ impl MenuScreen {
                 let cur = st.audio_track.clone().or_else(|| st.audio_tracks.iter().find(|t| t.2).map(|t| t.0.clone()));
                 (st.audio_tracks.iter().map(|t| t.1.clone()).collect(), st.audio_tracks.iter().position(|t| Some(&t.0) == cur.as_ref()).unwrap_or(0))
             }
-            Act::Sleep => (
-                SLEEP_MINS.iter().map(|m| crate::settings::sleep_label(*m)).collect(),
-                SLEEP_MINS.iter().position(|m| *m == s.sleep_timer_mins).unwrap_or(0),
-            ),
-            Act::SubSize => (SUB_SIZES.iter().map(|v| v.to_string()).collect(), SUB_SIZES.iter().position(|v| *v == s.subtitle_size).unwrap_or(2)),
-            Act::SubColor => (SUB_COLORS.iter().map(|v| v.to_string()).collect(), SUB_COLORS.iter().position(|v| *v == s.subtitle_color).unwrap_or(0)),
-            Act::SubFont => (SUB_FONTS.iter().map(|v| v.to_string()).collect(), SUB_FONTS.iter().position(|v| *v == s.subtitle_font).unwrap_or(0)),
-            Act::SubStyle => (SUB_STYLES.iter().map(|v| v.to_string()).collect(), SUB_STYLES.iter().position(|v| *v == s.subtitle_style).unwrap_or(0)),
-            Act::RepeatMode => (
-                PlaybackMode::ALL.iter().map(|m| m.label().to_string()).collect(),
-                PlaybackMode::ALL.iter().position(|x| *x == s.playback_mode).unwrap_or(0),
-            ),
-            _ => return None,
+            _ => return setting_choices(act, s),
         })
     }
 
@@ -566,10 +624,7 @@ impl MenuScreen {
                 fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
             }
             Act::Speed => {
-                let cur = if cx.views.player.rate > 0.0 { cx.views.player.rate } else { 1.0 };
-                let i = crate::settings::speed_index(cur) as i32;
-                let r = SPEEDS[((i + dir).clamp(0, SPEEDS.len() as i32 - 1)) as usize];
-                fx.push(Fx::App(YtFx::SetSpeed(r)));
+                fx.push(Fx::App(YtFx::SetSpeed(step_speed(cx.views.player.rate, dir))));
             }
             Act::AudioTrack => {
                 let st = cx.views.player;
@@ -587,42 +642,15 @@ impl MenuScreen {
                 let i = Z.iter().position(|z| *z == cx.views.player.zoom).unwrap_or(0) as i32;
                 fx.push(Fx::App(YtFx::SetZoom(Z[((i + dir).rem_euclid(3)) as usize])));
             }
-            Act::Sleep => fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| {
-                let i = SLEEP_MINS.iter().position(|m| *m == s.sleep_timer_mins).unwrap_or(0) as i32;
-                s.sleep_timer_mins = SLEEP_MINS[((i + dir).rem_euclid(SLEEP_MINS.len() as i32)) as usize];
-            })))),
             Act::MaxQuality => {
-                fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| {
-                    const Q: &[u32] = &[480, 720, 1080, 1440, 2160];
-                    let i = Q.iter().position(|q| *q == s.max_height).unwrap_or(2) as i32;
-                    s.max_height = Q[((i + dir).clamp(0, Q.len() as i32 - 1)) as usize];
-                    s.min_height = s.min_height.min(s.max_height);
-                }))));
+                let act = act.clone();
+                fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| step_setting(&act, s, dir)))));
                 fx.push(Fx::App(YtFx::Toast("Applies to the next video".into())));
             }
-            Act::Subtitles => fx.push(Fx::App(YtFx::EditSettings(Box::new(|s| s.subtitles = !s.subtitles)))),
-            Act::SubSize => fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| {
-                let i = SUB_SIZES.iter().position(|v| *v == s.subtitle_size).unwrap_or(2) as i32;
-                s.subtitle_size = SUB_SIZES[(i + dir).clamp(0, SUB_SIZES.len() as i32 - 1) as usize];
-            })))),
-            Act::SubColor => fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| {
-                let i = SUB_COLORS.iter().position(|v| *v == s.subtitle_color).unwrap_or(0) as i32;
-                s.subtitle_color = SUB_COLORS[(i + dir).rem_euclid(SUB_COLORS.len() as i32) as usize].into();
-            })))),
-            Act::SubBold => fx.push(Fx::App(YtFx::EditSettings(Box::new(|s| s.subtitle_bold = !s.subtitle_bold)))),
-            Act::SubFont => fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| {
-                let i = SUB_FONTS.iter().position(|v| *v == s.subtitle_font).unwrap_or(0) as i32;
-                s.subtitle_font = SUB_FONTS[(i + dir).rem_euclid(SUB_FONTS.len() as i32) as usize].into();
-            })))),
-            Act::SubStyle => fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| {
-                let i = SUB_STYLES.iter().position(|v| *v == s.subtitle_style).unwrap_or(0) as i32;
-                s.subtitle_style = SUB_STYLES[(i + dir).rem_euclid(SUB_STYLES.len() as i32) as usize].into();
-            })))),
-            Act::RepeatMode => fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| {
-                let all = PlaybackMode::ALL;
-                let i = all.iter().position(|r| *r == s.playback_mode).unwrap_or(0) as i32;
-                s.playback_mode = all[((i + dir).rem_euclid(all.len() as i32)) as usize];
-            })))),
+            Act::Sleep | Act::Subtitles | Act::SubSize | Act::SubColor | Act::SubBold | Act::SubFont | Act::SubStyle | Act::RepeatMode => {
+                let act = act.clone();
+                fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| step_setting(&act, s, dir)))));
+            }
             Act::SbChannel(ch) => {
                 let ch = ch.clone();
                 fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| {
@@ -965,5 +993,82 @@ impl Screen<YtHost> for MenuScreen {
     }
     fn render(&self) -> RenderStrategy {
         RenderStrategy::Page
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::Settings;
+
+    const VALUED: [Act; 7] = [Act::MaxQuality, Act::Sleep, Act::SubSize, Act::SubColor, Act::SubFont, Act::SubStyle, Act::RepeatMode];
+
+    /// Picking value `k` from a row's list runs the row `k - current` steps: it must land on `k`
+    /// for every row and every value, from every starting value.
+    #[test]
+    fn picking_a_value_from_a_list_sets_exactly_that_value() {
+        for act in VALUED {
+            let (values, _) = setting_choices(&act, &Settings::default()).unwrap();
+            for from in 0..values.len() {
+                let mut s = Settings::default();
+                let cur = setting_choices(&act, &s).unwrap().1;
+                step_setting(&act, &mut s, from as i32 - cur as i32);
+                assert_eq!(setting_choices(&act, &s).unwrap().1, from, "{act:?}: could not reach {from}");
+                for to in 0..values.len() {
+                    let mut t = s.clone();
+                    step_setting(&act, &mut t, to as i32 - from as i32);
+                    assert_eq!(setting_choices(&act, &t).unwrap().1, to, "{act:?}: {from} -> {to}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_settings_defaults_are_values_the_rows_offer() {
+        let s = Settings::default();
+        assert!(QUALITIES.contains(&s.max_height), "max_height {}", s.max_height);
+        assert!(SLEEP_MINS.contains(&s.sleep_timer_mins));
+        assert!(SUB_SIZES.contains(&s.subtitle_size), "subtitle_size {}", s.subtitle_size);
+        assert!(SUB_COLORS.contains(&s.subtitle_color.as_str()), "subtitle_color {}", s.subtitle_color);
+        assert!(SUB_FONTS.contains(&s.subtitle_font.as_str()), "subtitle_font {}", s.subtitle_font);
+        assert!(SUB_STYLES.contains(&s.subtitle_style.as_str()), "subtitle_style {}", s.subtitle_style);
+        assert!(SPEEDS.contains(&s.speed));
+    }
+
+    #[test]
+    fn wrapping_rows_wrap_and_clamping_rows_stop() {
+        let mut s = Settings::default();
+        s.max_height = 2160;
+        step_setting(&Act::MaxQuality, &mut s, 1);
+        assert_eq!(s.max_height, 2160, "no quality above 2160p");
+        s.min_height = 1080;
+        step_setting(&Act::MaxQuality, &mut s, -3);
+        assert_eq!((s.max_height, s.min_height), (720, 720), "the minimum follows the maximum down");
+        s.playback_mode = PlaybackMode::ALL[PlaybackMode::ALL.len() - 1];
+        step_setting(&Act::RepeatMode, &mut s, 1);
+        assert_eq!(s.playback_mode, PlaybackMode::ALL[0]);
+    }
+
+    #[test]
+    fn toggles_flip() {
+        let mut s = Settings::default();
+        let (sub, bold) = (s.subtitles, s.subtitle_bold);
+        step_setting(&Act::Subtitles, &mut s, 1);
+        step_setting(&Act::SubBold, &mut s, -1);
+        assert_eq!((s.subtitles, s.subtitle_bold), (!sub, !bold));
+    }
+
+    #[test]
+    fn the_speed_row_steps_through_the_list_and_stops_at_its_ends() {
+        assert_eq!(step_speed(1.0, 1), 1.05);
+        assert_eq!(step_speed(1.0, -1), 0.95);
+        assert_eq!(step_speed(0.0, 1), 1.05, "an unknown rate counts as normal");
+        assert_eq!(step_speed(4.0, 1), 4.0);
+        assert_eq!(step_speed(0.25, -1), 0.25);
+        assert_eq!(step_speed(1.33, 0), 1.3, "a rate between two steps snaps to the nearest");
+        let one = crate::settings::speed_index(1.0) as i32;
+        for (k, v) in SPEEDS.iter().enumerate() {
+            assert_eq!(step_speed(1.0, k as i32 - one), *v);
+        }
     }
 }

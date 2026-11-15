@@ -29,6 +29,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: yt-core tests
         run: cargo test -p yt-core
+      - name: Simulator libraries (SDL2, SDL2_ttf; pinned SHA-256)
+        run: powershell -ExecutionPolicy Bypass -File tools/fetch-sim-deps.ps1
+      - name: App tests (playback modes, speed, resume, SponsorBlock, menus, engine priming)
+        run: cargo test -p ytnative-app --features sim
 
   tv-build:
     runs-on: windows-latest

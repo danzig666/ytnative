@@ -121,8 +121,13 @@ pub fn clock_block(p: Painter, cx: &Cx<'_, YtHost>, right: f32, top: f32) {
 /// How old a video is, for the player and the video info: YouTube's short age ("3d ago"), or for
 /// a video a year old or more its date in words ("November 10, 2014").
 pub fn video_age(w: &yt_core::watch::WatchInfo) -> Option<String> {
+    let today = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |t| t.as_secs() / 86_400) as i64;
+    video_age_on(w, today)
+}
+
+/// [`video_age`] on day `today` (days since 1970-01-01).
+fn video_age_on(w: &yt_core::watch::WatchInfo, today: i64) -> Option<String> {
     if let Some((y, m, d)) = w.published_date {
-        let today = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |t| t.as_secs() / 86_400) as i64;
         if today - days_from_civil(y, m, d) >= 365 {
             return Some(crate::i18n::full_date(y, m, d));
         }
@@ -148,6 +153,34 @@ mod age_tests {
         assert_eq!(super::days_from_civil(1970, 1, 1), 0);
         assert_eq!(super::days_from_civil(2000, 3, 1), 11_017);
         assert_eq!(super::days_from_civil(2014, 11, 10), 16_384);
+    }
+
+    fn watch(text: &str, date: Option<(i32, u32, u32)>) -> yt_core::watch::WatchInfo {
+        yt_core::watch::WatchInfo { published_text: Some(text.into()), published_date: date, ..Default::default() }
+    }
+
+    #[test]
+    fn a_video_a_year_old_or_more_shows_its_date() {
+        let today = super::days_from_civil(2026, 11, 15);
+        let old = super::video_age_on(&watch("12 years ago", Some((2014, 11, 10))), today).unwrap();
+        assert!(old.contains("2014") && old.contains("10") && !old.contains("ago"), "{old}");
+        let exactly = super::video_age_on(&watch("1 year ago", Some((2025, 11, 15))), today).unwrap();
+        assert!(exactly.contains("2025"), "365 days counts as a year: {exactly}");
+    }
+
+    #[test]
+    fn a_newer_video_keeps_youtubes_short_age() {
+        let today = super::days_from_civil(2026, 11, 15);
+        assert_eq!(super::video_age_on(&watch("3 days ago", Some((2026, 11, 12))), today).as_deref(), Some("3 days ago"));
+        assert_eq!(super::video_age_on(&watch("11 months ago", Some((2025, 11, 16))), today).as_deref(), Some("11 months ago"));
+        assert_eq!(super::video_age_on(&watch("Streamed live", None), today).as_deref(), Some("Streamed live"), "no date: the text");
+        assert_eq!(super::video_age_on(&watch("", None), today), None);
+    }
+
+    #[test]
+    fn leap_days_count() {
+        assert_eq!(super::days_from_civil(2024, 3, 1) - super::days_from_civil(2024, 2, 28), 2);
+        assert_eq!(super::days_from_civil(2100, 3, 1) - super::days_from_civil(2100, 2, 28), 1, "2100 is not a leap year");
     }
 }
 

@@ -23,21 +23,11 @@ use yt_core::demux::{Codec, Kind, TrackInfo};
 pub const MAX_FEED_AHEAD_NS: i64 = 1_600_000_000;
 /// Audio may run this much further ahead (it is the clock master, and cheap).
 pub const AUDIO_SLACK_NS: i64 = 2_000_000_000;
-/// Buffer this much video and audio (paused) before Play, after a Load or a seek.
-pub const PRIME_NS: i64 = 700_000_000;
-pub const PRIME_AUDIO_NS: i64 = 300_000_000;
-/// ...or start anyway once this much video is buffered (audioless / starved audio)...
-pub const PRIME_VIDEO_MAX_NS: i64 = 2_500_000_000;
-/// ...but with an audio track, only after waiting this long for its first audio: video
-/// downloads faster, and Play without audio left the picture without its clock (about one start
-/// in ten on the C3; after a reload it ran at about 3x).
-const PRIME_AUDIO_WAIT: Duration = Duration::from_secs(8);
+use crate::feed_rules::{landing_wait, primed, Prime};
 /// Cap on what is fed past the anchor while no position is known.
 const BLIND_AHEAD_NS: i64 = 4_000_000_000;
 /// Per-lane wall-clock budget per tick once the lane is healthy.
 const LANE_SLICE: Duration = Duration::from_millis(3);
-/// How long a seek may wait for the first video unit of its generation (slow networks included).
-const SEEK_LANDING_TIMEOUT: Duration = Duration::from_secs(30);
 /// Client-side trick play (found by youtube-webos-cobalt-adfree): a pipeline loaded with it
 /// changes speed in place. On the C3 such a pipeline reports loadCompleted only after 4 to
 /// 10 s, and some videos (a 720p AV1 one; a 4K one fed early) never show a picture, so videos
@@ -619,11 +609,8 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
                 // Without a deadline a generation that never yields a video unit (its fetcher
                 // finished empty-handed, or keeps waiting for a segment) would leave the player
                 // loading forever.
-                if video.drained() {
-                    break Err("no video after the seek target".into());
-                }
-                if seek_started.elapsed() > SEEK_LANDING_TIMEOUT {
-                    break Err("timed out waiting for media after a seek".into());
+                if let Err(e) = landing_wait(video.drained(), seek_started.elapsed()) {
+                    break Err(e.into());
                 }
                 std::thread::sleep(Duration::from_millis(5));
                 continue;
@@ -788,8 +775,16 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
         let abuf = af.fed_max.map_or(0, |m| m - base);
         let v_done = video.drained() && vf.pending.is_none();
         let a_done = !has_audio || (audio.drained() && af.pending.is_none());
-        let audio_ready_or_given_up = !has_audio || af.fed_max.is_some() || prime_since.elapsed() > PRIME_AUDIO_WAIT;
-        if priming && seeking.is_none() && (vbuf >= PRIME_NS && (!has_audio || abuf >= PRIME_AUDIO_NS) || (vbuf >= PRIME_VIDEO_MAX_NS && audio_ready_or_given_up) || (v_done && a_done && vf.fed_max.is_some())) {
+        let prime = Prime {
+            has_audio,
+            video_ns: vbuf,
+            audio_ns: abuf,
+            any_video: vf.fed_max.is_some(),
+            any_audio: af.fed_max.is_some(),
+            all_fed: v_done && a_done,
+            waited: prime_since.elapsed(),
+        };
+        if priming && seeking.is_none() && primed(prime) {
             priming = false;
             crate::log(&format!("feed: primed v={} ms a={} ms", vbuf / 1_000_000, abuf / 1_000_000));
             if !user_paused {

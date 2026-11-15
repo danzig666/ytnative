@@ -907,41 +907,28 @@ impl AppRig {
         if self.highlight_for != self.player_view.video_id {
             if let Some(h) = ex.segments.iter().find(|s| s.category == Category::PoiHighlight).cloned() {
                 self.highlight_for = self.player_view.video_id.clone();
-                if pos + 1000 < h.start_ms {
-                    match sb_action(&self.store.settings, &h.category) {
-                        SbAction::Off => {}
-                        SbAction::Skip => self.player.seek_to(h.start_ms),
-                        SbAction::SkipWithToast => {
-                            self.player.seek_to(h.start_ms);
-                            self.store.toast(crate::i18n::tr("Jumped to the highlight"), now_ms);
-                        }
-                        SbAction::Ask => {
-                            self.store.toast(crate::i18n::tr("Highlight: press OK to jump there"), now_ms);
-                            self.sb_offer = Some((h.start_ms, "Highlight".into(), (pos + 15_000).min(h.start_ms)));
-                        }
-                    }
-                }
+                let effects = crate::playback_rules::sb_highlight(sb_action(&self.store.settings, &h.category), pos, h.start_ms);
+                self.sb_apply(effects, now_ms);
             }
         }
         // Only the categories acted on: a longer overlapping segment of a category that is off
         // must not hide one inside it.
         let settings = &self.store.settings;
         let Some(seg) = self.sb.check_where(&ex.segments, pos, |s| sb_action(settings, &s.category) != SbAction::Off).cloned() else { return };
-        let label = seg.category.label().to_string();
-        let shown = crate::i18n::tr(&label).to_string();
-        match sb_action(&self.store.settings, &seg.category) {
-            SbAction::Off => {}
-            SbAction::Skip => self.player.seek_to(seg.end_ms),
-            SbAction::SkipWithToast => {
-                self.player.seek_to(seg.end_ms);
-                self.store.toast(crate::i18n::tr("Skipped: {}").replace("{}", &shown), now_ms);
-            }
-            SbAction::Ask => {
-                self.store.toast(crate::i18n::tr("{} \u{2014} press OK to skip").replace("{}", &shown), now_ms);
-                self.sb_offer = Some((seg.end_ms, label, seg.end_ms));
+        let effects = crate::playback_rules::sb_segment(sb_action(&self.store.settings, &seg.category), &seg);
+        self.sb_apply(effects, now_ms);
+        self.sb.mark_done(&seg);
+    }
+
+    fn sb_apply(&mut self, effects: Vec<crate::playback_rules::SbEffect>, now_ms: u32) {
+        use crate::playback_rules::SbEffect;
+        for e in effects {
+            match e {
+                SbEffect::Seek(to) => self.player.seek_to(to),
+                SbEffect::Toast(m) => self.store.toast(m, now_ms),
+                SbEffect::Offer { to, label, until } => self.sb_offer = Some((to, label, until)),
             }
         }
-        self.sb.mark_done(&seg);
     }
 
     /// DeArrow: replace clickbait titles / thumbnails of newly loaded cards (when enabled).
@@ -1071,23 +1058,22 @@ impl AppRig {
 
     /// A speed chosen by the user: the speed OK toggles to, and remembered per the setting.
     fn remember_speed(&mut self, r: f32) {
-        use crate::settings::RememberSpeed;
         let s = &mut self.store.settings;
-        if (r - 1.0).abs() > 0.01 {
+        if !crate::playback_rules::is_normal(r) {
             s.toggle_speed = r;
         }
-        match s.remember_speed {
-            RememberSpeed::Off => {}
-            RememberSpeed::All => s.speed = r,
-            RememberSpeed::PerVideo if !self.player_view.video_id.is_empty() => {
+        use crate::playback_rules::SpeedMemory;
+        match crate::playback_rules::remember_speed(s.remember_speed, &self.player_view.video_id, &self.player_view.author, r) {
+            SpeedMemory::Nothing => {}
+            SpeedMemory::Default(r) => s.speed = r,
+            SpeedMemory::Video(v, r) => {
                 let mut m = yt_core::memory::PlayerMemory::load();
-                m.set_video_speed(&self.player_view.video_id, Some(r));
+                m.set_video_speed(&v, Some(r));
                 let _ = m.save();
             }
-            RememberSpeed::PerChannel if !self.player_view.author.is_empty() => {
-                s.speed_by_channel.insert(self.player_view.author.clone(), r);
+            SpeedMemory::Channel(c, r) => {
+                s.speed_by_channel.insert(c, r);
             }
-            _ => {}
         }
         self.save_settings();
     }
@@ -1502,29 +1488,17 @@ impl Rig<YtHost> for AppRig {
                 self.sb_offer = None;
                 self.highlight_for.clear();
                 let memory = yt_core::memory::PlayerMemory::load();
-                let speed = match s.remember_speed {
-                    crate::settings::RememberSpeed::PerChannel => self.store.card_channel(&video_id).and_then(|ch| s.speed_by_channel.get(&ch).copied()),
-                    crate::settings::RememberSpeed::PerVideo => memory.video_speed.peek(&video_id).copied(),
-                    _ => None,
-                }
-                .unwrap_or(s.speed);
-                let speed = self.restart_rate.take().filter(|(v, _)| *v == video_id).map_or(speed, |(_, r)| r);
-                self.pending_rate = ((speed - 1.0).abs() > 0.01).then_some(speed);
+                let channel = self.store.card_channel(&video_id);
+                let reload = self.restart_rate.take().filter(|(v, _)| *v == video_id).map(|(_, r)| r);
+                let speed = crate::playback_rules::start_speed(s.remember_speed, s.speed, channel.as_deref(), &s.speed_by_channel, memory.video_speed.peek(&video_id).copied(), reload);
+                self.pending_rate = (!crate::playback_rules::is_normal(speed)).then_some(speed);
                 self.current_playlist = playlist.clone();
                 // Resume: not for short videos (under 5 minutes) or live streams unless allowed.
-                let stored = memory.positions.peek(&video_id).copied();
-                let duration_secs = stored.map(|p| p.duration).filter(|d| *d > 0).or_else(|| self.store.card_duration_ms(&video_id).map(|ms| ms / 1000));
-                let short = duration_secs.is_some_and(|d| d < 300);
-                let resume = s.resume_playback && (s.resume_short_videos || !short) && (s.resume_live || !self.store.card_is_live(&video_id));
-                let start = self
-                    .pending_start
-                    .take()
-                    .filter(|(v, _)| *v == video_id)
-                    .map(|(_, ms)| ms)
-                    // This app's own exact record first (0 = start over); YouTube's watched
-                    // percentage on the card only for videos never played here.
-                    .or_else(|| if resume { stored.map(|p| p.secs * 1000) } else { None })
-                    .or_else(|| if resume { self.store.resume_point(&video_id) } else { None });
+                let stored = memory.positions.peek(&video_id).map(|p| (p.secs, p.duration));
+                let rules = crate::playback_rules::Resume { enabled: s.resume_playback, short_videos: s.resume_short_videos, live: s.resume_live };
+                let asked = self.pending_start.take().filter(|(v, _)| *v == video_id).map(|(_, ms)| ms);
+                let card_secs = self.store.card_duration_ms(&video_id).map(|ms| ms / 1000);
+                let start = crate::playback_rules::resume_start(rules, asked, stored, card_secs, self.store.card_is_live(&video_id), self.store.resume_point(&video_id));
                 #[cfg(not(windows))]
                 {
                     let codec = match s.codec {
@@ -1549,8 +1523,7 @@ impl Rig<YtHost> for AppRig {
                 // Only a video that really played reports where it is (a BACK while resolving would
                 // otherwise store 0 over the resume point).
                 let played = matches!(v.phase, crate::player::Phase::Playing | crate::player::Phase::Paused | crate::player::Phase::Ended);
-                let keep = (!v.live || self.store.settings.resume_live) && self.history_for(&v.video_id);
-                if !v.video_id.is_empty() && v.duration_ms > 0 && played && keep {
+                if crate::playback_rules::keeps_position(&v.video_id, v.duration_ms, played, v.live, self.store.settings.resume_live, self.history_for(&v.video_id)) {
                     let mut m = yt_core::memory::PlayerMemory::load();
                     m.set_position(&v.video_id, v.position_ms / 1000, v.duration_ms / 1000);
                     let _ = m.save();
@@ -1571,9 +1544,7 @@ impl Rig<YtHost> for AppRig {
                 self.remember_speed(r);
             }
             YtFx::ToggleSpeed => {
-                let cur = if self.player_view.rate > 0.0 { self.player_view.rate } else { 1.0 };
-                let other = self.store.settings.toggle_speed;
-                let r = if (cur - 1.0).abs() > 0.01 || (other - 1.0).abs() < 0.01 { 1.0 } else { other };
+                let r = crate::playback_rules::toggle_speed(self.player_view.rate, self.store.settings.toggle_speed);
                 self.player.set_rate(r);
                 self.store.toast(format!("{}: {r}x", crate::i18n::tr("Playback speed")), self.now_ms);
             }
