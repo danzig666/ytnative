@@ -155,6 +155,13 @@ pub fn draw_focused_caption(p: Painter, m: &dyn plx_machine::machine::Measure, _
 /// `still` is what shows while it holds at the start (the line as the card had it, with its "…").
 fn marquee(p: Painter, m: &dyn plx_machine::machine::Measure, title: &str, still: Option<&str>, ix: f32, iy: f32, w: f32, size: i32) {
     let tw = CString::new(title).map_or(0.0, |c| m.width(&c, size, true));
+    // The lines were broken at the card's resting width; the focused panel is wider, so the rest
+    // may fit there whole. Then it is drawn as it is: gliding it meant a negative distance, and
+    // `clamp(0.0, dist)` panicked, which left the rest of the page undrawn.
+    if tw <= w {
+        text_raw(p, title, ix, iy, size, PANEL_FOCUS_INK, ALIGN_LEFT, true);
+        return;
+    }
     {
         const HOLD: f32 = 1.5;
         const SPEED: f32 = 70.0;
@@ -167,7 +174,7 @@ fn marquee(p: Painter, m: &dyn plx_machine::machine::Measure, title: &str, still
             mq.1.unwrap().elapsed().as_secs_f32()
         });
         let cycle = 2.0 * HOLD + dist / SPEED;
-        let off = ((t % cycle - HOLD) * SPEED).clamp(0.0, dist);
+        let off = ((t % cycle - HOLD) * SPEED).clamp(0.0, dist.max(0.0));
         if off <= 0.0 {
             if let Some(still) = still {
                 text_raw(p, still, ix, iy, size, PANEL_FOCUS_INK, ALIGN_LEFT, true);

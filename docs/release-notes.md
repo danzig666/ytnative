@@ -1,3 +1,1 @@
-- Fixed: search sorted by upload date now shows the newest videos first; YouTube stopped sorting search results by date, so the TV sorts each page of results itself
-- Fixed: Shorts in search results are recognised as Shorts again, so "Hide Shorts" hides them there and they open as Shorts
-- Changed: the "Rating" sort order is gone from the search filters, as YouTube no longer supports it
+- Fixed: focusing a card whose title only just fits the focused card hid the page title, the clock, the row arrows and the card's channel and views, and cut the title short
