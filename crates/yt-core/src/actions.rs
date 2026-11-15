@@ -78,6 +78,15 @@ pub fn remove_video_body(playlist_id: &str, video_id: &str) -> Value {
     json!({ "playlistId": playlist_id, "actions": [{ "removedVideoId": video_id, "action": "ACTION_REMOVE_VIDEO_BY_VIDEO_ID" }] })
 }
 
+/// Removes one entry of a playlist by its `setVideoId` (what the playlist's own menu sends).
+pub fn remove_entry_body(playlist_id: &str, set_video_id: &str, params: Option<&str>) -> Value {
+    let mut b = json!({ "playlistId": playlist_id, "actions": [{ "setVideoId": set_video_id, "action": "ACTION_REMOVE_VIDEO" }] });
+    if let Some(p) = params {
+        b["params"] = json!(p);
+    }
+    b
+}
+
 pub fn rename_playlist_body(playlist_id: &str, name: &str) -> Value {
     json!({ "playlistId": playlist_id, "actions": [{ "playlistName": name, "action": "ACTION_SET_PLAYLIST_NAME" }] })
 }
@@ -242,7 +251,16 @@ pub enum MenuKind {
 pub enum MenuCommand {
     Watch { video_id: String, start_secs: Option<u64> },
     Browse { browse_id: String, params: Option<String> },
-    PlaylistEdit { playlist_id: String, video_id: String, add: bool },
+    PlaylistEdit {
+        playlist_id: String,
+        video_id: String,
+        add: bool,
+        /// A removal names the entry by its place in the playlist (`setVideoId`), not the video.
+        #[serde(default)]
+        set_video_id: Option<String>,
+        #[serde(default)]
+        params: Option<String>,
+    },
     AddToPlaylist { video_id: String },
     Feedback { token: String },
     Subscribe { channel_ids: Vec<String>, params: Option<String> },
@@ -294,6 +312,8 @@ fn command_of(ep: &Value) -> MenuCommand {
             playlist_id: p["playlistId"].as_str().unwrap_or("").into(),
             video_id: vid.into(),
             add,
+            set_video_id: a["setVideoId"].as_str().map(str::to_string),
+            params: p["params"].as_str().map(str::to_string),
         };
     }
     if let Some(a) = m.get("addToPlaylistEndpoint") {
@@ -668,8 +688,12 @@ impl Session {
     pub fn run_menu_action(&mut self, a: &MenuAction) -> Result<bool> {
         match &a.command {
             MenuCommand::Feedback { token } => self.feedback(&[token])?,
-            MenuCommand::PlaylistEdit { playlist_id, video_id, add: true } => self.add_to_playlist(playlist_id, video_id)?,
-            MenuCommand::PlaylistEdit { playlist_id, video_id, add: false } => self.remove_from_playlist(playlist_id, video_id)?,
+            MenuCommand::PlaylistEdit { playlist_id, video_id, add: true, .. } => self.add_to_playlist(playlist_id, video_id)?,
+            MenuCommand::PlaylistEdit { playlist_id, set_video_id: Some(entry), params, add: false, .. } => {
+                self.signed_raw("browse/edit_playlist", remove_entry_body(playlist_id, entry, params.as_deref())).map(drop)?
+            }
+            MenuCommand::PlaylistEdit { playlist_id, video_id, add: false, .. } if !video_id.is_empty() => self.remove_from_playlist(playlist_id, video_id)?,
+            MenuCommand::PlaylistEdit { .. } => return Ok(false),
             MenuCommand::Subscribe { channel_ids, params } => {
                 for c in channel_ids {
                     self.subscribe(c, params.as_deref())?;
@@ -1003,5 +1027,57 @@ mod tests {
         let items = s.menu_panel(panel_id, params).unwrap();
         assert!(items.iter().any(|a| a.kind == MenuKind::NotInterested), "{items:?}");
         // Read-only: the feedback tokens are not sent.
+    }
+}
+
+#[cfg(test)]
+mod remove_tests {
+    use super::*;
+
+    /// A playlist's "Remove from <name>" names the entry by `setVideoId`; the removal sends it.
+    #[test]
+    fn playlist_menu_removal_keeps_the_entry_id() {
+        let ep = json!({"playlistEditEndpoint": {"actions": [{"action": "ACTION_REMOVE_VIDEO", "setVideoId": "56B44F6D10557CC6"}], "params": "CAFAAQ%3D%3D", "playlistId": "PLx"}});
+        let a = action("Remove from Ut".into(), &ep);
+        assert_eq!(a.kind, MenuKind::RemoveFromPlaylist);
+        assert_eq!(
+            a.command,
+            MenuCommand::PlaylistEdit { playlist_id: "PLx".into(), video_id: String::new(), add: false, set_video_id: Some("56B44F6D10557CC6".into()), params: Some("CAFAAQ%3D%3D".into()) }
+        );
+        assert_eq!(
+            remove_entry_body("PLx", "56B44F6D10557CC6", Some("CAFAAQ%3D%3D")),
+            json!({"playlistId": "PLx", "actions": [{"setVideoId": "56B44F6D10557CC6", "action": "ACTION_REMOVE_VIDEO"}], "params": "CAFAAQ%3D%3D"})
+        );
+        let wl = action("Remove from Watch later".into(), &json!({"playlistEditEndpoint": {"actions": [{"action": "ACTION_REMOVE_VIDEO", "setVideoId": "S"}], "playlistId": "WL"}}));
+        assert_eq!(wl.kind, MenuKind::RemoveFromWatchLater);
+    }
+}
+
+#[cfg(test)]
+mod remove_live {
+    #[test]
+    #[ignore]
+    fn live_watch_later_round_trip() {
+        use crate::actions::MenuKind;
+        crate::paths::set_data_dir("C:/Download/prog/ytnative".into());
+        let mut s = crate::session::Session::new().unwrap();
+        let vid = "jNQXAC9IVRw";
+        let items = |s: &mut crate::session::Session| -> Vec<crate::model::Item> {
+            let p = s.browse("VLWL", None).unwrap();
+            p.shelves.into_iter().flat_map(|sh| sh.items).collect()
+        };
+        let before = items(&mut s);
+        assert!(!before.iter().any(|i| i.id == vid), "already in Watch later: not touching it");
+        s.add_to_playlist("WL", vid).unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let mid = items(&mut s);
+        let it = mid.iter().find(|i| i.id == vid).expect("added");
+        let m = it.menu.iter().find(|m| matches!(m.kind, MenuKind::RemoveFromWatchLater | MenuKind::RemoveFromPlaylist)).expect("remove item").clone();
+        eprintln!("remove action: {:?} {:?}", m.label, m.command);
+        assert!(s.run_menu_action(&m).unwrap());
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let after = items(&mut s);
+        eprintln!("before {} mid {} after {}; still there: {}", before.len(), mid.len(), after.len(), after.iter().any(|i| i.id == vid));
+        assert!(!after.iter().any(|i| i.id == vid));
     }
 }

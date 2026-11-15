@@ -1681,6 +1681,26 @@ impl Rig<YtHost> for AppRig {
                     UserAction::Subscribe { channel_id, subscribe } => {
                         self.store.subscribed.insert(channel_id.clone(), *subscribe);
                     }
+                    // Taken out of a playlist or the history: the card leaves the page at once.
+                    UserAction::Menu(m)
+                        if matches!(
+                            m.kind,
+                            yt_core::actions::MenuKind::RemoveFromPlaylist
+                                | yt_core::actions::MenuKind::RemoveFromWatchLater
+                                | yt_core::actions::MenuKind::RemoveFromHistory
+                        ) =>
+                    {
+                        self.store.remove_cards_with_menu(m);
+                    }
+                    UserAction::Rate(video_id, rating) => {
+                        use yt_core::{actions::Rating, watch::LikeStatus};
+                        let s = match rating {
+                            Rating::Like => LikeStatus::Like,
+                            Rating::Dislike => LikeStatus::Dislike,
+                            Rating::None => LikeStatus::None,
+                        };
+                        self.store.rated.insert(video_id.clone(), s);
+                    }
                     UserAction::Playlist { playlist_id, video_id, add } => {
                         if let Some(o) = self.store.playlist_options.get_mut(video_id).and_then(|l| l.iter_mut().find(|o| &o.playlist_id == playlist_id)) {
                             o.contains = *add;

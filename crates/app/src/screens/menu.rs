@@ -321,7 +321,11 @@ impl MenuScreen {
                 use yt_core::actions::{MenuCommand, MenuKind};
                 let useful = matches!(
                     m.kind,
-                    MenuKind::NotInterested | MenuKind::DontRecommendChannel | MenuKind::RemoveFromHistory | MenuKind::RemoveFromWatchLater
+                    MenuKind::NotInterested
+                        | MenuKind::DontRecommendChannel
+                        | MenuKind::RemoveFromHistory
+                        | MenuKind::RemoveFromWatchLater
+                        | MenuKind::RemoveFromPlaylist
                 ) || matches!(m.command, MenuCommand::Feedback { .. });
                 if useful && !m.label.is_empty() {
                     tagged.push(("youtube", tr(&m.label).to_string(), Act::User(UserAction::Menu(m.clone()))));
@@ -416,7 +420,7 @@ impl MenuScreen {
         let mut acts = Vec::new();
         if !st.video_id.is_empty() {
             use yt_core::actions::Rating;
-            let liked = st.extras.watch.as_ref().map(|w| w.like_status);
+            let liked = crate::screens::player::rating(cx);
             let is_like = matches!(liked, Some(yt_core::watch::LikeStatus::Like));
             let is_dislike = matches!(liked, Some(yt_core::watch::LikeStatus::Dislike));
             acts.push((

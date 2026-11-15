@@ -225,6 +225,9 @@ pub struct Store {
     pub groups: Vec<(String, String)>,
     /// Subscribe state per channel id (from YouTube, updated optimistically).
     pub subscribed: HashMap<String, bool>,
+    /// The viewer's rating per video id, set when they press like / dislike (YouTube's own reads
+    /// lag behind).
+    pub rated: HashMap<String, yt_core::watch::LikeStatus>,
     /// A SponsorBlock segment is offered for skipping (OK skips it).
     pub sb_offered: bool,
     /// Playlists for the "Save to playlist" picker: video id -> options.
@@ -412,6 +415,25 @@ impl Store {
         }
         f.gen += 1;
         at..at + n
+    }
+
+    /// Takes the cards that carry menu action `m` out of every feed (the entry it removed),
+    /// keeping each row's range in step.
+    pub fn remove_cards_with_menu(&mut self, m: &yt_core::actions::MenuAction) {
+        for f in self.feeds.values_mut() {
+            while let Some(i) = f.cards.iter().position(|c| c.item.menu.contains(m)) {
+                f.cards.remove(i);
+                for s in f.shelves.iter_mut() {
+                    if s.range.start > i {
+                        s.range.start -= 1;
+                    }
+                    if s.range.end > i {
+                        s.range.end -= 1;
+                    }
+                }
+                f.gen += 1;
+            }
+        }
     }
 
     /// Loading more of row `row` failed: it stops asking (until the feed reloads).

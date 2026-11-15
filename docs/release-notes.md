@@ -1,1 +1,3 @@
-- Fixed: replies to replies load. YouTube's TV service has none, so they come from YouTube's website, up to five levels deep, with "more" pages for long threads
+- Fixed: the like and dislike buttons in the player show your rating: they change as soon as you press them, and a video you rated before shows it when it starts
+- Fixed: "Remove from Watch later" in a video's menu removes it, and the video leaves the list at once
+- New: videos in your own YouTube playlists have "Remove from <playlist>" in their menu

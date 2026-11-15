@@ -236,8 +236,13 @@ pub fn parse_watch(resp: &Value) -> WatchInfo {
         if let Some(s) = p["subscriptionStateEntity"]["subscribed"].as_bool() {
             w.subscribed = Some(s);
         }
+        // The video's own rating: other entities (its AI summary's, "<id>_ai_summaries") carry a
+        // like status too and must not overwrite it.
         if let Some(s) = p["likeStatusEntity"]["likeStatus"].as_str() {
-            w.like_status = like_status(Some(s));
+            let key = p["likeStatusEntity"]["key"].as_str().or(m["entityKey"].as_str()).unwrap_or("");
+            if entity_is_video(key, &w.video_id) {
+                w.like_status = like_status(Some(s));
+            }
         }
     }
 
@@ -323,6 +328,18 @@ pub fn parse_date(s: &str) -> Option<(i32, u32, u32)> {
         let y: i32 = w[2].parse().ok().filter(|y| (1990..=2200).contains(y))?;
         Some((y, m, d))
     })
+}
+
+/// An entity key (base64 of a message whose field 2 is the subject) names exactly this video.
+/// With no video id to compare, or a key that does not decode, it is taken as the video's.
+fn entity_is_video(key: &str, video_id: &str) -> bool {
+    if video_id.is_empty() {
+        return true;
+    }
+    match crate::comment_threads::decode_b64(key) {
+        Some(b) if b.len() >= 2 && b[0] == 0x12 => b.get(2..2 + b[1] as usize) == Some(video_id.as_bytes()),
+        _ => true,
+    }
 }
 
 fn like_status(s: Option<&str>) -> LikeStatus {
@@ -663,5 +680,32 @@ mod date_tests {
         assert_eq!(parse_date("Streamed live on Mar 3, 2021"), Some((2021, 3, 3)));
         assert_eq!(parse_date("12y ago"), None);
         assert_eq!(parse_date("3 days ago"), None);
+    }
+}
+
+#[cfg(test)]
+mod like_entity_tests {
+    use super::*;
+
+    /// A video's AI summary carries its own like status; it must not overwrite the video's.
+    #[test]
+    fn only_the_videos_own_like_status_counts() {
+        let key = |subject: &str| {
+            let mut b = vec![0x12, subject.len() as u8];
+            b.extend_from_slice(subject.as_bytes());
+            b.extend_from_slice(&[0x20, 0x3e, 0x28, 0x01]);
+            crate::search_filters::base64(&b)
+        };
+        let resp = serde_json::json!({
+            "currentVideoEndpoint": {"watchEndpoint": {"videoId": "gPNiuyYirfw"}},
+            "frameworkUpdates": {"entityBatchUpdate": {"mutations": [
+                {"entityKey": key("gPNiuyYirfw"), "payload": {"likeStatusEntity": {"key": key("gPNiuyYirfw"), "likeStatus": "LIKE"}}},
+                {"entityKey": key("gPNiuyYirfw_ai_summaries"), "payload": {"likeStatusEntity": {"key": key("gPNiuyYirfw_ai_summaries"), "likeStatus": "INDIFFERENT"}}}
+            ]}}
+        });
+        assert!(entity_is_video(&key("gPNiuyYirfw"), "gPNiuyYirfw"));
+        assert!(!entity_is_video(&key("gPNiuyYirfw_ai_summaries"), "gPNiuyYirfw"));
+        let w = parse_watch(&resp);
+        assert_eq!(w.like_status, LikeStatus::Like);
     }
 }

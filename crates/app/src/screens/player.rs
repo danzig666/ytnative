@@ -382,7 +382,7 @@ impl PlayerScreen {
             }
             OSD_LIKE | OSD_DISLIKE if !st.video_id.is_empty() => {
                 use yt_core::actions::Rating;
-                let cur = st.extras.watch.as_ref().map(|w| w.like_status);
+                let cur = rating(cx);
                 let liked = matches!(cur, Some(yt_core::watch::LikeStatus::Like));
                 let disliked = matches!(cur, Some(yt_core::watch::LikeStatus::Dislike));
                 let r = match (i, liked, disliked) {
@@ -1065,10 +1065,10 @@ impl Screen<YtHost> for PlayerScreen {
         }
         // The two rows of round buttons.
         let w = st.extras.watch.as_ref();
-        let rating = w.map(|w| w.like_status);
-        let liked = matches!(rating, Some(yt_core::watch::LikeStatus::Like));
-        let disliked = matches!(rating, Some(yt_core::watch::LikeStatus::Dislike));
-        let subscribed = w.and_then(|w| w.subscribed).unwrap_or(false);
+        let rated = rating(cx);
+        let liked = matches!(rated, Some(yt_core::watch::LikeStatus::Like));
+        let disliked = matches!(rated, Some(yt_core::watch::LikeStatus::Dislike));
+        let subscribed = subscribed_now(cx);
         use ui::icon::Kind;
         let play = if matches!(st.phase, Phase::Paused | Phase::Ended) { Kind::Play } else { Kind::Pause };
         let repeat_icon = match s.playback_mode {
@@ -1163,6 +1163,19 @@ impl Screen<YtHost> for PlayerScreen {
     }
 }
 
+
+/// The viewer's rating of the playing video: what they last pressed, else what YouTube said.
+pub fn rating(cx: &Cx<'_, YtHost>) -> Option<yt_core::watch::LikeStatus> {
+    let st = cx.views.player;
+    cx.views.store.rated.get(&st.video_id).copied().or_else(|| st.extras.watch.as_ref().map(|w| w.like_status))
+}
+
+/// Subscribed to the playing video's channel: what the viewer last pressed, else what YouTube said.
+fn subscribed_now(cx: &Cx<'_, YtHost>) -> bool {
+    let w = cx.views.player.extras.watch.as_ref();
+    let pressed = w.and_then(|w| w.subscribe_actions.channel_ids.first().or(Some(&w.channel_id))).and_then(|id| cx.views.store.subscribed.get(id).copied());
+    pressed.or_else(|| w.and_then(|w| w.subscribed)).unwrap_or(false)
+}
 
 /// The storyboard frame at the playhead, above the seek bar (while seeking).
 fn storyboard_preview(p: plx_ui::Painter, st: &crate::host::PlayerView, bar: Rect, frac: f32) {
@@ -1308,10 +1321,10 @@ impl PlayerScreen {
         const B: f32 = 60.0;
         let hot = |i: usize, r: Rect, sel: Option<usize>, ptr: Option<(f32, f32)>| sel == Some(i) || ptr.is_some_and(|(x, y)| r.contains(x, y));
         let (sel, ptr) = (if self.sugg_sel.is_some() { None } else { self.osd_sel }, self.pointer);
-        let rating = w.map(|w| w.like_status);
-        let liked = matches!(rating, Some(yt_core::watch::LikeStatus::Like));
-        let disliked = matches!(rating, Some(yt_core::watch::LikeStatus::Dislike));
-        let subscribed = w.and_then(|w| w.subscribed).unwrap_or(false);
+        let rated = rating(cx);
+        let liked = matches!(rated, Some(yt_core::watch::LikeStatus::Like));
+        let disliked = matches!(rated, Some(yt_core::watch::LikeStatus::Dislike));
+        let subscribed = subscribed_now(cx);
         let mut label: Option<(usize, Rect)> = None;
 
         // A round button on its own: grey at rest, white with a dark icon when focused.

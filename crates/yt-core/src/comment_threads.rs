@@ -256,7 +256,7 @@ fn put_int(f: u64, n: u64, out: &mut Vec<u8>) {
     put_varint(n, out);
 }
 
-fn decode_b64(s: &str) -> Option<Vec<u8>> {
+pub(crate) fn decode_b64(s: &str) -> Option<Vec<u8>> {
     let s = s.replace("%3D", "=");
     let val = |c: u8| -> Option<u32> {
         Some(match c {
