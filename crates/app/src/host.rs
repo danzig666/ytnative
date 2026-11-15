@@ -1120,8 +1120,10 @@ impl AppRig {
         }
     }
 
-    pub fn idle_blank_ms(&self) -> u32 {
-        self.store.settings.idle_blank_secs.max(30) * 1000
+    /// None: the idle blank is off.
+    pub fn idle_blank_ms(&self) -> Option<u32> {
+        let m = self.store.settings.idle_blank_mins;
+        (m > 0).then(|| m * 60_000)
     }
 
     pub fn playing(&self) -> bool {

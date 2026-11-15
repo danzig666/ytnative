@@ -527,15 +527,16 @@ fn main() {
                     None => {}
                 }
             }
-            // OLED protection: after the idle time without input (Settings: idle_blank_secs) and
+            // OLED protection: after the idle time without input (Settings: idle_blank_mins, off by default) and
             // with no video playing, the screen goes black; any input, a phone's command or a
             // video starting brings it back (the waking key itself does nothing else, see above).
             let idle_for = now.wrapping_sub(last_input);
-            if blanked && idle_for < rig.idle_blank_ms() {
+            let blank_after = rig.idle_blank_ms();
+            if blanked && blank_after.is_none_or(|ms| idle_for < ms) {
                 blanked = false;
                 plx_machine::idle::invalidate();
                 log("idle: wake");
-            } else if !blanked && foreground && idle_for >= rig.idle_blank_ms() {
+            } else if !blanked && foreground && blank_after.is_some_and(|ms| idle_for >= ms) {
                 blanked = true;
                 log("idle: blank");
                 // One opaque black frame over everything, the video plane included (a paused

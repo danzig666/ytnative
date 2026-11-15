@@ -1,6 +1,2 @@
-- Fixed: the 4K engine no longer lets the picture freeze while the sound plays on when the download falls behind; it pauses and waits for the download to catch up, then plays both in sync again
-- New: a spinner over the picture while the video waits for the download, with "Slow connection" after a moment
-- New: when the connection keeps falling behind, the video continues one quality step lower
-- Changed: videos download over up to 3 connections at once, so high quality videos play smoothly on connections YouTube slows down
-- Fixed: closing the sidebar with Right returns to the card you left, not the first one
-- Changed: long chapter names in the chapter list wrap onto more lines, so the whole name shows
+- Fixed: the screen no longer goes black after 2 minutes without input; blanking the screen when idle is now off by default
+- New: Settings, Interface, "Blank screen when idle (OLED)" turns it on after 2, 5, 10 or 30 minutes

@@ -281,6 +281,9 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
                     s.boot_section = cycle(Section::ALL, cur, d).key().into();
                 }),
                 Opt("Black background (OLED)", |s| on_off(s.black_background), |s, _| s.black_background = !s.black_background),
+                Opt("Blank screen when idle (OLED)", |s| if s.idle_blank_mins == 0 { "Off".into() } else { format!("{} {}", s.idle_blank_mins, crate::i18n::tr("minutes")) }, |s, d| {
+                    s.idle_blank_mins = cycle(&[0u32, 2, 5, 10, 30], s.idle_blank_mins, d)
+                }),
                 Opt("Screen size", |s| format!("{}%", s.ui_scale), |s, d| s.ui_scale = cycle(&[100u8, 97, 95, 92, 90], s.ui_scale, d)),
                 Opt("Titles under thumbnails", |s| on_off(s.titles_under), |s, _| s.titles_under = !s.titles_under),
                 Opt("Card size", |s| match s.card_columns { 3 => "large".into(), 5 => "small".into(), _ => "medium".into() }, |s, d| {

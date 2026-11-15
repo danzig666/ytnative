@@ -432,7 +432,9 @@ pub struct Settings {
     /// Channels / playlists pinned to the sidebar: (title, browse id, params).
     pub pinned: Vec<(String, String, Option<String>)>,
     pub boot_section: String,
-    pub idle_blank_secs: u32,
+    /// OLED protection: blank the screen after this many minutes without input while no video
+    /// plays (0 = never; the TV's own screensaver still runs).
+    pub idle_blank_mins: u32,
     pub time_24h: bool,
     /// "red" | "blue" | "green" | "purple" | "orange".
     pub accent: String,
@@ -564,7 +566,7 @@ impl Default for Settings {
             // Trending is off by default: YouTube retired the page (browse answers HTTP 400).
             sections: crate::store::Section::ALL.iter().filter(|s| **s != crate::store::Section::Trending).map(|s| s.key().to_string()).collect(),
             boot_section: "home".into(),
-            idle_blank_secs: 120,
+            idle_blank_mins: 0,
             time_24h: true,
             accent: "red".into(),
             ui_language: "system".into(),
