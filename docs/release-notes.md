@@ -1,1 +1,1 @@
-- Changed: the player's suggestions row glides to the selected video instead of jumping, the selected video lifts smoothly, and its title and details glide when they are too long, as in the video lists
+- Fixed: the coloured buttons on the remote did not do what they are set to in Settings, Remote control (they only brought up the player controls)

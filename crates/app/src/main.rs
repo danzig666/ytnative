@@ -343,8 +343,8 @@ fn main() {
                         if wcode == 505 {
                             running = false; // EXIT key
                         }
-                        if (403..=406).contains(&wcode) {
-                            let act = rig.store.settings.color_keys[(wcode - 403) as usize].clone();
+                        if let Some(i) = color_index(wcode) {
+                            let act = rig.store.settings.color_keys[i].clone();
                             if act != "none" {
                                 if state & 0xff != 0 && state & 0x100 == 0 {
                                     color_key(&act, &mut rig, &mut d);
@@ -384,8 +384,8 @@ fn main() {
                 for ev in r.poll(tick, &mut quit) {
                     // Colour buttons from the dev remote take the same remapping as the real ones.
                     if let plx_machine::machine::InputKind::Key { wcode, edge, .. } = ev.kind {
-                        if (403..=406).contains(&wcode) {
-                            let act = rig.store.settings.color_keys[(wcode - 403) as usize].clone();
+                        if let Some(i) = color_index(wcode) {
+                            let act = rig.store.settings.color_keys[i].clone();
                             if act != "none" {
                                 if edge == plx_machine::machine::Edge::Down {
                                     color_key(&act, &mut rig, &mut d);
@@ -742,6 +742,17 @@ fn media_key_over_overlay(wcode: u32, down: bool, rig: &mut AppRig, d: &Dispatch
         }
     }
     true
+}
+
+/// Which colour button (0 red, 1 green, 2 yellow, 3 blue) a key code is. The TV's remote sends
+/// LG's own codes 486 to 489 (measured on a webOS set); the web codes 403 to 406 are what the
+/// simulator and other remotes send.
+fn color_index(wcode: u32) -> Option<usize> {
+    match wcode {
+        403..=406 => Some((wcode - 403) as usize),
+        486..=489 => Some((wcode - 486) as usize),
+        _ => None,
+    }
 }
 
 fn color_key(act: &str, rig: &mut AppRig, d: &mut Dispatcher<YtHost>) {
