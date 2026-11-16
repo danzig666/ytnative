@@ -529,8 +529,11 @@ impl Focusable<YtHost> for BrowseScreen {
             }
             return self.nav.neighbour(key, dir, items.len());
         }
-        match self.grid.neighbour(&self.src(cx), key, dir) {
+        let src = self.src(cx);
+        match self.grid.neighbour(&src, key, dir) {
             Step::Edge if dir == Dir::Left => self.left_edge(key, &items, cx),
+            // A grid of videos (no sideways scrolling): Right at a row's end goes on to the next row.
+            Step::Edge if dir == Dir::Right => super::common::next_row_start(src.cards, key).map_or(Step::Edge, Step::Move),
             s => s,
         }
     }

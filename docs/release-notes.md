@@ -1,2 +1,1 @@
-- Changed: text that does not fit fades out softly where it is cut instead of ending in "…", on every video tile and everywhere else in the app (titles, menus, settings, the player, comments, chapters)
-- Changed: a search or name longer than the field fades out at its start instead of beginning with "…"
+- Changed: on pages that are a grid of videos (Subscriptions, search results, a channel's videos), Right on the last video of a row goes on to the first video of the next row

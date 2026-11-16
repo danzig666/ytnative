@@ -78,6 +78,13 @@ pub fn logo(p: Painter, x: f32, y: f32) {
 }
 
 /// A spinner (loading) or an error / empty message in place of a grid.
+/// Right on the last card of a grid row: the first card of the next row (reading order), as a
+/// page of videos with no sideways scrolling reads. `None` on the very last card.
+pub fn next_row_start(cards: &[Card], key: plx_machine::machine::FocusKey<u32>) -> Option<plx_machine::machine::FocusKey<u32>> {
+    let i = cards.iter().position(|c| c.elem == key.elem)?;
+    cards.get(i + 1).map(|c| plx_machine::machine::FocusKey { entry: key.entry, elem: c.elem })
+}
+
 pub fn empty_state(p: Painter, m: &dyn plx_machine::machine::Measure, feed: Option<&Feed>, area: Rect, now_ms: u32) {
     let (msg, sub) = match feed {
         None => ("", ""),

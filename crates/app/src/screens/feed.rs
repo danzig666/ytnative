@@ -229,8 +229,10 @@ impl Focusable<YtHost> for FeedScreen {
                 _ => Step::Edge,
             };
         }
-        match self.grid.neighbour(&self.src(cx), key, dir) {
+        let src = self.src(cx);
+        match self.grid.neighbour(&src, key, dir) {
             Step::Edge if dir == Dir::Up && self.channel().is_some() => Step::Move(FocusKey { entry: self.entry, elem: SUB_BTN }),
+            Step::Edge if dir == Dir::Right => common::next_row_start(src.cards, key).map_or(Step::Edge, Step::Move),
             s => s,
         }
     }
