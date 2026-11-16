@@ -362,14 +362,14 @@ impl Screen<YtHost> for CommentsScreen {
             Some(a) => crate::i18n::tr("Replies to {}").replace("{}", a),
             None => crate::i18n::tr("Comments").to_string(),
         };
-        ui::text_raw(p, &f.measure.fit_line(&title, PANEL.w - 80.0, 34, true).to_string_lossy(), PANEL.x + 40.0, 36.0, 34, ui::WHITE, ui::ALIGN_LEFT, true);
+        ui::text_cut(p, f.measure, &title, PANEL.x + 40.0, 36.0, PANEL.w - 80.0, 34, ui::WHITE, ui::ALIGN_LEFT, true);
         let Some(c) = cx.views.store.comments.get(&self.video_id) else {
             ui::text(p, "Loading\u{2026}", PANEL.x + PANEL.w / 2.0, 500.0, 30, ui::DIM, ui::ALIGN_CENTER, false);
             return;
         };
         if c.items.is_empty() {
             let msg = c.error.clone().unwrap_or_else(|| crate::i18n::tr(if c.loading { "Loading\u{2026}" } else { "No comments" }).to_string());
-            ui::text_raw(p, &f.measure.fit_line(&msg, PANEL.w - 80.0, 30, false).to_string_lossy(), PANEL.x + PANEL.w / 2.0, 500.0, 30, ui::DIM, ui::ALIGN_CENTER, false);
+            ui::text_cut(p, f.measure, &msg, PANEL.x + PANEL.w / 2.0, 500.0, PANEL.w - 80.0, 30, ui::DIM, ui::ALIGN_CENTER, false);
             return;
         }
         // Lay out what arrived since the last frame.
@@ -425,7 +425,7 @@ impl Screen<YtHost> for CommentsScreen {
             if cm.is_pinned {
                 head.push_str(&format!("  \u{2022}  {}", crate::i18n::tr("Pinned comment")));
             }
-            ui::text_raw(p, &f.measure.fit_line(&head, r.w - 40.0, 22, true).to_string_lossy(), r.x + 20.0, r.y + 10.0, 22, ui::DIM, ui::ALIGN_LEFT, true);
+            ui::text_cut(p, f.measure, &head, r.x + 20.0, r.y + 10.0, r.w - 40.0, 22, ui::DIM, ui::ALIGN_LEFT, true);
             for (j, line) in l.lines[i].iter().enumerate() {
                 let ly = r.y + 40.0 + j as f32 * LINE;
                 if ly + LINE < y0 - 8.0 || ly > y0 + view {

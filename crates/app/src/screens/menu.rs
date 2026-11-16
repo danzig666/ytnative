@@ -532,7 +532,7 @@ impl MenuScreen {
                 }
                 let cur = st.audio_track.clone().or_else(|| st.audio_tracks.iter().find(|t| t.2).map(|t| t.0.clone()));
                 let name = st.audio_tracks.iter().find(|t| Some(&t.0) == cur.as_ref()).map(|t| t.1.clone()).unwrap_or_else(|| tr("default").to_string());
-                format!("{}  \u{203A}", ui::ellipsize(&name, 18))
+                format!("{name}  \u{203A}")
             }
             Act::ZoomMode => format!(
                 "\u{2039}  {}  \u{203A}",
@@ -974,7 +974,7 @@ impl Screen<YtHost> for MenuScreen {
         let cx = f.cx;
         let _dim = ui::HdrDim::begin(ui::hdr_playing(cx.views.player));
         ui::fill(p, PANEL, 0.0, ui::PANEL);
-        ui::text_raw(p, &f.measure.fit_line(&self.title, PANEL.w - 104.0, 30, true).to_string_lossy(), PANEL.x + 52.0, 62.0, 30, ui::WHITE, ui::ALIGN_LEFT, true);
+        ui::text_cut(p, f.measure, &self.title, PANEL.x + 52.0, 62.0, PANEL.w - 104.0, 30, ui::WHITE, ui::ALIGN_LEFT, true);
         let rows: Vec<Row> = self
             .acts
             .iter()

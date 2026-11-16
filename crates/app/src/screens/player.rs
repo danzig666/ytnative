@@ -852,7 +852,7 @@ impl Screen<YtHost> for PlayerScreen {
                 // YouTube's common refusals in the interface's language; anything else as it came.
                 let msg = refusal_text(&msg).map_or(msg, |t| crate::i18n::tr(t).to_string());
                 for (i, line) in ui::wrap_lines(f.measure, &msg, 1300.0, 28, false, 4).iter().enumerate() {
-                    ui::text(p, line, 960.0, 510.0 + i as f32 * 42.0, 28, ui::DIM, ui::ALIGN_CENTER, false);
+                    ui::text_cut(p, f.measure, line, 960.0, 510.0 + i as f32 * 42.0, 1300.0, 28, ui::DIM, ui::ALIGN_CENTER, false);
                 }
             }
         }
@@ -928,7 +928,7 @@ impl Screen<YtHost> for PlayerScreen {
         // veil), the title stays on top.
         if let Some(sel) = self.sugg_sel {
             ui::fill(p, Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, [0.0, 0.0, 0.0, 0.82]);
-            ui::text_raw(p, &f.measure.fit_line(&st.title, 1728.0, 48, true).to_string_lossy(), 96.0, 90.0, 48, ui::WHITE, ui::ALIGN_LEFT, true);
+            ui::text_cut(p, f.measure, &st.title, 96.0, 90.0, 1728.0, 48, ui::WHITE, ui::ALIGN_LEFT, true);
             ui::text_raw(p, &st.author, 96.0, 160.0, 28, ui::DIM, ui::ALIGN_LEFT, false);
             draw_suggestions(p, f.measure, &suggestions(cx), sel, 560.0);
             common::toast(p, cx);
@@ -938,7 +938,7 @@ impl Screen<YtHost> for PlayerScreen {
         p.rect(Rect::new(0.0, 520.0, 1920.0, 260.0), 0.0, [0.0, 0.0, 0.0, 0.0], ui::dimmed([0.0, 0.0, 0.0, 0.82]), 0.0);
         ui::fill(p, Rect::new(0.0, 780.0, 1920.0, 300.0), 0.0, [0.0, 0.0, 0.0, 0.82]);
         // Title and the line under it: channel, views, age, likes, dislikes, subscribers.
-        ui::text_raw(p, &f.measure.fit_line(&st.title, 1728.0, 50, true).to_string_lossy(), 96.0, 640.0, 50, ui::WHITE, ui::ALIGN_LEFT, true);
+        ui::text_cut(p, f.measure, &st.title, 96.0, 640.0, 1728.0, 50, ui::WHITE, ui::ALIGN_LEFT, true);
         let mut byline = st.author.clone();
         if let Some(w) = &ex.watch {
             if let Some(v) = &w.short_view_count_text {
@@ -976,8 +976,7 @@ impl Screen<YtHost> for PlayerScreen {
                 let room = 1824.0 - (bx + 48.0);
                 if room > 120.0 {
                     let t = format!("\u{25B6} {}", w.chapters[i].title);
-                    let t = f.measure.fit_line(&t, room, 28, false).to_string_lossy().into_owned();
-                    ui::text_raw(p, &t, 1824.0, my, 28, ui::WHITE, ui::ALIGN_RIGHT, false);
+                    ui::text_cut(p, f.measure, &t, 1824.0, my, room, 28, ui::WHITE, ui::ALIGN_RIGHT, false);
                 }
             }
         }
@@ -1235,7 +1234,7 @@ impl PlayerScreen {
         // Title (up to two lines) and channel, views, age under it.
         let mut y = 64.0;
         for line in ui::wrap_lines(m, &st.title, 1300.0, 46, true, 2) {
-            ui::text_raw(p, &line, 96.0, y, 46, ui::WHITE, ui::ALIGN_LEFT, true);
+            ui::text_cut(p, m, &line, 96.0, y, 1300.0, 46, ui::WHITE, ui::ALIGN_LEFT, true);
             y += 58.0;
         }
         let mut byline = st.author.clone();
@@ -1257,7 +1256,7 @@ impl PlayerScreen {
         let mut left = ui::fmt_time(st.position_ms);
         if let Some(w) = w {
             if let Some(i) = yt_core::watch::chapter_at(&w.chapters, st.position_ms) {
-                left.push_str(&format!(" \u{2022} {}", ui::ellipsize(&w.chapters[i].title, 60)));
+                left.push_str(&format!(" \u{2022} {}", w.chapters[i].title));
             }
         }
         if st.live {
@@ -1267,8 +1266,7 @@ impl PlayerScreen {
             ui::text(p, "LIVE", r.x + r.w / 2.0, r.y + 5.0, 22, ui::WHITE, ui::ALIGN_CENTER, true);
         } else {
             // The time and chapter end short of the length at the right.
-            let left = m.fit_line(&left, 1728.0 - 180.0, 26, false).to_string_lossy().into_owned();
-            ui::text_raw(p, &left, 96.0, time_y, 26, ui::WHITE, ui::ALIGN_LEFT, false);
+            ui::text_cut(p, m, &left, 96.0, time_y, 1728.0 - 180.0, 26, ui::WHITE, ui::ALIGN_LEFT, false);
             ui::text(p, &ui::fmt_time(st.duration_ms), 1824.0, time_y, 26, ui::WHITE, ui::ALIGN_RIGHT, false);
         }
 
@@ -1572,11 +1570,9 @@ fn draw_suggestions_at(p: plx_ui::Painter, m: &dyn plx_machine::machine::Measure
         };
         ui::fill(p, panel, 14.0, bg);
         let tw = panel.w - 32.0;
-        let t1 = m.fit_line(&it.title, tw, 24, true).to_string_lossy().into_owned();
-        ui::text_raw(p, &t1, panel.x + 16.0, panel.y + 12.0, 24, ink, ui::ALIGN_LEFT, true);
+        ui::text_cut(p, m, &it.title, panel.x + 16.0, panel.y + 12.0, tw, 24, ink, ui::ALIGN_LEFT, true);
         let detail = it.lines.join(" \u{2022} ");
-        let d = m.fit_line(&detail, tw, 20, false).to_string_lossy().into_owned();
-        ui::text_raw(p, &d, panel.x + 16.0, panel.y + 52.0, 20, dim, ui::ALIGN_LEFT, false);
+        ui::text_cut(p, m, &detail, panel.x + 16.0, panel.y + 52.0, tw, 20, dim, ui::ALIGN_LEFT, false);
     }
 }
 

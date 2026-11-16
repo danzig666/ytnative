@@ -195,8 +195,9 @@ impl Screen<YtHost> for ChaptersScreen {
             }
             let col = if focused || active { ui::WHITE } else { ui::DIM };
             let top = r.y + (r.h - l.lines.len().max(1) as f32 * LINE_H) / 2.0 + (LINE_H - TEXT as f32 * 1.3) / 2.0;
+            let tw = self.list.rect.w - 28.0 - 24.0 - TIME_W;
             for (k, line) in l.lines.iter().enumerate() {
-                ui::text_raw(p, line, r.x + 28.0, top + k as f32 * LINE_H, TEXT, col, ui::ALIGN_LEFT, focused || active);
+                ui::text_cut(p, f.measure, line, r.x + 28.0, top + k as f32 * LINE_H, tw, TEXT, col, ui::ALIGN_LEFT, focused || active);
             }
             ui::text_raw(p, &ui::fmt_time(ch[i].1), r.x + r.w - 24.0, top, TEXT, if focused { ui::WHITE } else { ui::DIM }, ui::ALIGN_RIGHT, false);
             ui::stop(f, self.list.key(i), r, self.list.rect);

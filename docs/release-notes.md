@@ -1,1 +1,2 @@
-- Changed: a long title or detail line on the selected video uses the full width of its panel and fades softly at the cut edge instead of ending in "…", so nothing jumps when it starts to glide
+- Changed: text that does not fit fades out softly where it is cut instead of ending in "…", on every video tile and everywhere else in the app (titles, menus, settings, the player, comments, chapters)
+- Changed: a search or name longer than the field fades out at its start instead of beginning with "…"

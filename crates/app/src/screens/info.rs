@@ -26,7 +26,7 @@ const KEY_LINES: f32 = 6.0;
 const WHEEL_LINES: f32 = 4.0;
 
 /// The description wrapped to `w` px, paragraph by paragraph, at most `max` lines (a word wider
-/// than the line, a long link say, is cut across lines; the last line shown is ellipsised).
+/// than the line, a long link say, is cut across lines; the last line shown fades out).
 fn wrap(m: &dyn plx_machine::machine::Measure, s: &str, w: f32, size: i32, max: usize) -> Vec<String> {
     let mut out = Vec::new();
     for para in s.lines() {
@@ -215,7 +215,7 @@ impl Screen<YtHost> for InfoScreen {
         let st = cx.views.player;
         let w = st.extras.watch.as_ref();
         let m = f.measure;
-        ui::text_raw(p, &m.fit_line(&st.title, 1760.0, 42, true).to_string_lossy(), 80.0, 70.0, 42, ui::WHITE, ui::ALIGN_LEFT, true);
+        ui::text_cut(p, m, &st.title, 80.0, 70.0, 1760.0, 42, ui::WHITE, ui::ALIGN_LEFT, true);
         let mut meta = st.author.clone();
         if let Some(w) = w {
             for t in [&w.subscriber_count_text, &w.view_count_text, &super::common::video_age(w), &w.like_count_text].into_iter().flatten() {
@@ -224,7 +224,7 @@ impl Screen<YtHost> for InfoScreen {
         }
         // The left column (stats, description) ends short of the chapter column.
         let col_w = 1180.0 - 80.0 - 40.0;
-        ui::text_raw(p, &m.fit_line(&meta, col_w, 26, false).to_string_lossy(), 80.0, 130.0, 26, ui::DIM, ui::ALIGN_LEFT, false);
+        ui::text_cut(p, m, &meta, 80.0, 130.0, col_w, 26, ui::DIM, ui::ALIGN_LEFT, false);
         let desc = w.map(|w| w.description.as_str()).unwrap_or("");
         if self.wrapped.as_ref().is_none_or(|(d, _)| d != desc) {
             self.wrapped = Some((desc.to_string(), wrap(m, desc, col_w, DESC_SIZE, 5000)));
@@ -237,7 +237,7 @@ impl Screen<YtHost> for InfoScreen {
         let total = self.wrapped.as_ref().map_or(0, |(_, l)| l.len());
         if let Some((_, lines)) = &self.wrapped {
             for (i, line) in lines.iter().skip(first).take(vis).enumerate() {
-                ui::text_raw(p, line, 80.0, DESC_TOP + i as f32 * LINE_H, DESC_SIZE, ui::WHITE, ui::ALIGN_LEFT, false);
+                ui::text_cut(p, m, line, 80.0, DESC_TOP + i as f32 * LINE_H, col_w, DESC_SIZE, ui::WHITE, ui::ALIGN_LEFT, false);
             }
         }
         if total > vis {

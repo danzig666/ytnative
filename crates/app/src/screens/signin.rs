@@ -172,7 +172,7 @@ impl Screen<YtHost> for SignInScreen {
             }
             SignIn::Failed(e) => {
                 ui::text(p, "Sign-in didn't work.", 120.0, 330.0, 40, ui::WHITE, ui::ALIGN_LEFT, false);
-                ui::text_raw(p, &f.measure.fit_line(e, 1680.0, 28, false).to_string_lossy(), 120.0, 395.0, 28, ui::FAINT, ui::ALIGN_LEFT, false);
+                ui::text_cut(p, f.measure, e, 120.0, 395.0, 1680.0, 28, ui::FAINT, ui::ALIGN_LEFT, false);
                 ui::text(p, "Press OK to try again.", 120.0, 460.0, 30, ui::DIM, ui::ALIGN_LEFT, false);
             }
         }

@@ -269,7 +269,7 @@ impl Screen<YtHost> for FeedScreen {
         let cx = f.cx;
         let src = self.src(cx);
         if src.cards.is_empty() {
-            common::empty_state(p, cx.views.store.feed(&self.key), Rect::new(112.0, 170.0, 1700.0, 800.0), cx.views.now_ms);
+            common::empty_state(p, f.measure, cx.views.store.feed(&self.key), Rect::new(112.0, 170.0, 1700.0, 800.0), cx.views.now_ms);
         } else {
             ui::reset_focused_caption();
             self.grid.draw(f, p, &src);
@@ -287,8 +287,7 @@ impl Screen<YtHost> for FeedScreen {
         let hint = self.filters_hint(cx);
         let hint_w = hint.as_ref().map_or(0.0, |h| f.measure.width_str(h, 26, false) + 40.0);
         let room = (right - hint_w - 112.0).max(240.0);
-        let title = f.measure.fit_line(&self.title(cx), room, 46, true);
-        ui::text_raw(p, &title.to_string_lossy(), 112.0, 64.0, 46, ui::WHITE, ui::ALIGN_LEFT, true);
+        ui::text_cut(p, f.measure, &self.title(cx), 112.0, 64.0, room, 46, ui::WHITE, ui::ALIGN_LEFT, true);
         if let Some(h) = &hint {
             ui::text_raw(p, h, right, 74.0, 26, ui::FAINT, ui::ALIGN_RIGHT, false);
         }

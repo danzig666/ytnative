@@ -78,7 +78,7 @@ pub fn logo(p: Painter, x: f32, y: f32) {
 }
 
 /// A spinner (loading) or an error / empty message in place of a grid.
-pub fn empty_state(p: Painter, feed: Option<&Feed>, area: Rect, now_ms: u32) {
+pub fn empty_state(p: Painter, m: &dyn plx_machine::machine::Measure, feed: Option<&Feed>, area: Rect, now_ms: u32) {
     let (msg, sub) = match feed {
         None => ("", ""),
         Some(f) if f.loading => ("", ""),
@@ -94,7 +94,7 @@ pub fn empty_state(p: Painter, feed: Option<&Feed>, area: Rect, now_ms: u32) {
         ui::text(p, sub, area.x + area.w / 2.0, area.y + area.h / 2.0 + 10.0, 26, ui::FAINT, ui::ALIGN_CENTER, false);
     }
     if let Some(e) = feed.and_then(|f| f.error.as_deref()) {
-        ui::text_raw(p, &ui::ellipsize(e, 110), area.x + area.w / 2.0, area.y + area.h / 2.0 + 56.0, 20, ui::FAINT, ui::ALIGN_CENTER, false);
+        ui::text_cut(p, m, e, area.x + area.w / 2.0, area.y + area.h / 2.0 + 56.0, area.w - 160.0, 20, ui::FAINT, ui::ALIGN_CENTER, false);
     }
 }
 

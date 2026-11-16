@@ -131,24 +131,17 @@ pub fn draw_focused_caption(p: Painter, m: &dyn plx_machine::machine::Measure, _
     fill(p, panel, PANEL_RAD, PANEL_FOCUS);
     let (ix, iy, w) = (panel.x + PANEL_PAD, panel.y + 12.0, panel.w - 2.0 * PANEL_PAD);
     let (l1, l2, d) = caption_lines(m, &title, &detail, w0);
+    // A line that does not fit glides (`marquee` draws one that fits as it is).
     match &l2 {
-        Some(l2) if l2.ends_with('\u{2026}') => {
-            text_raw(p, &l1, ix, iy, SIZE, PANEL_FOCUS_INK, ALIGN_LEFT, true);
-            let rest = title.get(l1.len()..).unwrap_or("").trim_start();
-            marquee(p, m, rest, ix, iy + 31.0, w, TITLE_LINE);
-        }
         Some(l2) => {
             text_raw(p, &l1, ix, iy, SIZE, PANEL_FOCUS_INK, ALIGN_LEFT, true);
-            text_raw(p, l2, ix, iy + 31.0, SIZE, PANEL_FOCUS_INK, ALIGN_LEFT, true);
+            marquee(p, m, l2, ix, iy + 31.0, w, TITLE_LINE);
         }
-        None if l1 != title => marquee(p, m, &title, ix, iy, w, TITLE_LINE),
-        None => {
-            text_raw(p, &l1, ix, iy, SIZE, PANEL_FOCUS_INK, ALIGN_LEFT, true);
-        }
+        None => marquee(p, m, &l1, ix, iy, w, TITLE_LINE),
     }
     if !d.is_empty() {
         // The channel, views and age: gliding too when the whole line does not fit.
-        marquee(p, m, &detail, ix, iy + 67.0, w, DETAIL_LINE);
+        marquee(p, m, &d, ix, iy + 67.0, w, DETAIL_LINE);
     }
 }
 
@@ -189,36 +182,25 @@ fn marquee(p: Painter, m: &dyn plx_machine::machine::Measure, title: &str, ix: f
             mq.1.unwrap().elapsed().as_secs_f32()
         });
         let off = glide_offset(t, dist, HOLD, SPEED);
-        {
-            let _scope = plx_ui::screen::ClipScope::open_in(p, Rect::new(ix, iy - 4.0, w, 40.0));
-            text_raw(p, title, ix - off, iy, size, ink, ALIGN_LEFT, bold);
-        }
         // The fades come and go with the text: full while there is more than a fade's width
         // hidden on that side, gone once the line's end (or start) is in view.
-        let band = (iy - 4.0, size as f32 * 1.6);
-        edge_fade(p, ix + w - FADE, band, ((dist - off) / FADE).min(1.0), true);
-        edge_fade(p, ix, band, (off / FADE).min(1.0), false);
+        let band = |hidden: f32| (hidden / CUT_FADE).min(1.0) * CUT_FADE;
+        let (lead, trail) = (band(off), band(dist - off));
+        {
+            let _scope = plx_ui::screen::ClipScope::open_in(p, Rect::new(ix, iy - 4.0, w, 40.0));
+            text_fade_raw(
+                p,
+                title,
+                ix - off,
+                iy,
+                size,
+                ink,
+                bold,
+                (lead > 0.5).then_some((off, off + lead)),
+                (trail > 0.5).then_some((off + w - trail, off + w)),
+            );
+        }
         animating();
-    }
-}
-
-/// How wide the soft edge of a cut line is.
-const FADE: f32 = 44.0;
-
-/// A soft edge over a cut line: the panel's colour fading in towards `x + FADE` (towards the
-/// right edge) or out from `x` (at the left edge), at `strength` (0 = none).
-fn edge_fade(p: Painter, x: f32, (y, h): (f32, f32), strength: f32, rightward: bool) {
-    if strength <= 0.01 {
-        return;
-    }
-    const STEPS: usize = 22;
-    let sw = FADE / STEPS as f32;
-    for i in 0..STEPS {
-        let k = (i as f32 + 0.5) / STEPS as f32;
-        let a = if rightward { k } else { 1.0 - k };
-        let mut c = PANEL_FOCUS;
-        c[3] = strength * a * a * (3.0 - 2.0 * a);
-        fill(p, Rect::new(x + i as f32 * sw, y, sw + 0.5, h), 0.0, c);
     }
 }
 
@@ -281,7 +263,7 @@ fn caption_lines(m: &dyn plx_machine::machine::Measure, title: &str, detail: &st
         return v;
     }
     let (l1, l2) = wrap2(m, title, w, 24, true);
-    let d = if detail.is_empty() { String::new() } else { m.fit_line(detail, w, 20, false).to_string_lossy().into_owned() };
+    let d = detail.to_string();
     let v = (l1, l2, d);
     CACHE.with(|c| {
         let mut c = c.borrow_mut();
@@ -293,7 +275,9 @@ fn caption_lines(m: &dyn plx_machine::machine::Measure, title: &str, detail: &st
     v
 }
 
-/// `s` split into at most two lines of `w` px (word wrap; the second line ellipsised).
+/// `s` split into at most two lines of `w` px (word wrap). The second line is the whole rest, and
+/// a single word too long for the first is the whole title: whoever draws them cuts them
+/// ([`text_cut`]) or glides them.
 fn wrap2(m: &dyn plx_machine::machine::Measure, s: &str, w: f32, size: i32, bold: bool) -> (String, Option<String>) {
     let width = |t: &str| CString::new(t).map_or(0.0, |c| m.width(&c, size, bold));
     if width(s) <= w {
@@ -310,12 +294,10 @@ fn wrap2(m: &dyn plx_machine::machine::Measure, s: &str, w: f32, size: i32, bold
         rest = &s[first.len()..];
     }
     if first.is_empty() || rest.is_empty() {
-        // One long word: hard-cut it.
-        let cut: String = m.fit_line(s, w, size, bold).to_string_lossy().into_owned();
-        return (cut, None);
+        // One long word: one line, cut where it is drawn.
+        return (s.to_string(), None);
     }
-    let second = m.fit_line(rest.trim_start(), w, size, bold).to_string_lossy().into_owned();
-    (first.trim_end().to_string(), Some(second))
+    (first.trim_end().to_string(), Some(rest.trim_start().to_string()))
 }
 
 /// A 16:9 card style that fits `cols` cards (with `gap`) into `width`.
@@ -491,15 +473,81 @@ pub fn text_raw(p: Painter, s: &str, x: f32, y: f32, size: i32, col: [f32; 4], a
     p.text(c.as_ptr(), x, y, size, col, align, bold as i32)
 }
 
-/// `s` word-wrapped into at most `max` lines of `w` px (the last one ellipsised; a word wider
-/// than a line is cut).
+/// How wide the soft end of a cut line is: text that does not fit dissolves over this width
+/// instead of ending in "…".
+pub const CUT_FADE: f32 = 44.0;
+
+/// [`text_raw`] (left-aligned) dissolving at its ends: `lead` and `trail` are (from, to) in px
+/// from the string's left edge, the glyphs fading in over `lead` and out over `trail`.
+#[allow(clippy::too_many_arguments)]
+pub fn text_fade_raw(p: Painter, s: &str, x: f32, y: f32, size: i32, col: [f32; 4], bold: bool, lead: Option<(f32, f32)>, trail: Option<(f32, f32)>) -> f32 {
+    let col = dimmed(col);
+    let Ok(c) = CString::new(s.replace('\0', "")) else { return 0.0 };
+    p.text_fade_edges(c.as_ptr(), x, y, size, col, bold as i32, lead, trail)
+}
+
+/// The width of `s` as drawn.
+pub fn text_width(m: &dyn plx_machine::machine::Measure, s: &str, size: i32, bold: bool) -> f32 {
+    CString::new(s.replace('\0', "")).map_or(0.0, |c| m.width(&c, size, bold))
+}
+
+/// `s` on one line of at most `w` px: drawn as it is when it fits; otherwise cut at `w` with its
+/// end dissolving ([`CUT_FADE`]), never ending in "…". Centred or right-aligned text that does
+/// not fit fills its room from the left. Returns the width drawn.
+#[allow(clippy::too_many_arguments)]
+pub fn text_cut(p: Painter, m: &dyn plx_machine::machine::Measure, s: &str, x: f32, y: f32, w: f32, size: i32, col: [f32; 4], align: i32, bold: bool) -> f32 {
+    let tw = text_width(m, s, size, bold);
+    if tw <= w {
+        return text_raw(p, s, x, y, size, col, align, bold);
+    }
+    let left = match align {
+        ALIGN_CENTER => x - w / 2.0,
+        ALIGN_RIGHT => x - w,
+        _ => x,
+    };
+    let fade = CUT_FADE.min(w / 3.0);
+    text_fade_raw(p, s, left, y, size, col, bold, None, Some((w - fade, w)));
+    w
+}
+
+/// [`text_cut`] showing the END of `s` instead (a line being typed): cut at its left edge, the
+/// start dissolving in. `x` is the left of the room.
+#[allow(clippy::too_many_arguments)]
+pub fn text_cut_start(p: Painter, m: &dyn plx_machine::machine::Measure, s: &str, x: f32, y: f32, w: f32, size: i32, col: [f32; 4], bold: bool) -> f32 {
+    let tw = text_width(m, s, size, bold);
+    if tw <= w {
+        return text_raw(p, s, x, y, size, col, ALIGN_LEFT, bold);
+    }
+    let off = tw - w;
+    let fade = CUT_FADE.min(w / 3.0);
+    text_fade_raw(p, s, x - off, y, size, col, bold, Some((off, off + fade)), None);
+    w
+}
+
+/// The longest start of `s` (a byte length at a character boundary) no wider than `w` px.
+pub fn fit_prefix(m: &dyn plx_machine::machine::Measure, s: &str, w: f32, size: i32, bold: bool) -> usize {
+    let ends: Vec<usize> = s.char_indices().map(|(i, c)| i + c.len_utf8()).collect();
+    let (mut lo, mut hi) = (0usize, ends.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if text_width(m, &s[..ends[mid - 1]], size, bold) <= w {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    if lo == 0 { 0 } else { ends[lo - 1] }
+}
+
+/// `s` word-wrapped into at most `max` lines of `w` px. The last line is the whole rest (draw it
+/// with [`text_cut`], which fades it out where it is cut); a word wider than a line is broken.
 pub fn wrap_lines(m: &dyn plx_machine::machine::Measure, s: &str, w: f32, size: i32, bold: bool, max: usize) -> Vec<String> {
     let width = |t: &str| CString::new(t).map_or(0.0, |c| m.width(&c, size, bold));
     let mut lines: Vec<String> = Vec::new();
     let mut rest = s.trim();
     while !rest.is_empty() && lines.len() < max {
         if lines.len() + 1 == max || width(rest) <= w {
-            lines.push(m.fit_line(rest, w, size, bold).to_string_lossy().into_owned());
+            lines.push(rest.to_string());
             break;
         }
         let mut line = String::new();
@@ -514,14 +562,12 @@ pub fn wrap_lines(m: &dyn plx_machine::machine::Measure, s: &str, w: f32, size: 
         }
         if line.trim().is_empty() || width(line.trim_end()) > w {
             // One word wider than the line: as much of it as fits, then the rest on the next.
-            let cut = m.fit_line(rest, w, size, bold).to_string_lossy().into_owned();
-            let keep = cut.trim_end_matches('\u{2026}');
-            let n = keep.len().min(rest.len());
-            if n == 0 || !rest.starts_with(keep) {
-                lines.push(cut);
+            let n = fit_prefix(m, rest, w, size, bold);
+            if n == 0 {
+                lines.push(rest.to_string());
                 break;
             }
-            lines.push(keep.to_string());
+            lines.push(rest[..n].to_string());
             rest = rest[n..].trim_start();
             continue;
         }
@@ -555,17 +601,6 @@ pub fn text_face(p: Painter, s: &str, x: f32, y: f32, size: i32, col: [f32; 4], 
     let col = dimmed(col);
     let Ok(c) = CString::new(s.replace('\0', "")) else { return 0.0 };
     p.text(c.as_ptr(), x, y, size, col, align, (face.clamp(0, 8) << 4) | (face <= 4) as i32)
-}
-
-/// Truncates to roughly `max` characters with an ellipsis (cheap, measure-free).
-pub fn ellipsize(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let mut t: String = s.chars().take(max.saturating_sub(1)).collect();
-        t.push('\u{2026}');
-        t
-    }
 }
 
 pub fn fill(p: Painter, r: Rect, rad: f32, col: [f32; 4]) {
@@ -646,12 +681,12 @@ impl CardSource<YtHost> for CardsSrc<'_> {
             // (the page is drawn several times a frame, and a scroll draws every frame).
             let (l1, l2, d) = caption_lines(m, &c.title, &c.detail, w0);
             let ink = [1.0, 1.0, 1.0, 0.92];
-            text_raw(p, &l1, x, y, 24, ink, ALIGN_LEFT, true);
+            text_cut(p, m, &l1, x, y, w0, 24, ink, ALIGN_LEFT, true);
             if let Some(l2) = &l2 {
-                text_raw(p, l2, x, y + 31.0, 24, ink, ALIGN_LEFT, true);
+                text_cut(p, m, l2, x, y + 31.0, w0, 24, ink, ALIGN_LEFT, true);
             }
             if !d.is_empty() {
-                text_raw(p, &d, x, y + 67.0, 20, DIM, ALIGN_LEFT, false);
+                text_cut(p, m, &d, x, y + 67.0, w0, 20, DIM, ALIGN_LEFT, false);
             }
         }
         self.badge(p, i, tile);
@@ -848,7 +883,7 @@ impl VList {
         }
     }
 
-    /// Draws the visible rows; a label (and value) too long for its row is ellipsised to fit.
+    /// Draws the visible rows; a label (and value) too long for its row fades out where it is cut.
     pub fn draw(&self, p: Painter, m: &dyn plx_machine::machine::Measure, rows: &[Row], focus: Option<usize>) {
         let top = self.top_for(focus, rows.len());
         let vis = self.rows_visible();
@@ -876,13 +911,11 @@ impl VList {
             let mut vw = 0.0;
             if let Some(v) = &row.value {
                 let v = tr(v);
-                let (run, w) = m.fit_line_measured(&v, (r.w - 56.0) / 2.0, self.text_size, false);
-                vw = w;
-                text_raw(p, &run.to_string_lossy(), right, ty, self.text_size, if focused { WHITE } else { DIM }, ALIGN_RIGHT, false);
+                vw = text_width(m, &v, self.text_size, false).min((r.w - 56.0) / 2.0);
+                text_cut(p, m, &v, right, ty, vw, self.text_size, if focused { WHITE } else { DIM }, ALIGN_RIGHT, false);
             }
             let room = (right - lx - if vw > 0.0 { vw + 24.0 } else { 0.0 }).max(40.0);
-            let label = m.fit_line(&tr(&row.label), room, self.text_size, bold);
-            text_raw(p, &label.to_string_lossy(), lx, ty, self.text_size, col, ALIGN_LEFT, bold);
+            text_cut(p, m, &tr(&row.label), lx, ty, room, self.text_size, col, ALIGN_LEFT, bold);
         }
         if top > 0 {
             text(p, "\u{25B2}", self.rect.x + self.rect.w / 2.0, self.rect.y - 34.0, 22, FAINT, ALIGN_CENTER, false);
