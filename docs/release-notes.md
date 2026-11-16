@@ -1,1 +1,1 @@
-- Fixed: Settings, Account & about showed an old version number instead of the installed one
+- New: the coloured remote buttons can open the playing video's comments or its video info (Settings, Remote control)

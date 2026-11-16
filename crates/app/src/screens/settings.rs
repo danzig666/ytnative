@@ -29,7 +29,7 @@ enum Item {
 }
 
 fn cycle_key(k: &mut String, d: i32) {
-    const A: &[&str] = &["none", "search", "settings", "accounts", "subtitles", "speed"];
+    const A: &[&str] = &["none", "search", "settings", "accounts", "subtitles", "speed", "comments", "video info"];
     let i = A.iter().position(|x| *x == k).unwrap_or(0) as i32;
     *k = A[((i + d).rem_euclid(A.len() as i32)) as usize].into();
 }

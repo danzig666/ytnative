@@ -467,7 +467,7 @@ pub struct Settings {
     /// Playback engine: "system" (engine A, the TV's DASH player) or "auto" (engine B for 4K / VP9 / AV1).
     pub engine: String,
     /// Actions of the red, green, yellow and blue remote buttons ("none", "search", "settings",
-    /// "accounts", "subtitles", "speed").
+    /// "accounts", "subtitles", "speed", "comments", "video info").
     pub color_keys: [String; 4],
     /// Proxy for app traffic (http://, socks5://, socks5h://); empty = direct. Applies on restart.
     pub proxy_url: String,

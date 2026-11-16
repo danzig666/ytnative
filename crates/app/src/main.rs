@@ -780,6 +780,24 @@ fn color_key(act: &str, rig: &mut AppRig, d: &mut Dispatcher<YtHost>) {
             rig.player.set_rate(R[i]);
             rig.store.toast = Some((format!("{}x", R[i]), rig.now_ms + 2500));
         }
+        // The playing video's comments or its info page, from the player (the controls or a
+        // suggestion may be up; another panel over it is left alone).
+        "comments" | "video info" => {
+            let video_id = rig.player_view.video_id.clone();
+            let top = d.top_screen().map(|s| s.name());
+            if !rig.player.active() || video_id.is_empty() {
+                rig.store.toast = Some(("No video is playing".into(), rig.now_ms + 2500));
+            } else if top != Some("player") || ui::comments_open() || ui::menu_open() {
+                // Already open, or another panel is up: nothing to do.
+            } else if act == "comments" {
+                if rig.store.settings.child_mode {
+                    return;
+                }
+                d.request(MachineId::Nav, NavOp::Present(YtArg::Comments(video_id)));
+            } else {
+                d.request(MachineId::Nav, NavOp::Push(YtArg::Info));
+            }
+        }
         _ => {}
     }
 }
