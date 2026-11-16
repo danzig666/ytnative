@@ -108,6 +108,8 @@ pub struct MenuScreen {
     refocus: std::cell::Cell<Option<usize>>,
     /// The row of a "Delete" the first OK was pressed on (the second one deletes).
     armed: Option<usize>,
+    /// Opened over the player (a suggestion's menu): playing replaces the video that plays.
+    over_player: bool,
     state: State,
 }
 
@@ -221,6 +223,7 @@ impl MenuScreen {
             closed_row: std::cell::Cell::new(0),
             refocus: std::cell::Cell::new(None),
             armed: None,
+            over_player: false,
             state: State(title.clone()),
             title,
             acts,
@@ -229,12 +232,34 @@ impl MenuScreen {
     }
 
     pub fn card(entry: EntryId, elem: u32, cx: &Cx<'_, YtHost>) -> Self {
+        Self::of_card(entry, cx.views.store.card(elem), cx)
+    }
+
+    /// The card menu for one of the playing video's suggestions (hold OK on it in the player).
+    pub fn suggestion(entry: EntryId, video_id: &str, cx: &Cx<'_, YtHost>) -> Self {
+        let item = cx.views.player.extras.watch.as_ref().and_then(|w| {
+            w.suggestions.iter().flat_map(|s| s.items.iter()).find(|it| it.id == video_id).cloned()
+        });
+        let card = item.map(|it| crate::store::Card {
+            elem: 0, // no feed's card: not in a playlist on this TV, not a subscribed channel
+            title: it.title.clone(),
+            detail: it.lines.join(" \u{2022} "),
+            thumb: String::new(),
+            item: it,
+        });
+        let mut m = Self::of_card(entry, card.as_ref(), cx);
+        m.over_player = true;
+        m
+    }
+
+    fn of_card(entry: EntryId, card: Option<&crate::store::Card>, cx: &Cx<'_, YtHost>) -> Self {
+        let elem = card.map_or(0, |c| c.elem);
         // (kind, label, action): kinds order and hide the items per the settings.
         let mut tagged: Vec<(&'static str, String, Act)> = Vec::new();
         let mut acts = Vec::new();
         let mut kind = "play";
         let mut title = tr("Options").to_string();
-        if let Some(card) = cx.views.store.card(elem) {
+        if let Some(card) = card {
             title = card.title.clone();
             if let Some(v) = card.video_id() {
                 kind = "play";
@@ -350,6 +375,12 @@ impl MenuScreen {
         acts.extend(tagged.into_iter().filter(|(k, _, _)| !s.card_menu_hidden.iter().any(|h| h == k)).map(|(_, l, a)| (l, a)));
         acts.push((tr("Close").to_string(), Act::Close));
         Self::make(entry, title, acts)
+    }
+
+    /// Opens the player on `v`: over the player it takes the playing video's place.
+    fn play_op(&self, v: &str) -> NavOp<YtArg> {
+        let arg = YtArg::Player { video_id: v.to_string(), playlist: None };
+        if self.over_player { NavOp::Replace(arg) } else { NavOp::Push(arg) }
     }
 
     /// "Save to playlist": one row per playlist (ticked when it already holds the video): the
@@ -580,12 +611,12 @@ impl MenuScreen {
         match act {
             Act::Play(v) => {
                 fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
-                fx.push(Fx::Nav(NavOp::Push(YtArg::Player { video_id: v.clone(), playlist: None })));
+                fx.push(Fx::Nav(self.play_op(v)));
             }
             Act::PlayWith(v, from_start, no_history) => {
                 fx.push(Fx::App(YtFx::PlayOptions { video_id: v.clone(), from_start: *from_start, no_history: *no_history }));
                 fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
-                fx.push(Fx::Nav(NavOp::Push(YtArg::Player { video_id: v.clone(), playlist: None })));
+                fx.push(Fx::Nav(self.play_op(v)));
             }
             Act::UnblockChannel(ch) => {
                 let ch = ch.clone();

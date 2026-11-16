@@ -1,1 +1,1 @@
-- Changed: in the player, a video title or chapter name too long for its place glides slowly back and forth with soft edges, as the selected video in a list does
+- New: in the player's suggestions, holding OK on a video opens its menu (Play next, Save to playlist, Save to Watch later, Comments and more); a short press still plays it

@@ -45,6 +45,8 @@ pub enum YtArg {
     SignIn,
     /// Context menu for a card (by elem).
     Menu(u32),
+    /// The same menu for one of the playing video's suggestions (by video id).
+    SuggestionMenu(String),
     /// Player options panel.
     PlayerMenu,
     /// The list of playback speeds (the player's speed button, as in SmartTube).
@@ -89,6 +91,7 @@ impl ScreenArg for YtArg {
             YtArg::Chapters => 16,
             YtArg::SpeedMenu => 17,
             YtArg::NameEntry(_) => 18,
+            YtArg::SuggestionMenu(_) => 19,
         })
     }
     fn title(&self) -> Option<&str> {
@@ -286,6 +289,7 @@ impl Mounter<YtHost> for Mount {
             YtArg::Settings(page) => Box::new(screens::settings::SettingsScreen::new(entry, *page)),
             YtArg::SignIn => Box::new(screens::signin::SignInScreen::new(entry)),
             YtArg::Menu(elem) => Box::new(screens::menu::MenuScreen::card(entry, *elem, cx)),
+            YtArg::SuggestionMenu(video_id) => Box::new(screens::menu::MenuScreen::suggestion(entry, video_id, cx)),
             YtArg::PlayerMenu => Box::new(screens::menu::MenuScreen::player(entry, cx)),
             YtArg::SpeedMenu => Box::new(screens::menu::MenuScreen::speeds(entry, cx)),
             YtArg::Accounts => Box::new(screens::accounts::AccountsScreen::new(entry)),

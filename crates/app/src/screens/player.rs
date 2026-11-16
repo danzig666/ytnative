@@ -20,6 +20,9 @@ use std::borrow::Cow;
 
 const T_HIDE: TimerId = TimerId(1);
 const T_TICK: TimerId = TimerId(2);
+/// OK held this long on a suggestion opens its menu (as on a card) instead of playing it.
+const T_SUGG_HOLD: TimerId = TimerId(3);
+const SUGG_HOLD_MS: u32 = 500;
 
 const WCODE_PLAY: u32 = 450;
 const WCODE_PAUSE: u32 = 72;
@@ -54,6 +57,9 @@ pub struct PlayerScreen {
     osd_sel: Option<usize>,
     /// Keyboard selection in the suggestions row under the controls (Down from the lower row).
     sugg_sel: Option<usize>,
+    /// OK went down on this suggestion: it plays on release, or its menu opens when held. `true`
+    /// once the menu opened (the release then does nothing).
+    sugg_press: Option<(usize, bool)>,
     /// Screen dimming: the picture is dimmed now, and the last key press (views.now_ms clock).
     dimmed: bool,
     last_key_ms: u32,
@@ -83,6 +89,7 @@ impl PlayerScreen {
             pointer: None,
             osd_sel: None,
             sugg_sel: None,
+            sugg_press: None,
             dimmed: false,
             last_key_ms: 0,
             ptr_quiet: false,
@@ -456,6 +463,16 @@ impl Machine<YtHost> for PlayerScreen {
                 self.show_hud(cx, fx);
                 Handled::Yes
             }
+            // OK held on a suggestion: its menu (Play next, Save to playlist, ...).
+            ScreenEvent::Timer(T_SUGG_HOLD) => {
+                if let Some((s, false)) = self.sugg_press {
+                    self.sugg_press = Some((s, true));
+                    if let Some(it) = suggestions(cx).get(s) {
+                        fx.push(Fx::Nav(NavOp::Present(YtArg::SuggestionMenu(it.id.clone()))));
+                    }
+                }
+                Handled::Yes
+            }
             ScreenEvent::Timer(T_HIDE) => {
                 if cx.views.player.phase == Phase::Playing && self.sugg_sel.is_none() {
                     self.hud = false;
@@ -570,6 +587,21 @@ impl Machine<YtHost> for PlayerScreen {
                 }
                 // Keys take over from the pointer: its last hover no longer highlights a button.
                 self.pointer = None;
+                // OK let go on a suggestion: a short press plays it (a held one opened its menu).
+                if *key == Key::Ok && *edge != Edge::Down {
+                    if let Some((s, opened)) = self.sugg_press {
+                        if *edge == Edge::Up {
+                            self.sugg_press = None;
+                            fx.push(Fx::CancelTimer(T_SUGG_HOLD));
+                            if !opened {
+                                if let Some(it) = suggestions(cx).get(s) {
+                                    fx.push(Fx::Nav(NavOp::Replace(YtArg::Player { video_id: it.id.clone(), playlist: None })));
+                                }
+                            }
+                        }
+                        return Handled::Yes;
+                    }
+                }
                 if *edge == Edge::Up {
                     if *key == Key::Back && std::mem::take(&mut self.back_swallow_up) {
                         return Handled::Yes;
@@ -589,9 +621,11 @@ impl Machine<YtHost> for PlayerScreen {
                     match key {
                         Key::Left => self.sugg_sel = Some(s.saturating_sub(1)),
                         Key::Right => self.sugg_sel = Some((s + 1).min(n.saturating_sub(1))),
-                        Key::Ok => {
-                            if let Some(it) = suggestions(cx).get(s) {
-                                fx.push(Fx::Nav(NavOp::Replace(YtArg::Player { video_id: it.id.clone(), playlist: None })));
+                        // Plays on release; held, opens the suggestion's menu instead.
+                        Key::Ok if *edge == Edge::Down => {
+                            if s < n {
+                                self.sugg_press = Some((s, false));
+                                fx.push(Fx::Timer { id: T_SUGG_HOLD, after_ms: SUGG_HOLD_MS });
                             }
                         }
                         Key::Up | Key::Back => {
