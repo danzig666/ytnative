@@ -149,6 +149,8 @@ pub fn draw_focused_caption(p: Painter, m: &dyn plx_machine::machine::Measure, _
 }
 
 /// The gliding lines' clocks outside the cards: the playing video's title and chapter.
+pub const GLIDE_CARD_TITLE: usize = 0;
+pub const GLIDE_CARD_DETAIL: usize = 1;
 pub const GLIDE_PLAYER_TITLE: usize = 2;
 pub const GLIDE_PLAYER_CHAPTER: usize = 3;
 

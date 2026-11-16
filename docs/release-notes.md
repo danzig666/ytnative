@@ -1,1 +1,1 @@
-- New: in the player's suggestions, holding OK on a video opens its menu (Play next, Save to playlist, Save to Watch later, Comments and more); a short press still plays it
+- Changed: the player's suggestions row glides to the selected video instead of jumping, the selected video lifts smoothly, and its title and details glide when they are too long, as in the video lists

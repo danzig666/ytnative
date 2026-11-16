@@ -1574,44 +1574,125 @@ fn draw_suggestions(p: plx_ui::Painter, m: &dyn plx_machine::machine::Measure, i
     draw_suggestions_at(p, m, items, sel, y, true);
 }
 
-/// The suggestions row at `y`, with its heading above it when `heading`.
+/// The suggestions row's motion, kept between frames: where the row is scrolled to (in cards)
+/// and how far each card is lifted (0..1), eased toward the selection as the lists' cards are.
+struct SuggMotion {
+    /// The row it belongs to (first video, count): another row starts at rest.
+    key: (String, usize),
+    scroll: f32,
+    pop: Vec<f32>,
+    at: std::time::Instant,
+}
+
+thread_local! {
+    static SUGG_MOTION: std::cell::RefCell<Option<SuggMotion>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Moves `x` toward `to` for `dt` seconds (a critically damped ease without overshoot);
+/// `true` while it is still on its way.
+fn ease_to(x: &mut f32, to: f32, dt: f32) -> bool {
+    const RATE: f32 = 12.0;
+    *x += (to - *x) * (1.0 - (-RATE * dt).exp());
+    if (to - *x).abs() < 0.002 {
+        *x = to;
+        false
+    } else {
+        true
+    }
+}
+
+fn with_alpha(c: [f32; 4], a: f32) -> [f32; 4] {
+    [c[0], c[1], c[2], c[3] * a]
+}
+
+fn mix(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, a[3] + (b[3] - a[3]) * t]
+}
+
+/// The suggestions row at `y`, with its heading above it when `heading`. It glides to the
+/// selected card (one before it stays in view), the selected card lifts on an ease, and its
+/// title and detail glide when they do not fit, as a selected card in a list does.
 fn draw_suggestions_at(p: plx_ui::Painter, m: &dyn plx_machine::machine::Measure, items: &[yt_core::model::Item], sel: usize, y: f32, heading: bool) {
     const W: f32 = 400.0;
     const H: f32 = 225.0;
     const GAP: f32 = 32.0;
+    const PITCH: f32 = W + GAP;
     if heading {
         ui::text(p, "Suggestions", 96.0, y - 70.0, 36, ui::WHITE, ui::ALIGN_LEFT, true);
     }
-    let first = sel.saturating_sub(1);
-    for (k, it) in items.iter().enumerate().skip(first).take(5) {
-        let x = 96.0 + (k - first) as f32 * (W + GAP);
-        let focused = k == sel;
-        let grow = if focused { 12.0 } else { 0.0 };
+    if items.is_empty() {
+        return;
+    }
+    let target = sel.saturating_sub(1) as f32;
+    let key = (items[0].id.clone(), items.len());
+    let (scroll, pops) = SUGG_MOTION.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        let now = std::time::Instant::now();
+        let fresh = |sel: usize| {
+            let mut pop = vec![0.0; items.len()];
+            if let Some(v) = pop.get_mut(sel) {
+                *v = 1.0;
+            }
+            SuggMotion { key: key.clone(), scroll: target, pop, at: now }
+        };
+        let st = cell.get_or_insert_with(|| fresh(sel));
+        // Another row, or the row comes back after a while: it starts where it rests.
+        if st.key != key || now.duration_since(st.at).as_secs_f32() > 0.5 {
+            *st = fresh(sel);
+        }
+        let dt = now.duration_since(st.at).as_secs_f32().min(0.1);
+        st.at = now;
+        let mut moving = ease_to(&mut st.scroll, target, dt);
+        for (k, v) in st.pop.iter_mut().enumerate() {
+            moving |= ease_to(v, if k == sel { 1.0 } else { 0.0 }, dt);
+        }
+        if moving {
+            ui::animating();
+        }
+        (st.scroll, st.pop.clone())
+    });
+    let first = scroll.floor().max(0.0) as usize;
+    for (k, it) in items.iter().enumerate().skip(first).take(6) {
+        let x = 96.0 + (k as f32 - scroll) * PITCH;
+        if x > 1920.0 {
+            break;
+        }
+        // A card leaving on the left fades as it goes (the one before the selection stays).
+        let alpha = if x < 96.0 { (1.0 - (96.0 - x) / PITCH).clamp(0.0, 1.0) } else { 1.0 };
+        if alpha <= 0.0 {
+            continue;
+        }
+        let pop = pops.get(k).copied().unwrap_or(0.0);
+        let grow = 12.0 * pop;
         let r = Rect::new(x - grow, y - grow, W + 2.0 * grow, H + 2.0 * grow);
         let url = it.thumbnail.clone().unwrap_or_default();
         let (tex, _, _) = plx_ui::tex::resolve_wh_on(0, &url, 0, 0, false);
         if tex != 0 {
-            p.tex_uv(tex, [0.0, 0.0, 1.0, 1.0], r, 14.0, ui::dimmed(ui::WHITE));
+            p.tex_uv(tex, [0.0, 0.0, 1.0, 1.0], r, 14.0, with_alpha(ui::dimmed(ui::WHITE), alpha));
         } else {
-            ui::fill(p, r, 14.0, [1.0, 1.0, 1.0, 0.08]);
+            ui::fill(p, r, 14.0, [1.0, 1.0, 1.0, 0.08 * alpha]);
         }
         if let Some(b) = &it.badge {
             let bw = 14.0 * b.chars().count() as f32 + 20.0;
             let br = Rect::new(r.x + r.w - bw - 10.0, r.y + r.h - 44.0, bw, 34.0);
-            ui::fill(p, br, 6.0, [0.0, 0.0, 0.0, 0.78]);
-            ui::text(p, b, br.x + bw / 2.0, br.y + 4.0, 22, ui::WHITE, ui::ALIGN_CENTER, true);
+            ui::fill(p, br, 6.0, [0.0, 0.0, 0.0, 0.78 * alpha]);
+            ui::text(p, b, br.x + bw / 2.0, br.y + 4.0, 22, with_alpha(ui::WHITE, alpha), ui::ALIGN_CENTER, true);
         }
         let panel = Rect::new(r.x, r.y + r.h + 6.0, r.w, 104.0);
-        let (bg, ink, dim) = if focused {
-            ([0.94, 0.94, 0.96, 1.0], [0.09, 0.09, 0.11, 1.0], [0.09, 0.09, 0.11, 0.66])
-        } else {
-            ([1.0, 1.0, 1.0, 0.08], [1.0, 1.0, 1.0, 0.92], ui::DIM)
-        };
-        ui::fill(p, panel, 14.0, bg);
+        let bg = mix([1.0, 1.0, 1.0, 0.08], [0.94, 0.94, 0.96, 1.0], pop);
+        let ink = mix([1.0, 1.0, 1.0, 0.92], [0.09, 0.09, 0.11, 1.0], pop);
+        let dim = mix(ui::DIM, [0.09, 0.09, 0.11, 0.66], pop);
+        ui::fill(p, panel, 14.0, with_alpha(bg, alpha));
         let tw = panel.w - 32.0;
-        ui::text_cut(p, m, &it.title, panel.x + 16.0, panel.y + 12.0, tw, 24, ink, ui::ALIGN_LEFT, true);
         let detail = it.lines.join(" \u{2022} ");
-        ui::text_cut(p, m, &detail, panel.x + 16.0, panel.y + 52.0, tw, 20, dim, ui::ALIGN_LEFT, false);
+        let (ink, dim) = (with_alpha(ink, alpha), with_alpha(dim, alpha));
+        if k == sel {
+            ui::glide(p, m, &it.title, panel.x + 16.0, panel.y + 12.0, tw, 24, ink, true, ui::GLIDE_CARD_TITLE);
+            ui::glide(p, m, &detail, panel.x + 16.0, panel.y + 52.0, tw, 20, dim, false, ui::GLIDE_CARD_DETAIL);
+        } else {
+            ui::text_cut(p, m, &it.title, panel.x + 16.0, panel.y + 12.0, tw, 24, ink, ui::ALIGN_LEFT, true);
+            ui::text_cut(p, m, &detail, panel.x + 16.0, panel.y + 52.0, tw, 20, dim, ui::ALIGN_LEFT, false);
+        }
     }
 }
 
