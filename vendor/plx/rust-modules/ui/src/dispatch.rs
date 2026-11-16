@@ -526,6 +526,24 @@ where
             .map(|i| i.screen.name())
     }
 
+    /// Every surface that is up, bottom to top: its entry (for `NavOp::Dismiss`) and its
+    /// heartbeat word.
+    pub fn surfaces_up(&self) -> Vec<(EntryId, &'static str)> {
+        self.nav
+            .modals
+            .surfaces
+            .iter()
+            .filter(|s| s.phase != super::containers::modal::Phase::Hidden)
+            .filter_map(|s| s.entry.inst.as_ref().map(|i| (s.entry.id, i.screen.name())))
+            .collect()
+    }
+
+    /// The page stack, bottom to top: each entry (for `NavOp::PopTo`) and its screen's word
+    /// (`""` while unmounted).
+    pub fn pages(&self) -> Vec<(EntryId, &'static str)> {
+        self.nav.tabs.stack.entries.iter().map(|e| (e.id, e.inst.as_ref().map_or("", |i| i.screen.name()))).collect()
+    }
+
     /// The host fold (§6.2, §8.3) as it stands now.
     pub fn host_policy(&self) -> (HostUpdate, HostRender) {
         self.nav.modals.host_policy()

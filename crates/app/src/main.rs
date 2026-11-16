@@ -755,10 +755,37 @@ fn color_index(wcode: u32) -> Option<usize> {
     }
 }
 
+/// A colour button pressed again closes what it opened: when the top page is one of `names` (and
+/// no panel covers it), the pages from the first of them up go, back to the page under them.
+/// `false` when there is nothing of that kind on top (the button then opens it).
+fn close_pages(d: &mut Dispatcher<YtHost>, names: &[&str]) -> bool {
+    if !d.surfaces_up().is_empty() {
+        return false;
+    }
+    let pages = d.pages();
+    if !pages.last().is_some_and(|(_, n)| names.contains(n)) {
+        return false;
+    }
+    // The first of the run of such pages on top, and the page under it.
+    let mut i = pages.len() - 1;
+    while i > 0 && names.contains(&pages[i - 1].1) {
+        i -= 1;
+    }
+    match i.checked_sub(1) {
+        Some(under) => {
+            d.request(MachineId::Nav, NavOp::PopTo(pages[under].0));
+            true
+        }
+        None => false, // the root page: nothing to go back to
+    }
+}
+
 fn color_key(act: &str, rig: &mut AppRig, d: &mut Dispatcher<YtHost>) {
     match act {
         "search" if rig.store.settings.child_mode => {}
+        "search" if close_pages(d, &["search"]) => {}
         "search" => d.request(MachineId::Nav, NavOp::Push(YtArg::Search)),
+        "settings" if close_pages(d, &["settings", "pin"]) => {}
         "settings" => {
             let locked = !rig.store.settings.settings_pin.is_empty();
             d.request(
@@ -766,6 +793,7 @@ fn color_key(act: &str, rig: &mut AppRig, d: &mut Dispatcher<YtHost>) {
                 NavOp::Push(if locked { YtArg::Pin(host::PinPurpose::OpenSettings) } else { YtArg::Settings(host::SettingsPage::Root) }),
             );
         }
+        "accounts" if close_pages(d, &["accounts"]) => {}
         "accounts" => d.request(MachineId::Nav, NavOp::Push(YtArg::Accounts)),
         "subtitles" => {
             rig.store.settings.subtitles = !rig.store.settings.subtitles;
@@ -780,6 +808,15 @@ fn color_key(act: &str, rig: &mut AppRig, d: &mut Dispatcher<YtHost>) {
             rig.player.set_rate(R[i]);
             rig.store.toast = Some((format!("{}x", R[i]), rig.now_ms + 2500));
         }
+        // Pressed again: the comments (replies included) close.
+        "comments" if d.surfaces_up().iter().any(|(_, n)| *n == "comments") => {
+            for (entry, name) in d.surfaces_up().into_iter().rev() {
+                if name == "comments" {
+                    d.request(MachineId::Nav, NavOp::Dismiss(entry));
+                }
+            }
+        }
+        "video info" if close_pages(d, &["info"]) => {}
         // The playing video's comments or its info page, from the player (the controls or a
         // suggestion may be up; another panel over it is left alone).
         "comments" | "video info" => {

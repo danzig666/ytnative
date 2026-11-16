@@ -1,1 +1,1 @@
-- New: the coloured remote buttons can open the playing video's comments or its video info (Settings, Remote control)
+- Changed: pressing a coloured button again closes what it opened (comments, video info, search, settings, accounts)
