@@ -1,1 +1,1 @@
-- Changed: on pages that are a grid of videos (Subscriptions, search results, a channel's videos), Right on the last video of a row goes on to the first video of the next row
+- Changed: in the player, a video title or chapter name too long for its place glides slowly back and forth with soft edges, as the selected video in a list does

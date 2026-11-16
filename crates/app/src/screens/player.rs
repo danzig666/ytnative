@@ -928,7 +928,7 @@ impl Screen<YtHost> for PlayerScreen {
         // veil), the title stays on top.
         if let Some(sel) = self.sugg_sel {
             ui::fill(p, Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, [0.0, 0.0, 0.0, 0.82]);
-            ui::text_cut(p, f.measure, &st.title, 96.0, 90.0, 1728.0, 48, ui::WHITE, ui::ALIGN_LEFT, true);
+            ui::glide(p, f.measure, &st.title, 96.0, 90.0, 1728.0, 48, ui::WHITE, true, ui::GLIDE_PLAYER_TITLE);
             ui::text_raw(p, &st.author, 96.0, 160.0, 28, ui::DIM, ui::ALIGN_LEFT, false);
             draw_suggestions(p, f.measure, &suggestions(cx), sel, 560.0);
             common::toast(p, cx);
@@ -938,7 +938,7 @@ impl Screen<YtHost> for PlayerScreen {
         p.rect(Rect::new(0.0, 520.0, 1920.0, 260.0), 0.0, [0.0, 0.0, 0.0, 0.0], ui::dimmed([0.0, 0.0, 0.0, 0.82]), 0.0);
         ui::fill(p, Rect::new(0.0, 780.0, 1920.0, 300.0), 0.0, [0.0, 0.0, 0.0, 0.82]);
         // Title and the line under it: channel, views, age, likes, dislikes, subscribers.
-        ui::text_cut(p, f.measure, &st.title, 96.0, 640.0, 1728.0, 50, ui::WHITE, ui::ALIGN_LEFT, true);
+        ui::glide(p, f.measure, &st.title, 96.0, 640.0, 1728.0, 50, ui::WHITE, true, ui::GLIDE_PLAYER_TITLE);
         let mut byline = st.author.clone();
         if let Some(w) = &ex.watch {
             if let Some(v) = &w.short_view_count_text {
@@ -976,7 +976,11 @@ impl Screen<YtHost> for PlayerScreen {
                 let room = 1824.0 - (bx + 48.0);
                 if room > 120.0 {
                     let t = format!("\u{25B6} {}", w.chapters[i].title);
-                    ui::text_cut(p, f.measure, &t, 1824.0, my, room, 28, ui::WHITE, ui::ALIGN_RIGHT, false);
+                    if ui::text_width(f.measure, &t, 28, false) <= room {
+                        ui::text_raw(p, &t, 1824.0, my, 28, ui::WHITE, ui::ALIGN_RIGHT, false);
+                    } else {
+                        ui::glide(p, f.measure, &t, 1824.0 - room, my, room, 28, ui::WHITE, false, ui::GLIDE_PLAYER_CHAPTER);
+                    }
                 }
             }
         }
@@ -1233,8 +1237,9 @@ impl PlayerScreen {
 
         // Title (up to two lines) and channel, views, age under it.
         let mut y = 64.0;
+        // The second line holds the rest of a long title, gliding when it does not fit.
         for line in ui::wrap_lines(m, &st.title, 1300.0, 46, true, 2) {
-            ui::text_cut(p, m, &line, 96.0, y, 1300.0, 46, ui::WHITE, ui::ALIGN_LEFT, true);
+            ui::glide(p, m, &line, 96.0, y, 1300.0, 46, ui::WHITE, true, ui::GLIDE_PLAYER_TITLE);
             y += 58.0;
         }
         let mut byline = st.author.clone();
@@ -1253,12 +1258,8 @@ impl PlayerScreen {
 
         // Time and chapter over the bar, the length at its right end.
         let time_y = 788.0 + dy;
-        let mut left = ui::fmt_time(st.position_ms);
-        if let Some(w) = w {
-            if let Some(i) = yt_core::watch::chapter_at(&w.chapters, st.position_ms) {
-                left.push_str(&format!(" \u{2022} {}", w.chapters[i].title));
-            }
-        }
+        let left = ui::fmt_time(st.position_ms);
+        let chapter = w.and_then(|w| yt_core::watch::chapter_at(&w.chapters, st.position_ms).map(|i| format!(" \u{2022} {}", w.chapters[i].title)));
         if st.live {
             let behind = st.live_edge_ms.saturating_sub(st.position_ms);
             let r = Rect::new(1824.0 - 92.0, time_y - 2.0, 92.0, 36.0);
@@ -1266,7 +1267,11 @@ impl PlayerScreen {
             ui::text(p, "LIVE", r.x + r.w / 2.0, r.y + 5.0, 22, ui::WHITE, ui::ALIGN_CENTER, true);
         } else {
             // The time and chapter end short of the length at the right.
-            ui::text_cut(p, m, &left, 96.0, time_y, 1728.0 - 180.0, 26, ui::WHITE, ui::ALIGN_LEFT, false);
+            // The chapter glides when it does not fit (the time beside it stays still).
+            let tw = ui::text_raw(p, &left, 96.0, time_y, 26, ui::WHITE, ui::ALIGN_LEFT, false);
+            if let Some(ch) = &chapter {
+                ui::glide(p, m, ch, 96.0 + tw, time_y, 1728.0 - 180.0 - tw, 26, ui::WHITE, false, ui::GLIDE_PLAYER_CHAPTER);
+            }
             ui::text(p, &ui::fmt_time(st.duration_ms), 1824.0, time_y, 26, ui::WHITE, ui::ALIGN_RIGHT, false);
         }
 

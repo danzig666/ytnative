@@ -72,8 +72,11 @@ thread_local! {
     /// The focused card's caption, deferred to the end of the page draw: (card rect on screen,
     /// title, detail).
     static FOCUSED_CAPTION: std::cell::RefCell<Option<(Rect, f32, String, String)>> = const { std::cell::RefCell::new(None) };
-    /// Marquee clocks, one per line (title, detail): (text it runs for, start).
-    static MARQUEE: std::cell::RefCell<[(String, Option<std::time::Instant>); 2]> = const { std::cell::RefCell::new([(String::new(), None), (String::new(), None)]) };
+    /// Marquee clocks, one per line (card title, card detail, player title, player chapter):
+    /// (text it runs for, start).
+    static MARQUEE: std::cell::RefCell<[(String, Option<std::time::Instant>); 4]> = const {
+        std::cell::RefCell::new([(String::new(), None), (String::new(), None), (String::new(), None), (String::new(), None)])
+    };
 }
 
 thread_local! {
@@ -145,6 +148,18 @@ pub fn draw_focused_caption(p: Painter, m: &dyn plx_machine::machine::Measure, _
     }
 }
 
+/// The gliding lines' clocks outside the cards: the playing video's title and chapter.
+pub const GLIDE_PLAYER_TITLE: usize = 2;
+pub const GLIDE_PLAYER_CHAPTER: usize = 3;
+
+/// `s` on one line of `w` px at (`x`, `y`): as it is when it fits, otherwise gliding back and
+/// forth with soft edges, as the selected video's caption does. `clock` is its own
+/// ([`GLIDE_PLAYER_TITLE`], ...): a new text starts it again from the beginning.
+#[allow(clippy::too_many_arguments)]
+pub fn glide(p: Painter, m: &dyn plx_machine::machine::Measure, s: &str, x: f32, y: f32, w: f32, size: i32, ink: [f32; 4], bold: bool, clock: usize) {
+    marquee(p, m, s, x, y, w, Line { size, bold, ink, clock });
+}
+
 /// How a gliding line looks: its size, weight, ink and its own clock.
 struct Line {
     size: i32,
@@ -187,7 +202,7 @@ fn marquee(p: Painter, m: &dyn plx_machine::machine::Measure, title: &str, ix: f
         let band = |hidden: f32| (hidden / CUT_FADE).min(1.0) * CUT_FADE;
         let (lead, trail) = (band(off), band(dist - off));
         {
-            let _scope = plx_ui::screen::ClipScope::open_in(p, Rect::new(ix, iy - 4.0, w, 40.0));
+            let _scope = plx_ui::screen::ClipScope::open_in(p, Rect::new(ix, iy - size as f32 * 0.2, w, size as f32 * 1.7));
             text_fade_raw(
                 p,
                 title,
