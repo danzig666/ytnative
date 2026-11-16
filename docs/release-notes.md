@@ -1,1 +1,1 @@
-- Changed: pressing a coloured button again closes what it opened (comments, video info, search, settings, accounts)
+- New: a coloured button can open the playing video's chapters; pressed again, it closes them (Settings, Remote control)

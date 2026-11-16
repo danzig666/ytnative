@@ -808,24 +808,30 @@ fn color_key(act: &str, rig: &mut AppRig, d: &mut Dispatcher<YtHost>) {
             rig.player.set_rate(R[i]);
             rig.store.toast = Some((format!("{}x", R[i]), rig.now_ms + 2500));
         }
-        // Pressed again: the comments (replies included) close.
-        "comments" if d.surfaces_up().iter().any(|(_, n)| *n == "comments") => {
+        // Pressed again: the comments (replies included) or the chapters close.
+        "comments" | "chapters" if d.surfaces_up().iter().any(|(_, n)| *n == act) => {
             for (entry, name) in d.surfaces_up().into_iter().rev() {
-                if name == "comments" {
+                if name == act {
                     d.request(MachineId::Nav, NavOp::Dismiss(entry));
                 }
             }
         }
         "video info" if close_pages(d, &["info"]) => {}
-        // The playing video's comments or its info page, from the player (the controls or a
+        // The playing video's comments, info page or chapters, from the player (the controls or a
         // suggestion may be up; another panel over it is left alone).
-        "comments" | "video info" => {
+        "comments" | "video info" | "chapters" => {
             let video_id = rig.player_view.video_id.clone();
             let top = d.top_screen().map(|s| s.name());
             if !rig.player.active() || video_id.is_empty() {
                 rig.store.toast = Some(("No video is playing".into(), rig.now_ms + 2500));
             } else if top != Some("player") || ui::comments_open() || ui::menu_open() {
                 // Already open, or another panel is up: nothing to do.
+            } else if act == "chapters" {
+                if rig.player_view.extras.watch.as_ref().is_some_and(|w| !w.chapters.is_empty()) {
+                    d.request(MachineId::Nav, NavOp::Present(YtArg::Chapters));
+                } else {
+                    rig.store.toast = Some(("No chapters".into(), rig.now_ms + 2500));
+                }
             } else if act == "comments" {
                 if rig.store.settings.child_mode {
                     return;
