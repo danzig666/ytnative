@@ -420,7 +420,7 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
             }),
             Action("Back up settings (USB or app storage)", |fx| fx.push(Fx::App(YtFx::Act(crate::host::UserAction::Backup)))),
             Action("Restore latest backup", |fx| fx.push(Fx::App(YtFx::Act(crate::host::UserAction::Restore)))),
-            Info("Version", |_| env!("CARGO_PKG_VERSION").into()),
+            Info("Version", |_| app_version().into()),
             Info("Source", |_| "github.com/danzig666/ytnative".into()),
         ],
     }
@@ -671,5 +671,24 @@ impl Screen<YtHost> for SettingsScreen {
     }
     fn render(&self) -> RenderStrategy {
         RenderStrategy::Page
+    }
+}
+
+/// The version the package is released as (`pkg/appinfo.json`, the one place it is bumped).
+fn app_version() -> &'static str {
+    const INFO: &str = include_str!("../../pkg/appinfo.json");
+    INFO.split("\"version\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').nth(1))
+        .unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
+#[cfg(test)]
+mod version_tests {
+    #[test]
+    fn the_version_is_the_packages() {
+        let v = super::app_version();
+        assert!(v.split('.').count() == 3 && v.split('.').all(|n| n.parse::<u32>().is_ok()), "{v}");
+        assert_ne!(v, "0.1.0");
     }
 }

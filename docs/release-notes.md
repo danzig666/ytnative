@@ -1,1 +1,1 @@
-- Fixed: the coloured buttons on the remote did not do what they are set to in Settings, Remote control (they only brought up the player controls)
+- Fixed: Settings, Account & about showed an old version number instead of the installed one
