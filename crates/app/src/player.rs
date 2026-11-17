@@ -112,6 +112,9 @@ pub struct Status {
     /// Engine B: the download keeps falling behind (rebuffered twice within a minute); the host
     /// restarts the video a quality step lower.
     pub too_slow: bool,
+    /// Engine B: the TV took the video decoder back (another app or the screensaver wanted it);
+    /// the host starts the video again from here once the viewer is back.
+    pub decoder_revoked: bool,
     /// A live stream (engine B): `position_ms` is stream time, `live_edge_ms` the newest media.
     pub live: bool,
     pub live_edge_ms: u64,

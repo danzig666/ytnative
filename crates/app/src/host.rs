@@ -387,6 +387,9 @@ pub struct AppRig {
     /// Engine B refused a speed change this run: videos wanting a speed other than 1x go to the
     /// system player.
     feed_no_rate: bool,
+    /// The video to start again where it was after the TV took the decoder back, for the frame
+    /// loop: started once the app is in front again or a key is pressed.
+    pub decoder_restart: Option<(String, Option<String>)>,
     /// The video to start again on the system player (refused speed), for the frame loop.
     pub system_restart: Option<(String, Option<String>)>,
     /// The speed that restart keeps, for that video only.
@@ -446,6 +449,7 @@ impl AppRig {
             pending_rate: None,
             feed_no_rate: false,
             system_restart: None,
+            decoder_restart: None,
             restart_rate: None,
             quality_cap: None,
             name_refreshed: false,
@@ -709,6 +713,17 @@ impl AppRig {
                     self.store.toast(crate::i18n::tr("Slow connection: playing in {}p").replace("{}", &h.to_string()), now_ms);
                 }
                 _ => crate::log("slow connection: no lower quality to switch to"),
+            }
+        }
+        // The TV took the decoder back (another app, the screensaver): the same video again from
+        // here, once the viewer is back (the frame loop decides when).
+        if self.player_view.decoder_revoked && self.decoder_restart.is_none() {
+            self.player.status.lock().unwrap().decoder_revoked = false;
+            let v = self.player_view.video_id.clone();
+            if !v.is_empty() {
+                crate::log(&format!("decoder taken back: {v} restarts at {} ms when the viewer is back", self.player_view.position_ms));
+                self.pending_start = Some((v.clone(), self.player_view.position_ms));
+                self.decoder_restart = Some((v, self.current_playlist.clone()));
             }
         }
         self.raw_extras = self.player_view.extras.clone();

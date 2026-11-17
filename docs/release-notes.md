@@ -1,1 +1,1 @@
-- New: a coloured button can open the playing video's chapters; pressed again, it closes them (Settings, Remote control)
+- Fixed: after another app or the screensaver took the video decoder, "Can't play this video" stayed on screen; the video now starts again where it was when you come back or press a key

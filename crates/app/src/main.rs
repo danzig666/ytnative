@@ -292,6 +292,8 @@ fn main() {
         let mut last_input = sdl::SDL_GetTicks();
         let mut blanked = false;
         let mut foreground = true;
+        // A key or a return to the foreground since the TV took the decoder back.
+        let mut viewer_back = false;
         #[cfg(not(windows))]
         let mut plane_booted = false;
         while running {
@@ -334,6 +336,10 @@ fn main() {
                     }
                     sdl::SDL_KEYDOWN | sdl::SDL_KEYUP => {
                         let (state, wcode, sym) = input::decode_key(&ev);
+                        // BACK and EXIT leave the player instead: they start nothing again.
+                        if state & 0xff != 0 && !matches!(wcode, 461 | 482 | 505) {
+                            viewer_back = true;
+                        }
                         // An arrow key puts the pointer away (D-pad mode).
                         if state & 0xff != 0 && !cursor_hidden && sym & (1 << 30) != 0 && (79..=82).contains(&(sym & 0xff)) {
                             hide_cursor();
@@ -373,6 +379,7 @@ fn main() {
                     sdl::SDL_APP_DIDENTERFOREGROUND => {
                         log("lifecycle: foreground");
                         foreground = true;
+                        viewer_back = true;
                         wl::grab(win);
                     }
                     _ => {}
@@ -427,6 +434,21 @@ fn main() {
             if let Some((video_id, playlist)) = rig.system_restart.take() {
                 if d.top_screen().map(|s| s.name()) == Some("player") {
                     d.request(MachineId::Nav, NavOp::Replace(YtArg::Player { video_id, playlist }));
+                }
+            }
+            // The TV took the decoder back: the video starts again where it was once the app is in
+            // front and the viewer is back (a key, or a return from another app). Started while
+            // another app or the screensaver still holds the decoder, it would only be taken again.
+            if rig.decoder_restart.is_none() {
+                viewer_back = false;
+            } else if foreground && viewer_back {
+                viewer_back = false;
+                if let Some((video_id, playlist)) = rig.decoder_restart.take() {
+                    let on_player = d.pages().last().is_some_and(|(_, n)| *n == "player");
+                    if on_player && rig.player_view.video_id == video_id {
+                        log(&format!("decoder taken back: restarting {video_id}"));
+                        d.request(MachineId::Nav, NavOp::Replace(YtArg::Player { video_id, playlist }));
+                    }
                 }
             }
             if let Some(l) = lounge.as_mut() {

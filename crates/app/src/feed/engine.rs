@@ -671,6 +671,7 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
                 break Err(format!("pipeline refused the stream (error {num}: {})", s.chars().take(120).collect::<String>()));
             }
             if num == DECODER_REVOKED {
+                sh.status.lock().unwrap().decoder_revoked = true;
                 break Err("the TV took the video decoder back".into());
             }
         }
