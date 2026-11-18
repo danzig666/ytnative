@@ -59,14 +59,27 @@ pub fn now_us() -> u64 {
 #[cfg(not(windows))]
 fn data_dir() -> std::path::PathBuf {
     let id = plx_base::paths::app_id();
-    for d in [format!("/media/developer/{id}-data"), format!("/media/internal/.{id}"), "/tmp/ytnative/data".to_string()] {
-        let p = std::path::PathBuf::from(&d);
+    // Rooted TVs: next to the apps (kept as it was). Developer Mode only: the app runs as its own
+    // jail user, which cannot write there; the package ships a writable `data` folder in the app's
+    // own folder instead, which survives restarts and updates. /tmp is the last resort: it is
+    // cleared at every restart, which signed the viewer out (Settings warns about it).
+    let own = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("data")));
+    let candidates = [Some(std::path::PathBuf::from(format!("/media/developer/{id}-data"))), own, Some(std::path::PathBuf::from(format!("/media/internal/.{id}")))];
+    for p in candidates.into_iter().flatten() {
         if std::fs::create_dir_all(&p).is_ok() && std::fs::write(p.join(".probe"), b"ok").is_ok() {
+            log(&format!("data: {}", p.display()));
             return p;
         }
     }
-    std::path::PathBuf::from("/tmp")
+    DATA_TEMPORARY.store(true, std::sync::atomic::Ordering::Relaxed);
+    let p = std::path::PathBuf::from("/tmp/ytnative/data");
+    let p = if std::fs::create_dir_all(&p).is_ok() { p } else { std::path::PathBuf::from("/tmp") };
+    log(&format!("data: {} (temporary: sign-in and settings are lost at restart)", p.display()));
+    p
 }
+
+/// The app's data (sign-in, settings) lives in /tmp, which a restart clears.
+pub static DATA_TEMPORARY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Windows simulator: `%LOCALAPPDATA%\ytnative` (token, accounts, settings).
 #[cfg(windows)]

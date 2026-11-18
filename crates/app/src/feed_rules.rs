@@ -27,6 +27,9 @@ pub struct Prime {
     pub any_audio: bool,
     /// Both tracks are fed to their end (a short clip, or the end of the video).
     pub all_fed: bool,
+    /// The pipeline takes no more video for now (a seek whose keyframe lies far before its target
+    /// fills it with video that is decoded but not shown).
+    pub pipeline_full: bool,
     /// Time since priming began.
     pub waited: Duration,
 }
@@ -38,6 +41,7 @@ pub fn primed(p: Prime) -> bool {
     (p.video_ns >= PRIME_NS && (!p.has_audio || p.audio_ns >= PRIME_AUDIO_NS))
         || (p.video_ns >= PRIME_VIDEO_MAX_NS && audio_ready_or_given_up)
         || (p.all_fed && p.any_video)
+        || (p.pipeline_full && p.any_video && audio_ready_or_given_up)
 }
 
 /// A seek waiting for its first video unit: keep waiting, or give up with the reason.
@@ -207,6 +211,10 @@ mod tests {
         assert!(primed(Prime { any_audio: true, audio_ns: 100 * MS, ..lots }));
         assert!(!primed(Prime { waited: Duration::from_secs(7), ..lots }));
         assert!(primed(Prime { waited: Duration::from_secs(9), ..lots }), "audio given up on after 8 s");
+        // A seek far past its keyframe: the pipeline fills before the target is reached.
+        let full = Prime { video_ns: -2000 * MS, any_video: true, pipeline_full: true, ..p() };
+        assert!(!primed(full), "waits for the first audio");
+        assert!(primed(Prime { any_audio: true, ..full }));
     }
 
     #[test]

@@ -307,6 +307,11 @@ fn ipk() -> Result<PathBuf> {
     for (name, data, mode) in &files {
         entries.push((format!("{app_prefix}/{name}"), Some((data.clone(), *mode))));
     }
+    // A data folder anyone may write: on a TV with only Developer Mode the app runs as its own
+    // jail user and can write nowhere else that survives a restart (/tmp is cleared at boot), so
+    // the sign-in was lost every time (moonlight-tv has the same problem, issue 638). The folder
+    // survives app updates (checked on webOS 23). A path ending in '/' is a directory.
+    entries.push((format!("{app_prefix}/data/"), Some((Vec::new(), 0o777))));
     entries.push((format!("{pkg_prefix}/packageinfo.json"), Some((packageinfo, 0o644))));
     // Installed-Size in BYTES, as ares-package writes it: webOS 5's installer checks it against
     // what the package unpacks to and refuses a smaller figure ("-5: ipk verified failed").
@@ -369,6 +374,13 @@ fn targz(entries: &[(String, Option<(Vec<u8>, u32)>)], mtime: u64) -> Result<Vec
                 h.set_size(0);
                 h.set_cksum();
                 tb.append_data(&mut h, format!("{path}/"), std::io::empty())?;
+            }
+            Some((_, mode)) if path.ends_with('/') => {
+                h.set_entry_type(tar::EntryType::Directory);
+                h.set_mode(*mode);
+                h.set_size(0);
+                h.set_cksum();
+                tb.append_data(&mut h, path, std::io::empty())?;
             }
             Some((data, mode)) => {
                 h.set_entry_type(tar::EntryType::Regular);

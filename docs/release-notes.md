@@ -1,1 +1,4 @@
-- Changed: Playback writes much less to the TV's log, only downloads that come in slowly
+- Fixed: Signed out after every TV restart on TVs with only Developer Mode (no root). The app can now keep its sign-in and settings in its own folder, which survives restarts and updates
+- New: Settings › Account & about shows whether the sign-in and settings are kept across restarts
+- Fixed: A forward seek in 4K videos could stop briefly right after it, or keep loading without ever finishing
+- Changed: 4K videos download over fresh connections every few MB, so a big piece of video no longer slows down halfway

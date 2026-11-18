@@ -35,8 +35,22 @@ pub fn fetch_range_with(
     end: u64,
     sink: &mut dyn FnMut(&[u8]) -> Result<()>,
 ) -> Result<()> {
+    fetch_windows(&mut || http.clone(), url, user_agent, start, end, sink)
+}
+
+/// [`fetch_range_with`] taking its client per window of parallel requests from `client`: a new
+/// client opens new connections, which YouTube does not slow down yet.
+fn fetch_windows(
+    client: &mut dyn FnMut() -> reqwest::blocking::Client,
+    url: &str,
+    user_agent: &str,
+    start: u64,
+    end: u64,
+    sink: &mut dyn FnMut(&[u8]) -> Result<()>,
+) -> Result<()> {
     let mut at = start;
     while at <= end {
+        let http = &client();
         let parts = plan_parts(at, end);
         let results: Vec<Result<Vec<u8>>> = if parts.len() == 1 {
             vec![fetch_retry(http, url, user_agent, parts[0].0, parts[0].1)]
@@ -151,6 +165,7 @@ pub struct RangedTrack {
     pub demux: Box<dyn Demuxer>,
     pub user_agent: String,
     http: reqwest::blocking::Client,
+    fresh: Option<fn() -> reqwest::Result<reqwest::blocking::Client>>,
 }
 
 impl RangedTrack {
@@ -158,6 +173,13 @@ impl RangedTrack {
     /// down to about the video's bitrate once it has carried a few tens of MB).
     pub fn set_http(&mut self, http: reqwest::blocking::Client) {
         self.http = http;
+    }
+
+    /// Segments are downloaded over new connections for every window of parallel requests (a
+    /// few MB), made by `make`: YouTube slows a connection down once it has carried some tens of
+    /// MB, and a 4K60 HDR segment alone can be 50 MB. A failed `make` keeps the current client.
+    pub fn set_fresh_connections(&mut self, make: fn() -> reqwest::Result<reqwest::blocking::Client>) {
+        self.fresh = Some(make);
     }
 
     /// `fmt` is one `adaptiveFormats` entry with `url`, `initRange`, `indexRange`.
@@ -191,7 +213,7 @@ impl RangedTrack {
                 s.size = content_length - s.offset;
             }
         }
-        Ok(RangedTrack { url, itag, container, content_length, segments, demux, user_agent: user_agent.to_string(), http })
+        Ok(RangedTrack { url, itag, container, content_length, segments, demux, user_agent: user_agent.to_string(), http, fresh: None })
     }
 
     pub fn track(&self) -> &TrackInfo {
@@ -250,9 +272,10 @@ impl RangedTrack {
             bail!("segment {i} has unknown size");
         }
         self.demux.reset_to(s.offset);
-        let (http, url, ua) = (self.http.clone(), self.url.clone(), self.user_agent.clone());
+        let (http, url, ua, fresh) = (self.http.clone(), self.url.clone(), self.user_agent.clone(), self.fresh);
         let demux = &mut self.demux;
-        fetch_range_with(&http, &url, &ua, s.offset, s.offset + s.size - 1, &mut |d| {
+        let mut client = || fresh.and_then(|f| f().ok()).unwrap_or_else(|| http.clone());
+        fetch_windows(&mut client, &url, &ua, s.offset, s.offset + s.size - 1, &mut |d| {
             if abort() {
                 return Err(Aborted.into());
             }

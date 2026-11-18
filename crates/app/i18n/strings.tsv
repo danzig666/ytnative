@@ -495,3 +495,6 @@ Press OK again to delete {}	Nyomd meg újra az OK gombot a(z) {} törléséhez	D
 Slow connection	Lassú kapcsolat	Langsame Verbindung	Conexión lenta	Connexion lente	Медленное соединение
 Slow connection: playing in {}p	Lassú kapcsolat: lejátszás {}p minőségben	Langsame Verbindung: Wiedergabe in {}p	Conexión lenta: reproduciendo en {}p	Connexion lente : lecture en {}p	Медленное соединение: воспроизведение в {}p
 No video is playing	Nem megy videó	Es läuft kein Video	No se está reproduciendo ningún vídeo	Aucune vidéo en lecture	Видео не воспроизводится
+Sign-in and settings	Bejelentkezés és beállítások	Anmeldung und Einstellungen	Sesión y ajustes	Connexion et paramètres	Вход и настройки
+Kept across restarts	Újraindítás után is megmarad	Bleiben nach einem Neustart erhalten	Se conservan al reiniciar	Conservés après un redémarrage	Сохраняются после перезапуска
+Lost at every restart (no writable folder)	Minden újraindításkor elvész (nincs írható mappa)	Gehen bei jedem Neustart verloren (kein beschreibbarer Ordner)	Se pierden en cada reinicio (sin carpeta con permiso de escritura)	Perdus à chaque redémarrage (aucun dossier accessible en écriture)	Теряются при каждом перезапуске (нет папки для записи)

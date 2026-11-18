@@ -261,6 +261,11 @@ pub fn run_ranged(fmt: serde_json::Value, ua: String, lane: Arc<Lane>, ctl: Arc<
         Err(e) => return lane.fail(format!("{e:#}")),
     };
     lane.set_track(info);
+    // Fresh connections every few MB: YouTube paces a connection to about the video's average
+    // bitrate after its first tens of MB, too slow for the busy parts of a 4K60 HDR video
+    // (measured: 20-30 Mbit/s on a kept connection, 280 Mbit/s on a new one; a 30 MB segment
+    // on one new connection still slowed down halfway).
+    track.set_fresh_connections(ranged_client);
     let max_bytes = if kind == Kind::Video { VIDEO_MAX_BYTES } else { AUDIO_MAX_BYTES };
     let lead = if kind == Kind::Audio { AUDIO_SEEK_LEAD_NS } else { 0 };
     let (mut gen, target) = ctl.current();
@@ -286,12 +291,6 @@ pub fn run_ranged(fmt: serde_json::Value, ua: String, lane: Arc<Lane>, ctl: Arc<
         }
         if !lane.wait_room(&ctl, max_bytes) {
             continue;
-        }
-        // Every segment on fresh connections: YouTube paces a connection to about the video's
-        // average bitrate after its first tens of MB, too slow for the busy parts of a 4K60 HDR
-        // video (measured: 20-30 Mbit/s on a kept connection, 280 Mbit/s on a new one).
-        if let Ok(c) = ranged_client() {
-            track.set_http(c);
         }
         let fetch_start = Instant::now();
         // Give up between two ranges when the session stops or a seek starts a new generation.

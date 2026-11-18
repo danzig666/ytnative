@@ -420,6 +420,11 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
             }),
             Action("Back up settings (USB or app storage)", |fx| fx.push(Fx::App(YtFx::Act(crate::host::UserAction::Backup)))),
             Action("Restore latest backup", |fx| fx.push(Fx::App(YtFx::Act(crate::host::UserAction::Restore)))),
+            // Developer Mode on webOS 1-3 (or a package without its data folder): nothing the app
+            // may write survives a restart, so say so instead of signing the viewer out silently.
+            Info("Sign-in and settings", |_| {
+                crate::i18n::tr(if crate::DATA_TEMPORARY.load(std::sync::atomic::Ordering::Relaxed) { "Lost at every restart (no writable folder)" } else { "Kept across restarts" }).into()
+            }),
             Info("Version", |_| app_version().into()),
             Info("Source", |_| "github.com/danzig666/ytnative".into()),
         ],

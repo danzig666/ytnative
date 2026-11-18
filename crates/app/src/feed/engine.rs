@@ -486,6 +486,9 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
     // Since when the current priming (Load or seek) has been waiting.
     let mut prime_since = Instant::now();
     let mut base = 0i64; // fed-timeline anchor of the current Load/seek
+    // Fed time priming counts from: the seek target, not its keyframe (the video between the two
+    // is decoded but not shown, so it is no buffer).
+    let mut prime_from = 0i64;
     let mut floor = shift; // content-time: no audio before the video anchor
     let mut vf = LaneFeed::default();
     let mut af = LaneFeed::default();
@@ -661,6 +664,7 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
                 base = 0;
             }
             floor = k;
+            prime_from = (t - shift).max(base);
             seeking = None;
             crate::log(&format!("feed: seek to {} ms landed on keyframe {} ms ({})", t / 1_000_000, k / 1_000_000, if landed { "Seek" } else { "reload" }));
         }
@@ -773,14 +777,16 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
         let est = if pres != PRES_NONE {
             Some(pres)
         } else {
-            play_at.filter(|t| t.elapsed() > Duration::from_secs(2)).map(|t| base + (t.elapsed().as_nanos() as f64 * rate as f64) as i64)
+            play_at.filter(|t| t.elapsed() > Duration::from_secs(2)).map(|t| base.max(prime_from) + (t.elapsed().as_nanos() as f64 * rate as f64) as i64)
         };
+        // Ahead of the seek target, not of its keyframe: priming counts from the target, and a
+        // keyframe more than ~3 s before it left priming waiting for video it could never feed.
         let mut vlimit = if priming {
-            base + BLIND_AHEAD_NS
+            base.max(prime_from) + BLIND_AHEAD_NS
         } else {
             match est {
                 Some(p) => p + MAX_FEED_AHEAD_NS,
-                None => base + BLIND_AHEAD_NS,
+                None => base.max(prime_from) + BLIND_AHEAD_NS,
             }
         };
         // ---- a stalled picture ----
@@ -865,8 +871,8 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
         };
 
         // ---- prime → Play ----
-        let vbuf = vf.fed_max.map_or(0, |m| m - base);
-        let abuf = af.fed_max.map_or(0, |m| m - base);
+        let vbuf = vf.fed_max.map_or(0, |m| m - base.max(prime_from));
+        let abuf = af.fed_max.map_or(0, |m| m - base.max(prime_from));
         let v_done = video.drained() && vf.pending.is_none();
         let a_done = !has_audio || (audio.drained() && af.pending.is_none());
         let prime = Prime {
@@ -876,6 +882,7 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
             any_video: vf.fed_max.is_some(),
             any_audio: af.fed_max.is_some(),
             all_fed: v_done && a_done,
+            pipeline_full: vf.full,
             waited: prime_since.elapsed(),
         };
         if priming && seeking.is_none() && primed(prime) {
