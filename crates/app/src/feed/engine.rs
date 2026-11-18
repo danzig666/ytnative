@@ -236,6 +236,8 @@ struct LaneFeed {
     pending: Option<Unit>,
     fed_max: Option<i64>,
     errors: u32,
+    /// The pipeline refused the last unit: it holds all it can for now.
+    full: bool,
 }
 
 /// Feeds one lane up to `limit` (fed timeline). Returns the number of units fed, or an error.
@@ -259,10 +261,12 @@ fn feed_lane(lane: &Lane, lf: &mut LaneFeed, es: i32, shift: i64, floor: i64, li
             FeedReply::Ok => {
                 // The limit below is for consecutive failures, not for sporadic ones over a long video.
                 lf.errors = 0;
+                lf.full = false;
                 lf.fed_max = Some(lf.fed_max.map_or(fed, |m| m.max(fed)));
                 n += 1;
             }
             FeedReply::BufferFull => {
+                lf.full = true;
                 lf.pending = Some(u);
                 break;
             }
@@ -792,7 +796,9 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
         if let Some(since) = rebuffering {
             // Fed on while paused; playback resumes with enough at hand.
             vlimit = vlimit.max(pres.max(base) + crate::feed_rules::REBUFFER_TARGET_NS + 1_000_000_000);
-            if rebuffered(v_ahead, v_all_fed) {
+            // A very high bitrate (4K60 HDR) fills the pipeline before the wanted seconds are
+            // in: waiting longer could never end, so a full pipeline is enough.
+            if rebuffered(v_ahead, v_all_fed, vf.full) {
                 rebuffering = None;
                 pres_seen.1 = Instant::now();
                 set_buffering(sh, false);

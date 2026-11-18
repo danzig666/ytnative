@@ -1,1 +1,2 @@
-- Fixed: A long video title in the lists no longer jumps to the middle of its glide when you come back to its card, or when pressing OK
+- Fixed: Very high bitrate videos (4K60 HDR) kept stopping with "Slow connection" on a fast connection, and a stop could last until you left the video
+- Changed: Video downloads in big pieces now start playing as they arrive, with more room to read ahead

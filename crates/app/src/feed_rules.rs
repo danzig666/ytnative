@@ -85,9 +85,10 @@ pub fn stall(stalled_for: Duration, download_empty: bool, video_ahead_ns: i64) -
     }
 }
 
-/// Whether a rebuffering pause may end: enough video fed past the picture, or all of it.
-pub fn rebuffered(video_ahead_ns: i64, all_fed: bool) -> bool {
-    all_fed || video_ahead_ns >= REBUFFER_TARGET_NS
+/// Whether a rebuffering pause may end: enough video fed past the picture, all of it, or as
+/// much as the pipeline takes (some video ahead and the pipeline full).
+pub fn rebuffered(video_ahead_ns: i64, all_fed: bool, pipeline_full: bool) -> bool {
+    all_fed || video_ahead_ns >= REBUFFER_TARGET_NS || (pipeline_full && video_ahead_ns > 0)
 }
 
 /// Two rebufferings within this time: the connection cannot carry this quality.
@@ -172,9 +173,12 @@ mod stall_tests {
 
     #[test]
     fn rebuffering_ends_with_three_seconds_ahead_or_at_the_end() {
-        assert!(!rebuffered(2_999_000_000, false));
-        assert!(rebuffered(3_000_000_000, false));
-        assert!(rebuffered(0, true));
+        assert!(!rebuffered(2_999_000_000, false, false));
+        assert!(rebuffered(3_000_000_000, false, false));
+        assert!(rebuffered(0, true, false));
+        // The pipeline takes no more: waiting for the full three seconds would never end.
+        assert!(rebuffered(1_200_000_000, false, true));
+        assert!(!rebuffered(0, false, true));
     }
 }
 

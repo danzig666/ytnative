@@ -227,6 +227,12 @@ impl RangedTrack {
         Ok(out)
     }
 
+    /// Like [`fetch_segment_abortable`](Self::fetch_segment_abortable), handing units over as the
+    /// data arrives instead of after the whole segment (a 4K segment can be 50 MB).
+    pub fn fetch_segment_streaming(&mut self, i: usize, abort: &dyn Fn() -> bool, sink: &mut dyn FnMut(AccessUnit) -> Result<()>) -> Result<()> {
+        self.fetch_segment_inner(i, abort, sink)
+    }
+
     /// Like [`fetch_segment`](Self::fetch_segment), handing units over as each range arrives.
     pub fn fetch_segment_with(&mut self, i: usize, sink: &mut dyn FnMut(AccessUnit) -> Result<()>) -> Result<()> {
         self.fetch_segment_inner(i, &|| false, sink)

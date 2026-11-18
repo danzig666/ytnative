@@ -16,8 +16,9 @@ use yt_core::demux::{AccessUnit, Container, Demuxer, Kind, TrackInfo};
 
 /// How far (content time) a fetcher reads ahead of the playhead.
 pub const READ_AHEAD_NS: i64 = 30_000_000_000;
-/// Byte cap per lane (4K VP9 runs ~2.5 MB/s).
-pub const VIDEO_MAX_BYTES: usize = 48 << 20;
+/// Byte cap per lane (4K VP9 runs ~2.5 MB/s; 4K60 HDR AV1 averages 3.5 MB/s with 6.7 s segments
+/// of up to 54 MB, so 48 MB held barely one of them).
+pub const VIDEO_MAX_BYTES: usize = 80 << 20;
 pub const AUDIO_MAX_BYTES: usize = 6 << 20;
 /// On a seek, audio starts this much before the target, so it covers the video keyframe at or
 /// before the target (YouTube GOPs are at most ~5 s); the engine drops audio before that keyframe.
@@ -256,12 +257,15 @@ pub fn run_ranged(fmt: serde_json::Value, ua: String, lane: Arc<Lane>, ctl: Arc<
     let mut trim = Trim { target: Some(target) };
     let mut failures = 0;
     let mut renewals = 0;
+    // Units of `seg` already in the lane: a retry after a broken download skips them.
+    let mut skip = 0usize;
     while !ctl.stop.load(Relaxed) {
         let (g, t) = ctl.current();
         if g != gen {
             gen = g;
             seg = track.segment_at(t - lead);
             trim = Trim { target: Some(t) };
+            skip = 0;
         }
         if seg >= track.segments.len() {
             lane.finish(gen);
@@ -273,6 +277,47 @@ pub fn run_ranged(fmt: serde_json::Value, ua: String, lane: Arc<Lane>, ctl: Arc<
         }
         // Give up between two ranges when the session stops or a seek starts a new generation.
         let abort = || ctl.stop.load(Relaxed) || ctl.gen.load(Acquire) != gen;
+        if trim.target.is_none() {
+            // Units go to the lane as they arrive: playback can use the start of a big segment
+            // while the rest still downloads, instead of waiting for all of it.
+            let mut seen = 0usize;
+            let r = track.fetch_segment_streaming(seg, &abort, &mut |au| {
+                seen += 1;
+                if seen <= skip {
+                    return Ok(());
+                }
+                let u = Unit { pts_ns: au.pts_ns, dur_ns: au.duration_ns, key: au.keyframe, data: framer.frame(&au) };
+                if !lane.push(gen, u) {
+                    return Err(yt_core::demux::ranged::Aborted.into());
+                }
+                Ok(())
+            });
+            match r {
+                Ok(()) => {
+                    failures = 0;
+                    renewals = 0;
+                    skip = 0;
+                    seg += 1;
+                }
+                Err(e) if e.is::<yt_core::demux::ranged::Aborted>() => {}
+                Err(e) => {
+                    skip = skip.max(seen);
+                    crate::log(&format!("feed: itag {} segment {seg}: {e:#}", track.itag));
+                    if url_refused(&format!("{e:#}")) && renewals < 3 {
+                        renewals += 1;
+                        if renew_url(&mut track, &refresh) {
+                            continue;
+                        }
+                    }
+                    failures += 1;
+                    if failures >= 5 {
+                        return lane.fail(format!("itag {}: {e:#}", track.itag));
+                    }
+                    std::thread::sleep(Duration::from_millis(500 * failures));
+                }
+            }
+            continue;
+        }
         match track.fetch_segment_abortable(seg, &abort) {
             Err(e) if e.is::<yt_core::demux::ranged::Aborted>() => continue,
             Ok(aus) => {
