@@ -710,8 +710,11 @@ impl AppRig {
         if self.player_view.too_slow && self.system_restart.is_none() {
             self.player.status.lock().unwrap().too_slow = false;
             let v = self.player_view.video_id.clone();
-            match crate::feed_rules::lower_quality(self.player_view.width, self.player_view.height) {
-                Some(h) if !v.is_empty() => {
+            // A quality the viewer chose for this video stays, slow or not.
+            let chosen = self.quality_pick.as_ref().filter(|(pv, _)| *pv == v).map(|(_, h)| *h);
+            match (chosen, crate::feed_rules::lower_quality(self.player_view.width, self.player_view.height)) {
+                (Some(c), _) => crate::log(&format!("slow connection: keeping the chosen {c}p")),
+                (None, Some(h)) if !v.is_empty() => {
                     crate::log(&format!("slow connection: restarting {v} at {h}p"));
                     self.quality_cap = Some((v.clone(), h));
                     self.pending_start = Some((v.clone(), self.player_view.position_ms));

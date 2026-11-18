@@ -1,2 +1,5 @@
-- Fixed: Very high bitrate videos (4K60 HDR) kept stopping with "Slow connection" on a fast connection, and a stop could last until you left the video
-- Changed: Video downloads in big pieces now start playing as they arrive, with more room to read ahead
+- Fixed: Very high bitrate videos (4K60 HDR) kept stopping with "Slow connection" on a fast connection. YouTube slows a download connection down after its first few tens of MB, so every piece of the video now comes over a fresh connection
+- Fixed: A stop to load more video could last until you left the video
+- Fixed: A quality chosen in the player's options is no longer lowered when the connection seems slow
+- Changed: Big pieces of video start playing as they arrive, with more room to read ahead
+- Thanks to Digital Foundry for their HDR GTA VI video, which made this fix possible :)

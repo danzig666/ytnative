@@ -825,6 +825,18 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
                 }
                 Stall::Rebuffer => {
                     crate::log(&format!("feed: picture stalled at {} ms, the download ran dry ({} ms fed ahead): rebuffering", pres / 1_000_000, v_ahead / 1_000_000));
+                    let ((vb, ve), (ab, ae)) = (video.stats(), audio.stats());
+                    crate::log(&format!(
+                        "feed: at the stall: shift {} ms, playhead {} ms, video lane {:.1} MB up to {} ms, audio lane {:.1} MB up to {} ms, fed video up to {} ms, audio up to {} ms",
+                        shift / 1_000_000,
+                        ctl.playhead_ns.load(Relaxed) / 1_000_000,
+                        vb as f64 / 1048576.0,
+                        ve / 1_000_000,
+                        ab as f64 / 1048576.0,
+                        ae / 1_000_000,
+                        vf.fed_max.unwrap_or(0) / 1_000_000,
+                        af.fed_max.unwrap_or(0) / 1_000_000
+                    ));
                     sys::pause();
                     reanchor(&mut base, &mut play_at, rate, false);
                     rebuffering = Some(Instant::now());

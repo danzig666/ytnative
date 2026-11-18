@@ -154,6 +154,12 @@ pub struct RangedTrack {
 }
 
 impl RangedTrack {
+    /// Downloads from here on go through `http` (new connections: YouTube slows a connection
+    /// down to about the video's bitrate once it has carried a few tens of MB).
+    pub fn set_http(&mut self, http: reqwest::blocking::Client) {
+        self.http = http;
+    }
+
     /// `fmt` is one `adaptiveFormats` entry with `url`, `initRange`, `indexRange`.
     pub fn open(http: reqwest::blocking::Client, fmt: &Value, user_agent: &str) -> Result<RangedTrack> {
         let url = fmt["url"].as_str().context("format has no direct url")?.to_string();
