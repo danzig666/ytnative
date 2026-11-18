@@ -1,1 +1,1 @@
-- Fixed: a video title only a little too long for the player no longer wobbles back and forth; it is shown whole and still
+- New: Quality in the player's options picks a quality for the playing video only (the ones it offers, or Automatic); the video continues from the same spot, and Maximum quality stays as it is

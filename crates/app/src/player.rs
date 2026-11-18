@@ -126,6 +126,11 @@ pub struct Status {
     pub height: u32,
     /// Best height the stream offers within the quality setting, shown until the decoder reports.
     pub quality_hint: u32,
+    /// The qualities the video offers: (height, highest frame rate), highest first.
+    pub qualities: Vec<(u32, u32)>,
+    /// The quality chosen for this video in the player's menu (its height; 0: the setting's
+    /// maximum). Filled in by the host.
+    pub quality_pick: u32,
     /// Engine B: the pipeline's HDR type ("" / "none" when SDR).
     pub hdr: String,
     pub fps: u32,
@@ -517,6 +522,7 @@ fn run(
         s.captions = resolved.captions.clone();
         s.audio_tracks = resolved.audio_tracks();
         s.audio_track = prefs.audio_track.clone().or_else(|| prefs.audio_language.as_deref().and_then(|l| resolved.audio_track_for(l)));
+        s.qualities = resolved.video_qualities();
         s.quality_hint = resolved
             .adaptive
             .iter()

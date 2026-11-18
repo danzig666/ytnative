@@ -61,7 +61,8 @@ impl Player {
                         s.channel_id = resolved.channel_id.clone();
                         s.storyboard = resolved.storyboard_spec.clone();
                         s.captions = resolved.captions.clone();
-                        s.height = max_h.min(1080) as u32;
+                        s.qualities = resolved.video_qualities();
+                        s.height = s.qualities.iter().map(|q| q.0).find(|h| *h as u64 <= max_h).unwrap_or(max_h.min(1080) as u32);
                         s.width = s.height * 16 / 9;
                         s.fps = 30;
                         s.position_ms = start_ms.filter(|ms| *ms > 2000).unwrap_or(0);

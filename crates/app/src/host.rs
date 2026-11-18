@@ -214,6 +214,8 @@ pub enum YtFx {
     /// OK's "Toggle speed": 1.0 <-> the last other speed chosen.
     ToggleSpeed,
     SetAudioTrack(String),
+    /// The playing video again from here at this quality (its height; 0: the setting's maximum).
+    SetQuality(u32),
     SetZoom(crate::player::Zoom),
     /// Shrink the video into `[x, y, w, h]` (comments beside it), or `None` for full screen.
     VideoRect(Option<[i32; 4]>),
@@ -396,6 +398,8 @@ pub struct AppRig {
     restart_rate: Option<(String, f32)>,
     /// A video the connection could not carry: (video id, the highest quality it may use).
     quality_cap: Option<(String, u32)>,
+    /// The quality chosen for a video in the player's menu: (video id, height), for that video only.
+    quality_pick: Option<(String, u32)>,
     /// The account's missing name was looked up again once this run (see Work::Page).
     name_refreshed: bool,
     /// The playlist the current video was started with.
@@ -452,6 +456,7 @@ impl AppRig {
             decoder_restart: None,
             restart_rate: None,
             quality_cap: None,
+            quality_pick: None,
             name_refreshed: false,
             current_playlist: None,
             audio_choice: None,
@@ -678,6 +683,7 @@ impl AppRig {
             self.player.set_video_rect(if r == [0, 0, 1920, 1080] { None } else { Some(r) });
         }
         self.player_view = self.player.status.lock().unwrap().clone();
+        self.player_view.quality_pick = self.quality_pick.as_ref().filter(|(v, _)| *v == self.player_view.video_id).map_or(0, |(_, h)| *h);
         // Engine B refused the speed: play this video again on the system player, from here.
         // webOS 4 has no other engine with a video plane (`vplane.rs`): back to normal speed.
         #[cfg(not(windows))]
@@ -1534,7 +1540,12 @@ impl Rig<YtHost> for AppRig {
                 if cap == u32::MAX {
                     self.quality_cap = None;
                 }
-                let max_height = (s.max_height as u32).min(cap);
+                // A quality chosen for this video in the player's menu stands in for the setting.
+                let pick = self.quality_pick.as_ref().filter(|(v, _)| *v == video_id).map(|(_, h)| *h);
+                if pick.is_none() {
+                    self.quality_pick = None;
+                }
+                let max_height = pick.unwrap_or(s.max_height as u32).min(cap);
                 let prefs = yt_core::streams::Prefs { min_height: (s.min_height as u64).min(max_height as u64), max_height: max_height as u64, codec: "avc1", audio_track, audio_language };
                 let extras = crate::player::ExtrasPrefs {
                     subtitles: s.subtitles,
@@ -1618,6 +1629,18 @@ impl Rig<YtHost> for AppRig {
                 let r = crate::playback_rules::toggle_speed(self.player_view.rate, self.store.settings.toggle_speed);
                 self.player.set_rate(r);
                 self.store.toast(format!("{}: {r}x", crate::i18n::tr("Playback speed")), self.now_ms);
+            }
+            YtFx::SetQuality(h) => {
+                let v = self.player_view.video_id.clone();
+                if !v.is_empty() {
+                    crate::log(&format!("quality: {v} at {}", if h == 0 { "the setting's maximum".to_string() } else { format!("{h}p") }));
+                    self.quality_pick = (h > 0).then(|| (v.clone(), h));
+                    self.quality_cap = None;
+                    self.pending_start = Some((v.clone(), self.player_view.position_ms));
+                    // Restart this video at the chosen quality at the same position.
+                    let playlist = self.current_playlist.clone();
+                    self.app_fx(from, YtFx::Play { video_id: v, playlist }, _p, _out);
+                }
             }
             YtFx::SetAudioTrack(t) => {
                 let v = self.player_view.video_id.clone();

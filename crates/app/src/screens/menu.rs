@@ -70,6 +70,8 @@ enum Act {
     AudioTrack,
     ZoomMode,
     Sleep,
+    /// The playing video's quality (for this video only; it restarts at the same position).
+    Quality,
     MaxQuality,
     Subtitles,
     SubSize,
@@ -111,6 +113,24 @@ pub struct MenuScreen {
     /// Opened over the player (a suggestion's menu): playing replaces the video that plays.
     over_player: bool,
     state: State,
+}
+
+/// The playing video's quality choices: "Automatic" (the setting's maximum), then each quality
+/// it offers, highest first; and the current one.
+fn video_quality_choices(st: &crate::player::Status) -> (Vec<String>, usize) {
+    let mut v = vec![tr("Automatic").to_string()];
+    v.extend(st.qualities.iter().map(|(h, fps)| quality_label(*h, *fps)));
+    let cur = st.qualities.iter().position(|q| q.0 == st.quality_pick).map_or(0, |i| i + 1);
+    (v, cur)
+}
+
+/// "1080p", or "1080p60" above 30 frames a second.
+fn quality_label(h: u32, fps: u32) -> String {
+    if fps > 30 {
+        format!("{h}p{fps}")
+    } else {
+        format!("{h}p")
+    }
 }
 
 /// The maximum video heights the quality row offers.
@@ -487,6 +507,7 @@ impl MenuScreen {
             (tr("Audio language").to_string(), Act::AudioTrack),
             (tr("Video zoom").to_string(), Act::ZoomMode),
             (tr("Sleep timer").to_string(), Act::Sleep),
+            (tr("Quality").to_string(), Act::Quality),
             (tr("Maximum quality").to_string(), Act::MaxQuality),
             (tr("Subtitles").to_string(), Act::Subtitles),
             (tr("Subtitle size").to_string(), Act::SubSize),
@@ -556,6 +577,14 @@ impl MenuScreen {
                 format!("{r}x  \u{203A}")
             }
             Act::MaxQuality => format!("{}p  \u{203A}", s.max_height),
+            Act::Quality => {
+                let st = cx.views.player;
+                if st.qualities.len() < 2 {
+                    return Some(tr("only one").to_string());
+                }
+                let (v, cur) = video_quality_choices(st);
+                format!("{}  \u{203A}", v[cur])
+            }
             Act::AudioTrack => {
                 let st = cx.views.player;
                 if st.audio_tracks.len() < 2 {
@@ -594,6 +623,13 @@ impl MenuScreen {
             Act::Speed => {
                 let r = if cx.views.player.rate > 0.0 { cx.views.player.rate } else { 1.0 };
                 (SPEEDS.iter().map(|v| format!("{v}x")).collect(), crate::settings::speed_index(r))
+            }
+            Act::Quality => {
+                let st = cx.views.player;
+                if st.qualities.len() < 2 {
+                    return None;
+                }
+                video_quality_choices(st)
             }
             Act::AudioTrack => {
                 let st = cx.views.player;
@@ -660,6 +696,16 @@ impl MenuScreen {
             }
             Act::Speed => {
                 fx.push(Fx::App(YtFx::SetSpeed(step_speed(cx.views.player.rate, dir))));
+            }
+            Act::Quality => {
+                let st = cx.views.player;
+                if st.qualities.len() >= 2 {
+                    let (v, cur) = video_quality_choices(st);
+                    let next = (cur as i32 + dir).clamp(0, v.len() as i32 - 1) as usize;
+                    if next != cur {
+                        fx.push(Fx::App(YtFx::SetQuality(if next == 0 { 0 } else { st.qualities[next - 1].0 })));
+                    }
+                }
             }
             Act::AudioTrack => {
                 let st = cx.views.player;
@@ -909,7 +955,7 @@ impl Machine<YtHost> for MenuScreen {
                     match self.choices(&act, cx) {
                         Some((v, cur)) => {
                             let anchor = self.list.place(*e, n, Some(i)).map(|p| p.rect).unwrap_or(self.list.rect);
-                            self.choice = Some(ui::ChoiceBox::new(self.list.entry, i, v, cur, anchor).raw(matches!(act, Act::AudioTrack)));
+                            self.choice = Some(ui::ChoiceBox::new(self.list.entry, i, v, cur, anchor).raw(matches!(act, Act::AudioTrack | Act::Quality)));
                             fx.invalidate(plx_machine::present::Provenance::Input);
                         }
                         None => self.run(&act, 1, cx, fx),

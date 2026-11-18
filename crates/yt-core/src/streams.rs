@@ -193,6 +193,24 @@ impl Resolved {
             .map(|t| t.0.clone())
     }
 
+    /// The video qualities offered: (height, highest frame rate at it), highest first.
+    pub fn video_qualities(&self) -> Vec<(u32, u32)> {
+        let mut out: Vec<(u32, u32)> = Vec::new();
+        for f in &self.adaptive {
+            if !f["mimeType"].as_str().is_some_and(|m| m.starts_with("video/")) {
+                continue;
+            }
+            let Some(h) = f["height"].as_u64().map(|h| h as u32).filter(|h| *h > 0) else { continue };
+            let fps = f["fps"].as_u64().unwrap_or(30) as u32;
+            match out.iter_mut().find(|q| q.0 == h) {
+                Some(q) => q.1 = q.1.max(fps),
+                None => out.push((h, fps)),
+            }
+        }
+        out.sort_by(|a, b| b.0.cmp(&a.0));
+        out
+    }
+
     /// Audio languages offered: (track id, display name, is default), deduplicated.
     pub fn audio_tracks(&self) -> Vec<(String, String, bool)> {
         let mut out: Vec<(String, String, bool)> = Vec::new();
