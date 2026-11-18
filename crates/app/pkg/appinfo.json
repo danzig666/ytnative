@@ -1,6 +1,6 @@
 {
   "id": "io.github.danzig666.ytnative",
-  "version": "0.2.60",
+  "version": "0.2.61",
   "vendor": "danzig666",
   "type": "native",
   "main": "ytnative",

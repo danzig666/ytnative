@@ -23,6 +23,8 @@ const SUG_BASE: u32 = 0x2000_0000;
 const COLS: usize = 8;
 const KEY_W: f32 = 92.0;
 const KEY_H: f32 = 84.0;
+/// The space between two keys.
+const KEY_GAP: f32 = 12.0;
 const KEYS_X: f32 = 100.0;
 const KEYS_Y: f32 = 300.0;
 
@@ -134,7 +136,7 @@ impl SearchScreen {
         keys_for(self.naming.is_some(), self.accents)
     }
     fn key_rect(i: usize) -> Rect {
-        Rect::new(KEYS_X + (i % COLS) as f32 * (KEY_W + 12.0), KEYS_Y + (i / COLS) as f32 * (KEY_H + 12.0), KEY_W, KEY_H)
+        Rect::new(KEYS_X + (i % COLS) as f32 * (KEY_W + KEY_GAP), KEYS_Y + (i / COLS) as f32 * (KEY_H + KEY_GAP), KEY_W, KEY_H)
     }
     fn kkey(&self, i: usize) -> FocusKey<u32> {
         FocusKey { entry: self.entry, elem: KEY_BASE + i as u32 }
@@ -244,7 +246,7 @@ impl Focusable<YtHost> for SearchScreen {
             seat: Seat::Remembered,
             reachable: AxisMask::BOTH,
             edge: [EdgeRule::Geometric; 4],
-            extent: Rect::new(KEYS_X, KEYS_Y, COLS as f32 * (KEY_W + 12.0), (n.div_ceil(COLS)) as f32 * (KEY_H + 12.0)),
+            extent: Rect::new(KEYS_X, KEYS_Y, COLS as f32 * (KEY_W + KEY_GAP), (n.div_ceil(COLS)) as f32 * (KEY_H + KEY_GAP)),
             len: n,
             elem: ElemKind::Control,
         });
@@ -321,8 +323,14 @@ impl Screen<YtHost> for SearchScreen {
     fn draw(&mut self, f: &mut DrawFrame<'_, '_, YtHost>) {
         let p = f.painter;
         let cx = f.cx;
+        // Each key answers the pointer over half the gap around it too, so the keys tile the
+        // keyboard with no gaps: the Magic Remote's pointer jiggles as OK is pressed, and a press
+        // whose pointer slipped into a gap before OK came up was cancelled (the key never typed).
         for i in 0..self.keys().len() {
-            ui::stop(f, self.kkey(i), Self::key_rect(i), Rect::new(0.0, 0.0, 1920.0, 1080.0));
+            let r = Self::key_rect(i);
+            let half = KEY_GAP / 2.0;
+            let hit = Rect::new(r.x - half, r.y - half, r.w + KEY_GAP, r.h + KEY_GAP);
+            ui::stop(f, self.kkey(i), hit, Rect::new(0.0, 0.0, 1920.0, 1080.0));
         }
         let heading = match &self.naming {
             None => "Search",
