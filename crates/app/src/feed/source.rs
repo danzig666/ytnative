@@ -270,8 +270,6 @@ pub fn run_ranged(fmt: serde_json::Value, ua: String, lane: Arc<Lane>, ctl: Arc<
     let mut renewals = 0;
     // Units of `seg` already in the lane: a retry after a broken download skips them.
     let mut skip = 0usize;
-    // Since when the fetcher waits for room in the lane (for the log).
-    let mut room_wait: Option<Instant> = None;
     let tag = if kind == Kind::Video { "video" } else { "audio" };
     while !ctl.stop.load(Relaxed) {
         let (g, t) = ctl.current();
@@ -287,10 +285,8 @@ pub fn run_ranged(fmt: serde_json::Value, ua: String, lane: Arc<Lane>, ctl: Arc<
             continue;
         }
         if !lane.wait_room(&ctl, max_bytes) {
-            room_wait.get_or_insert_with(Instant::now);
             continue;
         }
-        let waited = room_wait.take().map_or(0, |t| t.elapsed().as_millis());
         // Every segment on fresh connections: YouTube paces a connection to about the video's
         // average bitrate after its first tens of MB, too slow for the busy parts of a 4K60 HDR
         // video (measured: 20-30 Mbit/s on a kept connection, 280 Mbit/s on a new one).
@@ -298,15 +294,6 @@ pub fn run_ranged(fmt: serde_json::Value, ua: String, lane: Arc<Lane>, ctl: Arc<
             track.set_http(c);
         }
         let fetch_start = Instant::now();
-        let (held, reach) = lane.stats();
-        crate::log(&format!(
-            "feed: {tag} segment {seg} ({:.1} MB at {} ms) starts after {waited} ms waiting for room; lane {:.1} MB up to {} ms, playhead {} ms",
-            track.segments[seg].size as f64 / 1048576.0,
-            track.segments[seg].start_ns / 1_000_000,
-            held as f64 / 1048576.0,
-            reach / 1_000_000,
-            ctl.playhead_ns.load(Relaxed) / 1_000_000
-        ));
         // Give up between two ranges when the session stops or a seek starts a new generation.
         let abort = || ctl.stop.load(Relaxed) || ctl.gen.load(Acquire) != gen;
         if trim.target.is_none() {
@@ -326,8 +313,22 @@ pub fn run_ranged(fmt: serde_json::Value, ua: String, lane: Arc<Lane>, ctl: Arc<
             });
             match r {
                 Ok(()) => {
+                    // Only a slow segment is logged (the log has no size cap): one taking more
+                    // than half its playing time to arrive.
                     let ms = fetch_start.elapsed().as_millis().max(1);
-                    crate::log(&format!("feed: {tag} segment {seg} in {ms} ms ({:.0} Mbit/s)", track.segments[seg].size as f64 * 8.0 / 1000.0 / ms as f64));
+                    let s = track.segments[seg];
+                    if ms as i64 * 2_000_000 > s.duration_ns {
+                        let (held, reach) = lane.stats();
+                        crate::log(&format!(
+                            "feed: slow {tag} segment {seg}: {:.1} MB for {} ms of video in {ms} ms ({:.0} Mbit/s); lane {:.1} MB up to {} ms, playhead {} ms",
+                            s.size as f64 / 1048576.0,
+                            s.duration_ns / 1_000_000,
+                            s.size as f64 * 8.0 / 1000.0 / ms as f64,
+                            held as f64 / 1048576.0,
+                            reach / 1_000_000,
+                            ctl.playhead_ns.load(Relaxed) / 1_000_000
+                        ));
+                    }
                     failures = 0;
                     renewals = 0;
                     skip = 0;
@@ -355,8 +356,6 @@ pub fn run_ranged(fmt: serde_json::Value, ua: String, lane: Arc<Lane>, ctl: Arc<
         match track.fetch_segment_abortable(seg, &abort) {
             Err(e) if e.is::<yt_core::demux::ranged::Aborted>() => continue,
             Ok(aus) => {
-                let ms = fetch_start.elapsed().as_millis().max(1);
-                crate::log(&format!("feed: {tag} segment {seg} in {ms} ms, whole"));
                 failures = 0;
                 renewals = 0;
                 if ctl.gen.load(Acquire) != gen {
