@@ -1,1 +1,1 @@
-- Fixed: after another app or the screensaver took the video decoder, "Can't play this video" stayed on screen; the video now starts again where it was when you come back or press a key
+- Fixed: a video title only a little too long for the player no longer wobbles back and forth; it is shown whole and still

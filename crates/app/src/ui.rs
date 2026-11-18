@@ -157,10 +157,17 @@ pub const GLIDE_PLAYER_CHAPTER: usize = 3;
 /// `s` on one line of `w` px at (`x`, `y`): as it is when it fits, otherwise gliding back and
 /// forth with soft edges, as the selected video's caption does. `clock` is its own
 /// ([`GLIDE_PLAYER_TITLE`], ...): a new text starts it again from the beginning.
+/// The player's lines have free room after them: a line only a little too long (under
+/// [`GLIDE_SLACK`] of its size) is drawn whole and still, running into that room, instead of
+/// gliding a few pixels back and forth, which read as a wobble.
 #[allow(clippy::too_many_arguments)]
 pub fn glide(p: Painter, m: &dyn plx_machine::machine::Measure, s: &str, x: f32, y: f32, w: f32, size: i32, ink: [f32; 4], bold: bool, clock: usize) {
-    marquee(p, m, s, x, y, w, Line { size, bold, ink, clock });
+    marquee(p, m, s, x, y, w, Line { size, bold, ink, clock, slack: size as f32 * GLIDE_SLACK });
 }
+
+/// How much longer than its room a player line may be and still be drawn still, as a share of
+/// its text size.
+const GLIDE_SLACK: f32 = 0.75;
 
 /// How a gliding line looks: its size, weight, ink and its own clock.
 struct Line {
@@ -168,20 +175,22 @@ struct Line {
     bold: bool,
     ink: [f32; 4],
     clock: usize,
+    /// How far past its room the line may run and still be drawn whole and still.
+    slack: f32,
 }
-const TITLE_LINE: Line = Line { size: 24, bold: true, ink: PANEL_FOCUS_INK, clock: 0 };
-const DETAIL_LINE: Line = Line { size: 20, bold: false, ink: PANEL_FOCUS_DIM, clock: 1 };
+const TITLE_LINE: Line = Line { size: 24, bold: true, ink: PANEL_FOCUS_INK, clock: 0, slack: 0.0 };
+const DETAIL_LINE: Line = Line { size: 20, bold: false, ink: PANEL_FOCUS_DIM, clock: 1, slack: 0.0 };
 
 /// A line that does not fit, gliding back and forth (hold, glide to the end, hold, glide back).
 /// It shows as much as the focused panel holds, with no "…": the cut edge fades softly into the
 /// panel instead, on whichever side has more text.
 fn marquee(p: Painter, m: &dyn plx_machine::machine::Measure, title: &str, ix: f32, iy: f32, w: f32, line: Line) {
-    let Line { size, bold, ink, clock } = line;
+    let Line { size, bold, ink, clock, slack } = line;
     let tw = CString::new(title).map_or(0.0, |c| m.width(&c, size, bold));
     // The lines were broken at the card's resting width; the focused panel is wider, so the rest
     // may fit there whole. Then it is drawn as it is: gliding it meant a negative distance, and
     // `clamp(0.0, dist)` panicked, which left the rest of the page undrawn.
-    if tw <= w {
+    if tw <= w + slack {
         text_raw(p, title, ix, iy, size, ink, ALIGN_LEFT, bold);
         return;
     }
