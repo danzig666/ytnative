@@ -474,11 +474,20 @@ impl Machine<YtHost> for PlayerScreen {
                 Handled::Yes
             }
             ScreenEvent::Timer(T_HIDE) => {
-                if cx.views.player.phase == Phase::Playing && self.sugg_sel.is_none() {
-                    self.hud = false;
-                    self.osd_sel = None;
-                    self.pointer = None;
-                    fx.invalidate(plx_machine::present::Provenance::Timer(T_HIDE));
+                match cx.views.player.phase {
+                    Phase::Playing if self.sugg_sel.is_none() => {
+                        self.hud = false;
+                        self.osd_sel = None;
+                        self.pointer = None;
+                        fx.invalidate(plx_machine::present::Provenance::Timer(T_HIDE));
+                    }
+                    // Still loading (after a seek, say) or paused: the controls stay for now and
+                    // hide once the video plays, instead of staying up for good.
+                    Phase::Idle | Phase::Resolving | Phase::Loading | Phase::Paused if self.sugg_sel.is_none() => {
+                        let secs = cx.views.store.settings.hud_timeout_secs.max(1);
+                        fx.push(Fx::Timer { id: T_HIDE, after_ms: secs * 1000 });
+                    }
+                    _ => {}
                 }
                 Handled::Yes
             }

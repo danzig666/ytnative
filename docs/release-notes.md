@@ -1,1 +1,1 @@
-- Fixed: Quality and Audio language in the player's options said "only one" for videos the TV's own playback engine plays
+- Fixed: The player's controls stayed on screen for good when their hide timer ran out while the video was still loading (after a seek, say) or paused
