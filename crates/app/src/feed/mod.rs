@@ -138,7 +138,16 @@ impl FeedPlayer {
             .as_str()
             .and_then(|s| s.parse().ok())
             .unwrap_or(resolved.length_secs * 1000);
-        *self.status.lock().unwrap() = Status {
+        // What the resolve already filled in for this video (the qualities and audio languages
+        // it offers, the chosen track) is kept: the menu offers them.
+        let mut st = self.status.lock().unwrap();
+        let kept = (st.video_id == video_id).then(|| (std::mem::take(&mut st.qualities), std::mem::take(&mut st.audio_tracks), st.audio_track.take(), st.paid_promotion));
+        let (qualities, audio_tracks, audio_track, paid_promotion) = kept.unwrap_or_default();
+        *st = Status {
+            qualities,
+            audio_tracks,
+            audio_track,
+            paid_promotion,
             phase: Phase::Loading,
             rate: 1.0,
             video_id: video_id.clone(),
@@ -151,6 +160,7 @@ impl FeedPlayer {
             position_ms: start_ms.unwrap_or(0),
             ..Default::default()
         };
+        drop(st);
         let window_id = match window_id {
             Some(w) => Some(w),
             // webOS 4: no windowId in the Load; acb_tick binds the plane.

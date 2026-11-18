@@ -1,1 +1,1 @@
-- New: Quality in the player's options picks a quality for the playing video only (the ones it offers, or Automatic); the video continues from the same spot, and Maximum quality stays as it is
+- Fixed: Quality and Audio language in the player's options said "only one" for videos the TV's own playback engine plays
