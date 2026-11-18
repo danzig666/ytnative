@@ -1,1 +1,1 @@
-- Fixed: The player's controls stayed on screen for good when their hide timer ran out while the video was still loading (after a seek, say) or paused
+- Fixed: A long video title in the lists no longer jumps to the middle of its glide when you come back to its card, or when pressing OK

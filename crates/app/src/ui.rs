@@ -73,8 +73,8 @@ thread_local! {
     /// title, detail).
     static FOCUSED_CAPTION: std::cell::RefCell<Option<(Rect, f32, String, String)>> = const { std::cell::RefCell::new(None) };
     /// Marquee clocks, one per line (card title, card detail, player title, player chapter):
-    /// (text it runs for, start).
-    static MARQUEE: std::cell::RefCell<[(String, Option<std::time::Instant>); 4]> = const {
+    /// (text it runs for, its clock).
+    static MARQUEE: std::cell::RefCell<[(String, Option<GlideClock>); 4]> = const {
         std::cell::RefCell::new([(String::new(), None), (String::new(), None), (String::new(), None), (String::new(), None)])
     };
 }
@@ -191,6 +191,8 @@ fn marquee(p: Painter, m: &dyn plx_machine::machine::Measure, title: &str, ix: f
     // may fit there whole. Then it is drawn as it is: gliding it meant a negative distance, and
     // `clamp(0.0, dist)` panicked, which left the rest of the page undrawn.
     if tw <= w + slack {
+        // A still line lets go of its clock: a long title focused again glides from the start.
+        MARQUEE.with(|mq| mq.borrow_mut()[clock].1 = None);
         text_raw(p, title, ix, iy, size, ink, ALIGN_LEFT, bold);
         return;
     }
@@ -200,14 +202,20 @@ fn marquee(p: Painter, m: &dyn plx_machine::machine::Measure, title: &str, ix: f
         const HOLD: f32 = 2.5;
         const SPEED: f32 = 45.0;
         let dist = tw - w + 2.0;
-        let t = MARQUEE.with(|mq| {
+        let now = std::time::Instant::now();
+        let (t, dist0) = MARQUEE.with(|mq| {
             let mq = &mut mq.borrow_mut()[clock];
-            if mq.0 != title || mq.1.is_none() {
-                *mq = (title.to_string(), Some(std::time::Instant::now()));
+            let fresh = mq.0 == title && mq.1.is_some_and(|c| now.duration_since(c.seen).as_secs_f32() < GLIDE_GONE_SECS);
+            if !fresh {
+                *mq = (title.to_string(), Some(GlideClock { start: now, seen: now, dist }));
             }
-            mq.1.unwrap().elapsed().as_secs_f32()
+            let c = mq.1.as_mut().unwrap();
+            c.seen = now;
+            (now.duration_since(c.start).as_secs_f32(), c.dist)
         });
-        let off = glide_offset(t, dist, HOLD, SPEED);
+        // Timed for the distance it started with, so a change of room only stretches the glide a
+        // little instead of jumping to another point of it.
+        let off = (glide_offset(t, dist0, HOLD, SPEED) / dist0 * dist).clamp(0.0, dist);
         // The fades come and go with the text: full while there is more than a fade's width
         // hidden on that side, gone once the line's end (or start) is in view.
         let band = |hidden: f32| (hidden / CUT_FADE).min(1.0) * CUT_FADE;
@@ -229,6 +237,19 @@ fn marquee(p: Painter, m: &dyn plx_machine::machine::Measure, title: &str, ix: f
         animating();
     }
 }
+
+/// A gliding line's clock: when it started, when it was last drawn, and the distance it was
+/// timed for (the room can change under it: a pressed card shrinks a moment).
+#[derive(Clone, Copy)]
+struct GlideClock {
+    start: std::time::Instant,
+    seen: std::time::Instant,
+    dist: f32,
+}
+
+/// A line not drawn for this long starts again from its beginning when it shows again (focus
+/// came back to its card), instead of carrying on mid-glide.
+const GLIDE_GONE_SECS: f32 = 1.0;
 
 /// The shortest glide, one way.
 const MIN_GLIDE_SECS: f32 = 2.5;
