@@ -23,6 +23,7 @@
 #![allow(dead_code)]
 
 pub mod engine;
+pub mod live_keep;
 pub mod payload;
 pub mod source;
 pub mod sys;
@@ -51,11 +52,13 @@ pub struct Prefs {
     /// unverified for VP9.2 / AV1 on webOS 5+: see docs/feed-engine.md).
     pub allow_hdr: bool,
     pub transport: Transport,
+    /// "Keep up with live": a live stream that falls behind jumps back to the live edge.
+    pub keep_live: bool,
 }
 
 impl Prefs {
     pub fn new(max_height: u32, codec: VideoCodec) -> Prefs {
-        Prefs { max_height, codec, allow_hdr: false, transport: Transport::Direct }
+        Prefs { max_height, codec, allow_hdr: false, transport: Transport::Direct, keep_live: false }
     }
 }
 
@@ -70,6 +73,7 @@ pub struct FeedPlayer {
     /// webOS 4: a refused bind (epoch, first refusal, given up); logged once, given up after a
     /// few seconds.
     acb_refused: Option<(u32, Instant, bool)>,
+    live_keep: live_keep::LiveKeep,
 }
 
 /// webOS 4: the ACB plane is bound to pipeline `epoch`.
@@ -90,7 +94,7 @@ impl Default for FeedPlayer {
 
 impl FeedPlayer {
     pub fn new() -> Self {
-        FeedPlayer { status: Default::default(), shared: None, thread: None, window: None, acb: None, acb_refused: None }
+        FeedPlayer { status: Default::default(), shared: None, thread: None, window: None, acb: None, acb_refused: None, live_keep: Default::default() }
     }
 
     /// libplayerAPIs is present, every needed symbol resolved and no object was quarantined.
@@ -204,6 +208,7 @@ impl FeedPlayer {
         })?;
         self.shared = Some(shared);
         self.thread = Some(t);
+        self.live_keep = live_keep::LiveKeep::new(prefs.keep_live);
         Ok(())
     }
 
@@ -222,6 +227,15 @@ impl FeedPlayer {
     /// or drives the ACB plane binding (webOS 4).
     pub fn tick(&mut self) {
         let Some(sh) = self.shared.clone() else { return };
+        let jump = {
+            let s = self.status.lock().unwrap();
+            let playing = s.phase == Phase::Playing && s.buffering_since.is_none();
+            self.live_keep.tick(s.live, playing, s.position_ms, s.live_edge_ms)
+        };
+        if let Some(to) = jump {
+            crate::log("feed: back to the live edge");
+            self.seek_raw(to);
+        }
         if let Some((w, h)) = sh.place.lock().unwrap().take() {
             if let Some(win) = &self.window {
                 let ok = win.place(w, h);
@@ -340,6 +354,11 @@ impl FeedPlayer {
     }
 
     pub fn seek_to(&mut self, to_ms: u64) {
+        self.live_keep.seeked(false);
+        self.seek_raw(to_ms);
+    }
+
+    fn seek_raw(&mut self, to_ms: u64) {
         self.status.lock().unwrap().position_ms = to_ms; // shown at once; events correct it
         self.send(Cmd::Seek(to_ms));
     }
@@ -352,7 +371,8 @@ impl FeedPlayer {
             (s.position_ms as i64, end)
         };
         let to = (pos + delta_ms).clamp(0, end.max(0));
-        self.seek_to(to as u64);
+        self.live_keep.seeked(to == end.max(0));
+        self.seek_raw(to as u64);
     }
 
     /// Playback speed, through StarfishMediaAPIs::SetPlayRate (re-applied by the engine after

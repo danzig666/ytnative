@@ -22,6 +22,10 @@ pub struct CaptionTrack {
     /// Auto-generated (ASR) track.
     pub auto: bool,
     pub translatable: bool,
+    /// The automatic transcript of an auto-dubbed audio track, not of the original speech: never
+    /// a source for a translation (SmartTube MSC 4929ff24).
+    #[serde(default)]
+    pub dub: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -118,10 +122,29 @@ fn same_reason(refusals: &[String], tried: usize) -> Option<String> {
     (refusals.len() == tried && refusals.iter().all(|r| first(r) == key)).then(|| one.trim().to_string())
 }
 
+/// An automatic track made from a dub: its URL says "variant=timing-optimized", or it is in the
+/// language of an auto-dubbed audio track.
+fn is_dub_transcript(t: &Value, dubbed: &[String]) -> bool {
+    if t["kind"].as_str() != Some("asr") {
+        return false;
+    }
+    let lang = t["languageCode"].as_str().unwrap_or("");
+    t["baseUrl"].as_str().is_some_and(|u| u.contains("variant=timing-optimized")) || dubbed.iter().any(|d| d.eq_ignore_ascii_case(lang))
+}
+
 fn build(client: Client, video_id: &str, pr: Value) -> Resolved {
     let d = &pr["videoDetails"];
     let sd = &pr["streamingData"];
     let caps = &pr["captions"]["playerCaptionsTracklistRenderer"];
+    // Languages of the auto-dubbed audio tracks ("de-DE.10" -> "de-DE"): each has its own
+    // automatic transcript in that language.
+    let dubbed: Vec<String> = sd["adaptiveFormats"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|f| f["audioTrack"]["isAutoDubbed"].as_bool() == Some(true))
+        .filter_map(|f| f["audioTrack"]["id"].as_str().map(|id| id.split('.').next().unwrap_or(id).to_string()))
+        .collect();
     let captions = caps["captionTracks"]
         .as_array()
         .map(|a| {
@@ -133,6 +156,7 @@ fn build(client: Client, video_id: &str, pr: Value) -> Resolved {
                         language: t["languageCode"].as_str().unwrap_or("").to_string(),
                         auto: t["kind"].as_str() == Some("asr"),
                         translatable: t["isTranslatable"].as_bool().unwrap_or(false),
+                        dub: is_dub_transcript(t, &dubbed),
                     })
                 })
                 .collect()

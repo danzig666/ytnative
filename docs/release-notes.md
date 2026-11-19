@@ -1,2 +1,3 @@
-- Fixed: Installing an update from inside the app failed with "Not permitted to send to org.webosbrew.hbchannel.service". If you have 0.2.62, install this version once by hand (or through Homebrew Channel); later updates install from inside the app
-- Fixed: Voice search on the Magic Remote ("search for …") was refused by the TV
+- New: Settings › Playback › "Keep up with live": a live stream that falls behind (after buffering or a pause) jumps back to live when it plays again
+- Fixed: "Hide mixes" now also hides mixes on Home and Subscriptions
+- Fixed: Auto-translated subtitles on auto-dubbed videos are translated from the original speech, not from the dub

@@ -178,6 +178,10 @@ fn tile(t: &Value) -> Option<Item> {
                 Some("SHORTS") => kind = ItemKind::Short,
                 _ => {}
             }
+            // A mix tile (Home, Subscriptions) is marked only by its "MIX" icon (SmartTube MSC db543d4d).
+            if ts["icon"]["iconType"].as_str() == Some("MIX") {
+                kind = ItemKind::Mix;
+            }
         }
         if let Some(rp) = o.get("thumbnailOverlayResumePlaybackRenderer") {
             progress = rp["percentDurationWatched"].as_u64().map(|p| p.min(100) as u8);
@@ -443,6 +447,16 @@ mod members_only_tests {
             {"lineItemRenderer": {"badge": {"metadataBadgeRenderer": {"label": "Members only", "style": "BADGE_STYLE_TYPE_MEMBERS_ONLY"}}}}
         ]}}]}}});
         assert!(members_only(&tile));
+    }
+
+    #[test]
+    fn mix_icon_marks_a_tile_as_mix() {
+        let tile = |icon: &str| json!({"contentType": "TILE_CONTENT_TYPE_PLAYLIST", "contentId": "RDabc",
+            "header": {"tileHeaderRenderer": {"thumbnailOverlays": [{"thumbnailOverlayTimeStatusRenderer":
+                {"text": {"simpleText": "Mix"}, "icon": {"iconType": icon}}}]}},
+            "metadata": {"tileMetadataRenderer": {"title": {"simpleText": "My Mix"}}}});
+        assert_eq!(super::tile(&tile("MIX")).unwrap().kind, crate::model::ItemKind::Mix);
+        assert_eq!(super::tile(&tile("PLAYLISTS")).unwrap().kind, crate::model::ItemKind::Playlist);
     }
 
     #[test]

@@ -780,8 +780,9 @@ pub(crate) fn load_captions(video_id: &str, session: &Mutex<Option<yt_core::sess
     if let Some(p) = pick_track(&tracks, lang, translate) {
         picks.push(p);
     }
-    // The video's own track (manual first) when the wanted language is missing or fails.
-    if let Some(t) = tracks.iter().find(|t| !t.auto).or_else(|| tracks.first()) {
+    // The video's own track (manual first, a dub's transcript last) when the wanted language is
+    // missing or fails.
+    if let Some(t) = tracks.iter().find(|t| !t.auto).or_else(|| tracks.iter().find(|t| !t.dub)).or_else(|| tracks.first()) {
         if !picks.iter().any(|(p, tr)| p.language == t.language && tr.is_none()) {
             picks.push((t.clone(), None));
         }
@@ -812,20 +813,51 @@ pub(crate) fn load_captions(video_id: &str, session: &Mutex<Option<yt_core::sess
 }
 
 /// Manual track in the wanted language, else auto-generated in it, else (if allowed) a
-/// translation of the best available track.
+/// translation of the best available track. A translation is never made from an auto-dub's
+/// transcript (it would translate the dub, not what was said).
 fn pick_track(tracks: &[yt_core::streams::CaptionTrack], lang: &str, translate: bool) -> Option<(yt_core::streams::CaptionTrack, Option<String>)> {
     let base = |l: &str| l.split('-').next().unwrap_or(l).to_ascii_lowercase();
     let want = base(lang);
     if let Some(t) = tracks.iter().find(|t| !t.auto && base(&t.language) == want) {
         return Some((t.clone(), None));
     }
-    if let Some(t) = tracks.iter().find(|t| base(&t.language) == want) {
+    if let Some(t) = tracks.iter().find(|t| !t.dub && base(&t.language) == want).or_else(|| tracks.iter().find(|t| base(&t.language) == want)) {
         return Some((t.clone(), None));
     }
     if translate {
-        if let Some(t) = tracks.iter().find(|t| t.translatable && !t.auto).or_else(|| tracks.iter().find(|t| t.translatable)) {
+        let source = tracks
+            .iter()
+            .find(|t| t.translatable && !t.auto)
+            .or_else(|| tracks.iter().find(|t| t.translatable && !t.dub))
+            .or_else(|| tracks.iter().find(|t| t.translatable));
+        if let Some(t) = source {
             return Some((t.clone(), Some(lang.to_string())));
         }
     }
     None
+}
+
+#[cfg(test)]
+mod pick_track_tests {
+    use super::pick_track;
+    use yt_core::streams::CaptionTrack;
+
+    fn track(language: &str, auto: bool, dub: bool) -> CaptionTrack {
+        CaptionTrack { base_url: String::new(), name: language.into(), language: language.into(), auto, translatable: true, dub }
+    }
+
+    #[test]
+    fn translation_comes_from_the_original_transcript_not_a_dub() {
+        // Auto-dubbed video: the German dub's transcript is listed before the original English one.
+        let tracks = [track("de-DE", true, true), track("en", true, false)];
+        let (t, tr) = pick_track(&tracks, "hu", true).unwrap();
+        assert_eq!((t.language.as_str(), tr.as_deref()), ("en", Some("hu")));
+    }
+
+    #[test]
+    fn a_dub_transcript_in_the_wanted_language_is_still_used() {
+        let tracks = [track("de-DE", true, true), track("en", true, false)];
+        let (t, tr) = pick_track(&tracks, "de", true).unwrap();
+        assert_eq!((t.language.as_str(), tr), ("de-DE", None));
+    }
 }

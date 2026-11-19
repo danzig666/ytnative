@@ -326,6 +326,9 @@ pub struct Settings {
     pub resume_short_videos: bool,
     /// Resume live streams where they were left.
     pub resume_live: bool,
+    /// A live stream watched near its live edge that falls behind (a rebuffer, a pause) jumps
+    /// back to the edge when it plays again.
+    pub keep_live: bool,
     /// Hide the controls after this many seconds (0 = never).
     pub hud_timeout_secs: u32,
     pub show_clock: bool,
@@ -499,6 +502,7 @@ impl Default for Settings {
             resume_playback: true,
             resume_short_videos: false,
             resume_live: true,
+            keep_live: false,
             hud_timeout_secs: 3,
             show_clock: true,
             clock_on_pages: false,

@@ -411,7 +411,7 @@ line &amp; two</p><p t="3000" d="1000"><s>a</s><s> b</s></p></body></timedtext>"
 
     #[test]
     fn url_building() {
-        let t = CaptionTrack { base_url: "https://x/api/timedtext?v=1&fmt=srv1&lang=en".into(), name: "English".into(), language: "en".into(), auto: false, translatable: true };
+        let t = CaptionTrack { base_url: "https://x/api/timedtext?v=1&fmt=srv1&lang=en".into(), name: "English".into(), language: "en".into(), auto: false, translatable: true, dub: false };
         assert_eq!(track_url(&t, Format::Vtt, Some("hu")), "https://x/api/timedtext?v=1&lang=en&fmt=vtt&tlang=hu");
     }
 
