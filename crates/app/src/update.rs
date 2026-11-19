@@ -187,7 +187,7 @@ pub fn install() {
     #[cfg(not(windows))]
     {
         let payload = serde_json::json!({"ipkUrl": rel.ipk_url, "ipkHash": rel.sha256, "id": plx_base::paths::app_id(), "subscribe": true}).to_string();
-        let sent = match crate::ls2::Luna::shared(plx_base::paths::app_id()) {
+        let sent = match crate::ls2::Luna::wide(plx_base::paths::app_id()) {
             Ok(luna) => luna.subscribe("luna://org.webosbrew.hbchannel.service/install", &payload, |reply| {
                 if let Some(s) = read_install_reply(reply) {
                     if let State::InstallFailed(e) = &s {

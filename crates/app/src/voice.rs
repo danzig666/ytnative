@@ -7,7 +7,7 @@ use crate::ls2::Luna;
 
 pub fn start() {
     plx_base::task::spawn("voice", || {
-        let luna = match Luna::shared(plx_base::paths::app_id()) {
+        let luna = match Luna::wide(plx_base::paths::app_id()) {
             Ok(l) => l,
             Err(e) => return crate::log(&format!("voice: no bus: {e}")),
         };

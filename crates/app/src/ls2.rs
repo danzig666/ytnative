@@ -63,8 +63,9 @@ enum Ctx {
 }
 
 unsafe extern "C" fn on_reply(_sh: *mut c_void, msg: *mut c_void, ctx: *mut c_void) -> bool {
-    let luna = &*(LUNA_PTR as *const Luna);
-    let p = (luna.api.payload)(msg);
+    // Every connection loads the same library, so any of them reads the payload.
+    let payload: unsafe extern "C" fn(*mut c_void) -> *const c_char = std::mem::transmute(PAYLOAD_FN);
+    let p = payload(msg);
     let s = if p.is_null() { String::new() } else { CStr::from_ptr(p).to_string_lossy().into_owned() };
     match &mut *(ctx as *mut Ctx) {
         Ctx::Once(tx) => {
@@ -77,23 +78,49 @@ unsafe extern "C" fn on_reply(_sh: *mut c_void, msg: *mut c_void, ctx: *mut c_vo
     true
 }
 
-static mut LUNA_PTR: usize = 0;
+static mut PAYLOAD_FN: usize = 0;
+/// The GLib main loop every connection is attached to (one thread runs it).
+static mut MAIN_LOOP: usize = 0;
 
 impl Luna {
-    /// The process's one bus connection, made on first use (the player and voice share it).
+    /// The process's media connection, made on first use (the player shares it). Its name may only
+    /// talk to the media services.
     pub fn shared(app_id: &str) -> Result<&'static Luna, String> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _g = LOCK.lock().unwrap();
-        let p = unsafe { LUNA_PTR };
-        if p != 0 {
-            return Ok(unsafe { &*(p as *const Luna) });
+        static LOCK: std::sync::Mutex<Option<&'static Luna>> = std::sync::Mutex::new(None);
+        let mut g = LOCK.lock().unwrap();
+        if let Some(l) = *g {
+            return Ok(l);
         }
-        Self::connect(app_id)
+        // SDL's lifecycle registration already holds the bare app id; the role generated for native
+        // apps also allows "com.webos.media.client.*", which may talk to com.webos.media.
+        let pid = std::process::id();
+        let l = Self::connect(&[format!("com.webos.media.client.ytnative{pid}"), app_id.to_string()])?;
+        *g = Some(l);
+        Ok(l)
     }
 
-    /// Registers on the bus. Tries the bare app id first, then "<appId>-<pid>" (SDL may already
-    /// hold the bare name for the app's lifecycle registration).
-    pub fn connect(app_id: &str) -> Result<&'static Luna, String> {
+    /// A connection that may call any service (Homebrew Channel, voice). The role LG generates for
+    /// a native app lets "com.webos.chromium.media.*" send anywhere, and the TV gives that name the
+    /// "all" permission group; the media name of `shared` is refused ("Not permitted to send to").
+    pub fn wide(app_id: &str) -> Result<&'static Luna, String> {
+        static LOCK: std::sync::Mutex<Option<&'static Luna>> = std::sync::Mutex::new(None);
+        let mut g = LOCK.lock().unwrap();
+        if let Some(l) = *g {
+            return Ok(l);
+        }
+        let pid = std::process::id();
+        let l = match Self::connect(&[format!("com.webos.chromium.media.ytnative{pid}")]) {
+            Ok(l) => l,
+            Err(_) => return Self::shared(app_id),
+        };
+        *g = Some(l);
+        Ok(l)
+    }
+
+    /// Registers on the bus under the first name the hub accepts.
+    fn connect(names: &[String]) -> Result<&'static Luna, String> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LOCK.lock().unwrap();
         unsafe {
             let ls = open("libluna-service2.so.3").or_else(|_| open("libluna-service2.so"))?;
             let glib = open("libglib-2.0.so.0")?;
@@ -111,10 +138,7 @@ impl Luna {
 
             let mut handle = std::ptr::null_mut();
             let mut last_err = String::new();
-            // SDL's lifecycle registration already holds the bare app id; the role generated for native
-            // apps also allows "com.webos.media.client.*", which may talk to com.webos.media.
-            let pid = std::process::id();
-            for name in [format!("com.webos.media.client.ytnative{pid}"), app_id.to_string()] {
+            for name in names {
                 let mut err: LSError = std::mem::zeroed();
                 (api.error_init)(&mut err);
                 let cname = CString::new(name.clone()).unwrap();
@@ -132,17 +156,21 @@ impl Luna {
             }
 
             // Default main context, run on its own thread; luna callbacks fire there.
-            let main_loop = loop_new(std::ptr::null_mut(), 0) as usize;
+            let first = MAIN_LOOP == 0;
+            if first {
+                MAIN_LOOP = loop_new(std::ptr::null_mut(), 0) as usize;
+            }
+            let main_loop = MAIN_LOOP;
             let mut err: LSError = std::mem::zeroed();
             (api.error_init)(&mut err);
             if !(api.gmain_attach)(handle, main_loop as *mut c_void, &mut err) {
                 return Err("LSGmainAttach failed".into());
             }
-            std::thread::spawn(move || loop_run(main_loop as *mut c_void));
-
-            let luna: &'static Luna = Box::leak(Box::new(Luna { api, handle }));
-            LUNA_PTR = luna as *const Luna as usize;
-            Ok(luna)
+            PAYLOAD_FN = api.payload as usize;
+            if first {
+                std::thread::spawn(move || loop_run(main_loop as *mut c_void));
+            }
+            Ok(Box::leak(Box::new(Luna { api, handle })))
         }
     }
 
