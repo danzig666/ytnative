@@ -498,3 +498,20 @@ No video is playing	Nem megy videó	Es läuft kein Video	No se está reproducien
 Sign-in and settings	Bejelentkezés és beállítások	Anmeldung und Einstellungen	Sesión y ajustes	Connexion et paramètres	Вход и настройки
 Kept across restarts	Újraindítás után is megmarad	Bleiben nach einem Neustart erhalten	Se conservan al reiniciar	Conservés après un redémarrage	Сохраняются после перезапуска
 Lost at every restart (no writable folder)	Minden újraindításkor elvész (nincs írható mappa)	Gehen bei jedem Neustart verloren (kein beschreibbarer Ordner)	Se pierden en cada reinicio (sin carpeta con permiso de escritura)	Perdus à chaque redémarrage (aucun dossier accessible en écriture)	Теряются при каждом перезапуске (нет папки для записи)
+Update	Frissítés	Aktualisierung	Actualización	Mise à jour	Обновление
+Check for updates	Frissítések keresése	Nach Aktualisierungen suchen	Buscar actualizaciones	Rechercher des mises à jour	Проверить обновления
+Install the update (closes the app)	Frissítés telepítése (az alkalmazás bezárul)	Aktualisierung installieren (schließt die App)	Instalar la actualización (cierra la aplicación)	Installer la mise à jour (ferme l'application)	Установить обновление (приложение закроется)
+Not checked yet	Még nincs ellenőrizve	Noch nicht geprüft	Aún no comprobado	Pas encore vérifié	Ещё не проверено
+Checking…	Ellenőrzés…	Wird geprüft…	Comprobando…	Vérification…	Проверка…
+Up to date	Naprakész	Aktuell	Actualizada	À jour	Последняя версия
+Version {} available	Új verzió: {}	Version {} verfügbar	Versión {} disponible	Version {} disponible	Доступна версия {}
+Could not check: {}	Nem sikerült ellenőrizni: {}	Prüfung fehlgeschlagen: {}	No se pudo comprobar: {}	Vérification impossible : {}	Не удалось проверить: {}
+Downloading…	Letöltés…	Wird heruntergeladen…	Descargando…	Téléchargement…	Загрузка…
+Installing… the app will close	Telepítés… az alkalmazás bezárul	Wird installiert… die App wird geschlossen	Instalando… la aplicación se cerrará	Installation… l'application va se fermer	Установка… приложение закроется
+Installed: open the app again	Telepítve: nyisd meg újra az alkalmazást	Installiert: App erneut öffnen	Instalada: abre la aplicación de nuevo	Installée : rouvrez l'application	Установлено: откройте приложение снова
+Update failed: {}	Sikertelen frissítés: {}	Aktualisierung fehlgeschlagen: {}	Error al actualizar: {}	Échec de la mise à jour : {}	Ошибка обновления: {}
+Homebrew Channel is needed to install updates	A frissítések telepítéséhez Homebrew Channel kell	Zum Installieren von Aktualisierungen wird Homebrew Channel benötigt	Se necesita Homebrew Channel para instalar actualizaciones	Homebrew Channel est nécessaire pour installer les mises à jour	Для установки обновлений нужен Homebrew Channel
+Update available	Frissítés érhető el	Aktualisierung verfügbar	Actualización disponible	Mise à jour disponible	Доступно обновление
+Version {} is available	Elérhető a(z) {} verzió	Version {} ist verfügbar	La versión {} está disponible	La version {} est disponible	Доступна версия {}
+Install now (closes the app)	Telepítés most (az alkalmazás bezárul)	Jetzt installieren (schließt die App)	Instalar ahora (cierra la aplicación)	Installer maintenant (ferme l'application)	Установить сейчас (приложение закроется)
+Later	Később	Später	Más tarde	Plus tard	Позже

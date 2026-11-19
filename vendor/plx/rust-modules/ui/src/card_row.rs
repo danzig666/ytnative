@@ -420,8 +420,16 @@ impl CardRow {
         }
         if let Some(fc) = focused {
             if n > 0 && !self.free {
-                self.scroll_x
-                    .step(self.scroll_target(fc, n, sty), sty.k_scroll, dt);
+                let target = self.scroll_target(fc, n, sty);
+                self.scroll_x.step(target, sty.k_scroll, dt);
+                // ytnative: put a scroll the idle gate already counts as stopped (within a quarter
+                // pixel) exactly on its target in that same frame. Left there, the gate stops
+                // presenting while the row is still a fraction of a pixel short, and the next
+                // present for anything else (the focused title starting its glide) moved the whole
+                // row by that fraction: a small jump just after it seemed to stop.
+                if self.scroll_x.pos != target && plx_machine::idle::settled(self.scroll_x.pos, target, self.scroll_x.vel) {
+                    self.scroll_x.jump(target);
+                }
             }
         }
         self.lift.step(

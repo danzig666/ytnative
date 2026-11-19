@@ -35,7 +35,21 @@ const LANE_SLICE: Duration = Duration::from_millis(3);
 /// 1x is chosen, waiting for loadCompleted. No picture within `TRICK_FIRST_FRAME` of Play: back
 /// to the ordinary pipeline, and the speed goes to the system player. Other videos change speed
 /// on the system player.
+///
+/// Off on webOS 5+, which has the system player for other speeds. On by default on webOS 4 (the ACB
+/// plane), which has no other engine: without it every speed was refused there. Kodi and
+/// youtube-webos-cobalt-adfree load every pipeline with it and change speed with SetPlayRate.
 const TRICK_PLAY: bool = false;
+/// webOS 4: any height (there is no system player to hand a speed to).
+fn trick_play_here(live: bool, height: u32) -> bool {
+    if live {
+        return false;
+    }
+    if crate::vplane::feed() {
+        return true;
+    }
+    TRICK_PLAY && height >= TRICK_MIN_HEIGHT
+}
 const TRICK_MIN_HEIGHT: u32 = 2160;
 const TRICK_FIRST_FRAME: Duration = Duration::from_secs(8);
 /// How long playback is timed after a speed change to see whether the TV applied it.
@@ -450,8 +464,8 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
         trick_play: false,
     };
     let plain_payload = payload::build(&spec);
-    // The pipeline a speed change reloads into (4K only), until it failed once.
-    let mut trick_payload = (TRICK_PLAY && !live && vt.height >= TRICK_MIN_HEIGHT).then(|| payload::build(&payload::Spec { trick_play: true, ..spec.clone() }));
+    // The pipeline a speed change reloads into (4K; any video on webOS 4), until it failed once.
+    let mut trick_payload = trick_play_here(live, vt.height).then(|| payload::build(&payload::Spec { trick_play: true, ..spec.clone() }));
     let mut trick = false;
     let mut payload = plain_payload.clone();
     let load_wait = Duration::from_secs(10);
@@ -459,7 +473,7 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
     let mut first_frame_by: Option<Instant> = None;
     // A reload asked for by this loop itself (the trick-play fallback), taken as a seek.
     let mut self_seek: Option<u64> = None;
-    crate::log(&format!("feed: speed in place {}", if trick_payload.is_some() { "possible (4K)" } else { "not possible" }));
+    crate::log(&format!("feed: speed in place {}", if trick_payload.is_some() { "possible" } else { "not possible" }));
     let env = payload::sink_envelope(vdecl, vt.width, vt.height, fps);
     crate::log(&format!(
         "feed: Load {} {}x{}@{fps:.3} (declared {}x{}@{}) audio={:?} hdr={:?} window={}",
@@ -697,7 +711,8 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
         }
         if !trick && (wanted - 1.0).abs() > 0.01 && seeking.is_none() && self_seek.is_none() {
             if let Some(tp) = trick_payload.clone() {
-                // A 4K video: reload it with trick play here, the speed is sent once it shows.
+                // Reload it with trick play here (a 4K video; any on webOS 4); the speed is sent
+                // once it shows.
                 crate::log(&format!("feed: speed {wanted}: reloading with trick play"));
                 trick = true;
                 payload = tp;

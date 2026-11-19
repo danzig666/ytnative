@@ -85,6 +85,8 @@ enum Act {
     Close,
     /// Play at this speed (the speed list).
     SetSpeed(f32),
+    /// Install the release the automatic check found (closes the app).
+    InstallUpdate,
 }
 
 struct State(String);
@@ -448,6 +450,19 @@ impl MenuScreen {
             (tr("Apply").to_string(), Act::ApplyFilters(query)),
         ];
         Self::make(entry, tr("Search filters").to_string(), acts)
+    }
+
+    /// The automatic check found a newer version: install it now, or later from Settings.
+    pub fn update(entry: EntryId) -> Self {
+        let version = crate::update::found_version().unwrap_or_default();
+        let acts = vec![
+            (tr("Version {} is available").replace("{}", &version), Act::Note),
+            (tr("Install now (closes the app)").to_string(), Act::InstallUpdate),
+            (tr("Later").to_string(), Act::Close),
+        ];
+        let m = Self::make(entry, tr("Update available").to_string(), acts);
+        m.refocus.set(Some(1));
+        m
     }
 
     /// Every speed SmartTube offers, the current one selected.
@@ -850,6 +865,10 @@ impl MenuScreen {
                 fx.push(Fx::Nav(NavOp::Replace(YtArg::Feed(FeedKey::Search { query: q.clone(), params }))));
             }
             Act::Close => fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry))),
+            Act::InstallUpdate => {
+                crate::update::install();
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
+            }
             Act::SetSpeed(r) => {
                 fx.push(Fx::App(YtFx::SetSpeed(*r)));
                 let label = if (*r - 1.0).abs() < 0.001 { crate::i18n::tr("Normal").to_string() } else { format!("{r}x") };

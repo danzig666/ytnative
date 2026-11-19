@@ -36,6 +36,7 @@ mod signin;
 mod sim;
 mod store;
 mod ui;
+mod update;
 #[cfg(not(windows))]
 mod vplane;
 #[cfg_attr(windows, path = "sim/wl.rs")]
@@ -285,6 +286,7 @@ fn main() {
         }
         // The simulator would register a second "TV" for phone casting on the signed-in account;
         // opt in with YTNATIVE_SIM_LOUNGE=1.
+        update::start_auto_check();
         let lounge_on = rig.store.settings.lounge_enabled && (!cfg!(windows) || std::env::var_os("YTNATIVE_SIM_LOUNGE").is_some());
         let mut lounge = if lounge_on {
             match lounge::Lounge::start(&rig.store.settings.device_name, rig.store.settings.dial_enabled) {
@@ -535,6 +537,11 @@ fn main() {
                 l.tick(&rig.player_view, now);
             }
 
+            // The automatic update check found a newer version: ask, on a list screen (never over a
+            // video; the question waits until the player is closed).
+            if !rig.player.active() && matches!(d.top_screen().map(|s| s.name()), Some("browse" | "feed")) && update::take_prompt() {
+                d.request(MachineId::Nav, NavOp::Present(YtArg::UpdatePrompt));
+            }
             // Deep links: a cold launch's or a relaunch's parameters (`v`, `contentTarget`, a search).
             // Held until the root (Browse) is mounted, so BACK from a linked video lands on Home.
             links.extend(plx_platform::tv::launch::take_all());

@@ -65,6 +65,8 @@ pub enum YtArg {
     NameEntry(NamePurpose),
     Pin(PinPurpose),
     SearchFilters(String),
+    /// The automatic check found a newer version.
+    UpdatePrompt,
 }
 
 impl ScreenArg for YtArg {
@@ -92,6 +94,7 @@ impl ScreenArg for YtArg {
             YtArg::SpeedMenu => 17,
             YtArg::NameEntry(_) => 18,
             YtArg::SuggestionMenu(_) => 19,
+            YtArg::UpdatePrompt => 20,
         })
     }
     fn title(&self) -> Option<&str> {
@@ -294,6 +297,7 @@ impl Mounter<YtHost> for Mount {
             YtArg::SuggestionMenu(video_id) => Box::new(screens::menu::MenuScreen::suggestion(entry, video_id, cx)),
             YtArg::PlayerMenu => Box::new(screens::menu::MenuScreen::player(entry, cx)),
             YtArg::SpeedMenu => Box::new(screens::menu::MenuScreen::speeds(entry, cx)),
+            YtArg::UpdatePrompt => Box::new(screens::menu::MenuScreen::update(entry)),
             YtArg::Accounts => Box::new(screens::accounts::AccountsScreen::new(entry)),
             YtArg::Comments(v) => Box::new(screens::comments::CommentsScreen::new(entry, v.clone(), None)),
             YtArg::Replies(token, author) => Box::new(screens::comments::CommentsScreen::new(entry, token.clone(), Some(author.clone()))),

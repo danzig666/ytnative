@@ -135,7 +135,7 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
             Page("Content filters", SettingsPage::Content),
             Page("Interface", SettingsPage::Interface),
             Page("Remote control", SettingsPage::Remote),
-            Page("Account", SettingsPage::About),
+            Page("Account & about", SettingsPage::About),
         ],
         SettingsPage::Playback => vec![
             Opt("Maximum quality", |s| format!("{}p", s.max_height), |s, d| s.max_height = cycle(&[480, 720, 1080, 1440, 2160], s.max_height, d)),
@@ -411,7 +411,8 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
             }),
             Info("On your phone", |_| crate::i18n::tr("YouTube \u{203A} Cast \u{203A} Link with TV code").into()),
         ],
-        SettingsPage::About => vec![
+        SettingsPage::About => {
+            let mut v = vec![
             Action("Accounts (switch, add, remove)", |fx| fx.push(Fx::Nav(NavOp::Push(YtArg::Accounts)))),
             Action("Sign in with a code", |fx| fx.push(Fx::Nav(NavOp::Push(YtArg::SignIn)))),
             Action("Sign out", |fx| {
@@ -426,8 +427,17 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
                 crate::i18n::tr(if crate::DATA_TEMPORARY.load(std::sync::atomic::Ordering::Relaxed) { "Lost at every restart (no writable folder)" } else { "Kept across restarts" }).into()
             }),
             Info("Version", |_| app_version().into()),
+            Info("Update", |_| update_text()),
+            Action("Check for updates", |_| crate::update::check_now()),
             Info("Source", |_| "github.com/danzig666/ytnative".into()),
-        ],
+            ];
+            // Below "Check for updates", so the focus stays on it when this row appears.
+            if crate::update::found() {
+                let at = v.len() - 1;
+                v.insert(at, Action("Install the update (closes the app)", |_| crate::update::install()));
+            }
+            v
+        }
     }
 }
 
@@ -680,6 +690,23 @@ impl Screen<YtHost> for SettingsScreen {
 }
 
 /// The version the package is released as (`pkg/appinfo.json`, the one place it is bumped).
+fn update_text() -> String {
+    use crate::i18n::tr;
+    use crate::update::State;
+    match crate::update::state() {
+        State::Unknown => tr("Not checked yet").into(),
+        State::Checking => tr("Checking\u{2026}").into(),
+        State::UpToDate => tr("Up to date").into(),
+        State::Available(r) => tr("Version {} available").replace("{}", &r.version),
+        State::CheckFailed(e) => tr("Could not check: {}").replace("{}", &e),
+        State::Downloading(Some(p)) => format!("{} {p}%", tr("Downloading\u{2026}")),
+        State::Downloading(None) => tr("Downloading\u{2026}").into(),
+        State::Installing => tr("Installing\u{2026} the app will close").into(),
+        State::Installed => tr("Installed: open the app again").into(),
+        State::InstallFailed(e) => tr("Update failed: {}").replace("{}", tr(&e)),
+    }
+}
+
 fn app_version() -> &'static str {
     const INFO: &str = include_str!("../../pkg/appinfo.json");
     INFO.split("\"version\"")

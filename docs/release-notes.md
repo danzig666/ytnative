@@ -1,1 +1,5 @@
-- Fixed: Keys on the search keyboard sometimes did not type when clicked with the Magic Remote pointer
+- New: The app checks for updates and offers to install them through Homebrew Channel (at most once a day at startup, never during a video)
+- New: Settings › Account & about shows the update status, with "Check for updates" and "Install the update" buttons
+- Fixed: Playback speed can now be changed on webOS 4 TVs (it always said "This speed is not available on this TV")
+- Fixed: Video rows no longer jump slightly just after a sideways scroll stops
+- Changed: The Settings row "Account" is now "Account & about"
