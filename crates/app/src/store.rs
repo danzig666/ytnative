@@ -579,9 +579,35 @@ pub enum SleepStep {
     Lapse,
 }
 
+/// The viewer left the player for the lists: the player stopped (`stopped_ms`) over 2 s ago and
+/// no next video started since. True once: the stop is then used up, so an old stop cannot end
+/// what a later playback sets up (its play queue is set before the player is mounted under the
+/// page dip, and a sleep timer may be set from the lists).
+pub fn left_player(stopped_ms: &mut Option<u32>, now_ms: u32) -> bool {
+    match *stopped_ms {
+        Some(s) if now_ms.wrapping_sub(s) > 2_000 => {
+            *stopped_ms = None;
+            true
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod sleep_tests {
     use super::*;
+
+    #[test]
+    fn leaving_the_player_counts_once() {
+        let mut stopped = Some(10_000);
+        assert!(!left_player(&mut stopped, 11_000), "the next video starts within a moment");
+        assert!(left_player(&mut stopped, 12_500));
+        // Later frames (a new queue set while the next player is on its way) see no stop.
+        assert!(!left_player(&mut stopped, 60_000));
+        assert_eq!(stopped, None);
+        let mut none = None;
+        assert!(!left_player(&mut none, 99_000));
+    }
 
     #[test]
     fn the_sleep_timer_warns_restarts_and_lapses() {

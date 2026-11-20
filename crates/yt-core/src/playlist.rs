@@ -3,7 +3,8 @@
 //! A playlist's own page (browse `VL<id>`) is no good for this: YouTube's TV client sends its
 //! first 15 videos and no continuation. The watch page's playlist panel is: asked with the
 //! playlist id alone (no video), `next` starts the panel at the playlist's first video, and its
-//! continuation walks the list to the end, 20 videos at a time. Asked with a video further down,
+//! continuation walks the list, 20 videos at a time. Past the end the windows start over with the
+//! first video (with new tokens), which is where a walk stops. Asked with a video further down,
 //! the panel is a window around that video instead (so it cannot be used to load the list).
 //! Mixes (ids starting with "RD": "My Mix", "Mix – <artist>") are endless: the panel says
 //! `isInfinite` and its continuation keeps giving more.
@@ -57,22 +58,46 @@ mod live {
         }
     }
 
-    /// Every video of a playlist through the panel's continuation (at most `pages` windows).
-    fn walk(s: &mut Session, id: &str, pages: usize) -> (Vec<String>, bool) {
+    /// Every video of a playlist through the panel's continuation (at most `pages` windows), the
+    /// way the app walks it: until a window is empty, has no token, names the token it was asked
+    /// with, or brings back the list's first video (past its end a finite list starts over).
+    /// Returns the videos, whether a token was left, and why the walk ended.
+    fn walk(s: &mut Session, id: &str, pages: usize) -> (Vec<String>, bool, &'static str) {
         let p = s.playlist_start(id).unwrap();
         let mut ids: Vec<String> = p.items.iter().map(|i| i.id.clone()).collect();
         let mut token = p.continuation;
+        let mut why = "page limit";
         for _ in 0..pages {
-            let Some(t) = token.take() else { break };
+            let Some(t) = token.take() else {
+                why = "no token";
+                break;
+            };
             let (more, next) = s.playlist_more(&t).unwrap();
-            let before = ids.len();
-            ids.extend(more.into_iter().map(|i| i.id).filter(|v| !ids.contains(v)).collect::<Vec<_>>());
-            if ids.len() == before {
+            if more.is_empty() {
+                why = "empty window";
+                break;
+            }
+            // Past its end a finite list starts over with new tokens.
+            let round = more.iter().any(|i| i.id == ids[0]);
+            for i in more {
+                if !ids.contains(&i.id) {
+                    ids.push(i.id);
+                }
+            }
+            if round {
+                why = "went round to the first video";
+                break;
+            }
+            if next.as_deref() == Some(t.as_str()) {
+                why = "same token";
                 break;
             }
             token = next;
         }
-        (ids, token.is_some())
+        if why == "page limit" && token.is_none() {
+            why = "no token";
+        }
+        (ids, token.is_some(), why)
     }
 
     /// What the player saw before (watch page without the playlist id) and sees now (with it).
@@ -103,8 +128,8 @@ mod live {
         let cards: Vec<&Item> = page.shelves.iter().flat_map(|sh| sh.items.iter()).collect();
         println!("page: {} cards, continuation {}, first {}", cards.len(), page.continuation.is_some(), endpoint(cards[0]));
         before_after(&mut s, &cards[0].id, LIST);
-        let (ids, more) = walk(&mut s, LIST, 50);
-        println!("walked: {} videos, more left {more}; starts {:?}", ids.len(), &ids[..3]);
+        let (ids, more, why) = walk(&mut s, LIST, 50);
+        println!("walked: {} videos, more left {more} (ended: {why}); starts {:?}", ids.len(), &ids[..3]);
         assert!(ids.len() > cards.len() && ids[..cards.len()].iter().zip(&cards).all(|(a, c)| *a == c.id), "the page's cards are the list's start");
         let w = s.watch(&ids[45], Some(LIST)).unwrap();
         let p = w.playlist.unwrap();
@@ -167,12 +192,12 @@ mod live {
                 Some(Endpoint::Browse { browse_id, .. }) => browse_id.trim_start_matches("VL").to_string(),
                 _ => continue,
             };
-            let (ids, more) = walk(&mut s, &pl, 10);
-            println!("  walked {} videos (more left {more})", ids.len());
+            let (ids, more, why) = walk(&mut s, &pl, 60);
+            println!("  walked {} videos (more left {more}, ended: {why})", ids.len());
             before_after(&mut s, &ids[0], &pl);
         }
         let uploads = format!("UU{}", &w.channel_id[2..]);
-        let (ids, more) = walk(&mut s, &uploads, 3);
-        println!("uploads {uploads}: walked {} videos (more left {more})", ids.len());
+        let (ids, more, why) = walk(&mut s, &uploads, 3);
+        println!("uploads {uploads}: walked {} videos (more left {more}, ended: {why})", ids.len());
     }
 }

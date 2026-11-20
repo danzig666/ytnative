@@ -62,6 +62,20 @@ pub fn on_ended(c: &EndContext<'_>, rand: u64) -> EndAction {
     if let Some(q) = c.queue.filter(|q| q.contains(c.current) && (q.playlist || c.mode != M::PlayNext)) {
         return from_queue(c, q, rand);
     }
+    // A "Play next" video cut into a playlist: the playlist goes on as if the video it cut in
+    // after had just ended (the queued video's watch page knows nothing of the playlist).
+    if let Some((q, from)) = c.queue.and_then(|q| q.resume_after.as_deref().filter(|v| q.playlist && q.contains(v)).map(|v| (q, v))) {
+        let resumed = EndContext {
+            current: from,
+            mode: c.mode,
+            loop_short: false,
+            play_next: c.play_next,
+            queue: c.queue,
+            yt_playlist: None,
+            autoplay: c.autoplay.clone().filter(|(v, _)| v != c.current),
+        };
+        return from_queue(&resumed, q, rand);
+    }
     // Not in the list it was started from (YouTube's pick, a phone's video): the watch page's
     // playlist when it has one, else its pick.
     let in_panel = |dir, wrap| c.yt_playlist.and_then(|(id, ids)| list_step(ids, c.current, dir, wrap).map(|v| (v.clone(), Some(id.to_string()))));
@@ -91,24 +105,34 @@ fn from_queue(c: &EndContext<'_>, q: &PlayQueue, rand: u64) -> EndAction {
         let order = q.shuffled_order(None, here, rand);
         EndAction::Shuffled(order.clone(), q.items[order[0]].clone(), pl())
     };
-    let next = q.step(cur, 1, false);
+    // The watch page's playlist has a next video the queue does not know yet (the rest of the
+    // list still loading, or its loading failed): the playlist goes on with it before any wrap,
+    // reshuffle or YouTube's pick.
+    let unknown = || {
+        c.yt_playlist
+            .filter(|(id, _)| q.playlist_id.as_deref() == Some(*id))
+            .and_then(|(id, ids)| list_step(ids, cur, 1, false).filter(|v| !q.contains(v)).map(|v| EndAction::Go(v.clone(), Some(id.to_string()))))
+    };
+    let next = || q.step(cur, 1, false).map(go).or_else(unknown);
     let action = match c.mode {
-        M::PlayNext => next.map(go).or_else(|| after_queue(c, q)),
-        M::ListOnce => next.map(go),
+        M::PlayNext => next().or_else(|| after_queue(c, q)),
+        M::ListOnce => next(),
         M::Reverse => q.step(cur, -1, false).map(go),
-        M::ListRepeat => next.map(go).or_else(|| match () {
+        M::ListRepeat => next().or_else(|| match () {
             // The rest of the list is still loading: YouTube's next of the playlist.
             _ if !q.complete() => yt(true),
             _ if q.shuffled() => Some(again()),
             _ => q.step(cur, 1, true).map(go),
         }),
-        M::Shuffle if !q.shuffled() && q.can_shuffle() => {
+        M::Shuffle if !q.shuffled() && !q.keep_order && q.can_shuffle() => {
             // The first end in Shuffle mode: a play order with this video first, each video once.
             let order = q.shuffled_order(q.items.iter().position(|v| v == cur), None, rand);
             Some(EndAction::Shuffled(order.clone(), q.items[order[1]].clone(), pl()))
         }
-        M::Shuffle => next.map(go).or_else(|| match () {
+        M::Shuffle => next().or_else(|| match () {
             _ if !q.complete() || !q.can_shuffle() => yt(false),
+            // Shuffle switched off in the player: the list's order, round again.
+            _ if q.keep_order => q.step(cur, 1, true).map(go),
             _ => Some(again()),
         }),
         M::RepeatOne | M::PauseEach | M::CloseEach => None,
@@ -407,6 +431,65 @@ mod tests {
         let mut c = Case::new("b", &[]);
         c.autoplay = Some(("b".into(), None));
         assert_eq!(c.end(M::PlayNext), EndAction::Stay);
+    }
+
+    #[test]
+    fn a_failed_load_is_not_the_end_of_the_playlist() {
+        // Only the page's videos are known and loading the rest failed: the watch page's
+        // playlist knows the next one.
+        let mut c = Case::playlist("b", &["a", "b"]);
+        c.queue.as_mut().unwrap().truncated = true;
+        c.yt = Some(("PL1", ids(&["a", "b", "c"])));
+        for m in [M::PlayNext, M::ListOnce, M::ListRepeat] {
+            assert_eq!(c.end(m), pl("c"), "{m:?}");
+        }
+        // Without the watch page's playlist, List repeat does not loop over the part known.
+        c.yt = None;
+        assert_ne!(c.end(M::ListRepeat), pl("a"));
+        assert!(!c.queue.as_ref().unwrap().complete());
+    }
+
+    #[test]
+    fn the_watch_pages_next_video_is_taken_before_wrapping_a_complete_queue() {
+        let mut c = Case::playlist("b", &["a", "b"]);
+        c.yt = Some(("PL1", ids(&["a", "b", "c"])));
+        assert_eq!(c.end(M::ListRepeat), pl("c"));
+        // A playlist of another id says nothing about this one.
+        c.yt = Some(("PL2", ids(&["a", "b", "c"])));
+        assert_eq!(c.end(M::ListRepeat), pl("a"));
+    }
+
+    #[test]
+    fn the_playlist_goes_on_after_a_play_next_video_that_cut_in() {
+        let mut c = Case::playlist("q1", &["a", "b", "c"]);
+        c.queue.as_mut().unwrap().resume_after = Some("b".into());
+        c.autoplay = Some(("recommended".into(), None));
+        for m in [M::PlayNext, M::ListOnce, M::ListRepeat] {
+            assert_eq!(c.end(m), pl("c"), "{m:?}");
+        }
+        assert_eq!(c.end(M::Reverse), pl("a"));
+        // More "Play next" videos still go first.
+        c.play_next = ids(&["q2"]);
+        assert_eq!(c.end(M::PlayNext), EndAction::Queued("q2".into()));
+        // Not for a list of cards in Play next mode, nor a marker outside the list.
+        let mut cards = Case::new("q1", &["a", "b"]);
+        cards.queue.as_mut().unwrap().resume_after = Some("a".into());
+        assert_eq!(cards.end(M::PlayNext), go("auto"));
+        c.play_next.clear();
+        c.queue.as_mut().unwrap().resume_after = Some("zz".into());
+        assert_eq!(c.end(M::PlayNext), go("recommended"));
+    }
+
+    #[test]
+    fn shuffle_mode_keeps_the_order_the_viewer_chose() {
+        let mut c = Case::playlist("a", &["a", "b", "c"]);
+        c.queue.as_mut().unwrap().keep_order = true;
+        assert_eq!(c.end(M::Shuffle), pl("b"));
+        c.current = "c".into();
+        assert_eq!(c.end(M::Shuffle), pl("a"), "round again in the list's order");
+        // Switching shuffle on again forgets it.
+        c.queue.as_mut().unwrap().shuffle(Some("c"), 3);
+        assert!(!c.queue.as_ref().unwrap().keep_order);
     }
 
     #[test]

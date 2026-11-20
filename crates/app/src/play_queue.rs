@@ -31,6 +31,14 @@ pub struct PlayQueue {
     pub more: Option<String>,
     /// A window of the list is being loaded.
     pub loading: bool,
+    /// Loading the rest of the list failed: the videos known are not all of it, so its end is not
+    /// the playlist's end (`complete` stays false).
+    pub truncated: bool,
+    /// The viewer switched shuffle off: the Shuffle playback mode then keeps the list's order.
+    pub keep_order: bool,
+    /// The playlist video a "Play next" video cut in after: the playlist goes on from it once
+    /// the queued videos are done.
+    pub resume_after: Option<String>,
 }
 
 impl PlayQueue {
@@ -58,9 +66,9 @@ impl PlayQueue {
         self.items.len()
     }
 
-    /// Every video of the list is known (nothing more to load, nothing loading).
+    /// Every video of the list is known (nothing more to load, nothing loading, no load failed).
     pub fn complete(&self) -> bool {
-        self.more.is_none() && !self.loading
+        self.more.is_none() && !self.loading && !self.truncated
     }
 
     pub fn shuffled(&self) -> bool {
@@ -131,6 +139,7 @@ impl PlayQueue {
     pub fn shuffle(&mut self, video: Option<&str>, rand: u64) {
         let first = video.and_then(|v| self.items.iter().position(|x| x == v));
         self.order = Some(self.shuffled_order(first, None, rand));
+        self.keep_order = false;
     }
 
     /// Shuffle off: the list's own order.

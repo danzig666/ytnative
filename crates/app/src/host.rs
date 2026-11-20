@@ -217,6 +217,8 @@ pub enum YtFx {
     ShuffleQueue(bool),
     /// The play queue's order as `next_up` worked it out (a shuffle started or went round again).
     SetQueueOrder(Vec<usize>),
+    /// A "Play next" video takes over from this playlist video: the playlist goes on from it.
+    QueueResume(String),
     Local(LocalOp),
     EditFilters(Box<dyn FnOnce(&mut yt_core::search_filters::Filters) + Send>),
     /// `key` names the list in the store: a video id (top-level comments) or a replies token.
@@ -364,9 +366,9 @@ enum Work {
     SignIn(u32, SignIn),
     /// A YouTube playlist's videos, read for "Copy to this TV": (title, videos or the error).
     CopiedToTv(String, Result<Vec<yt_core::local_playlists::Video>, String>),
-    /// A window of the play queue's YouTube playlist (`start`: its first), or the error, for the
-    /// queue `gen` (`AppRig::queue_gen`) it was asked for.
-    Queue { gen: u64, playlist_id: String, start: bool, result: Result<QueueWindow, String> },
+    /// A window of the play queue's YouTube playlist (`asked`: the token it was asked with, None
+    /// for its first), or the error, for the queue `gen` (`AppRig::queue_gen`) it was asked for.
+    Queue { gen: u64, playlist_id: String, asked: Option<String>, result: Result<QueueWindow, String> },
     /// A live chat request's answer, for the polling generation that asked.
     /// `Ok(None)`: the video has no live chat.
     LiveChat { gen: u64, page: Result<Option<yt_core::live_chat::LiveChatPage>, String> },
@@ -482,6 +484,11 @@ pub struct AppRig {
     /// Bumped for every new play queue: windows loaded for an earlier one (the same playlist
     /// opened again) are dropped, so one walk loads it.
     queue_gen: u64,
+    /// The first video of the playlist being walked (from its first window): a window that
+    /// brings it back went round the end of the list.
+    queue_first: Option<String>,
+    /// Windows loaded in this walk (a stop for a list that never ends its tokens).
+    queue_windows: u32,
 }
 
 impl AppRig {
@@ -545,6 +552,8 @@ impl AppRig {
             queue_from: None,
             queue_panel_for: String::new(),
             queue_gen: 0,
+            queue_first: None,
+            queue_windows: 0,
         };
         rig.store.local = yt_core::local_playlists::Store::load();
         rig.local_feeds();
@@ -710,19 +719,27 @@ impl AppRig {
         }
         let gen = self.queue_gen;
         self.spawn(from, "play queue", move |s| {
-            let start = token.is_none();
             let result = with_session(s, |s| match &token {
                 None => s.playlist_start(&playlist_id).map(|p| QueueWindow { title: p.title, items: p.items, next: p.continuation, infinite: Some(p.infinite) }),
                 Some(t) => s.playlist_more(t).map(|(items, next)| QueueWindow { title: String::new(), items, next, infinite: None }),
             });
-            Work::Queue { gen, playlist_id, start, result: result.map_err(|e| format!("{e:#}")) }
+            Work::Queue { gen, playlist_id, asked: token, result: result.map_err(|e| format!("{e:#}")) }
         });
+    }
+
+    /// A new play queue: answers still on their way for the one before are dropped, and its walk
+    /// starts afresh.
+    fn new_queue(&mut self, q: Option<crate::play_queue::PlayQueue>) {
+        self.store.play_queue = q;
+        self.queue_gen += 1;
+        self.queue_first = None;
+        self.queue_windows = 0;
     }
 
     /// A window of the play queue's playlist arrived: its videos join the queue, and the next
     /// window is asked for at once (an endless mix: once playback nears the end, see
     /// [`AppRig::follow_queue`]).
-    fn queue_window(&mut self, gen: u64, playlist_id: String, start: bool, result: Result<QueueWindow, String>) {
+    fn queue_window(&mut self, gen: u64, playlist_id: String, asked: Option<String>, result: Result<QueueWindow, String>) {
         if gen != self.queue_gen {
             return;
         }
@@ -733,8 +750,11 @@ impl AppRig {
         let w = match result {
             Ok(w) => w,
             Err(e) => {
+                // The videos known are not all of the list: it is not taken as ended there (the
+                // watch page's playlist goes on past them, see `next_up`).
                 crate::log(&format!("play queue {playlist_id}: {e}"));
                 q.more = None;
+                q.truncated = true;
                 return;
             }
         };
@@ -747,9 +767,21 @@ impl AppRig {
                 q.unshuffle();
             }
         }
-        let added = q.add_items(w.items, Some(&current), seed);
-        // A window with nothing new ends the walk (YouTube's last window points at itself).
-        q.more = w.next.filter(|_| start || added > 0);
+        let start = asked.is_none();
+        if start {
+            self.queue_first = w.items.first().map(|i| i.id.clone());
+        }
+        // Past its end a finite list starts over with its first video, with new tokens each time
+        // (a short album list repeats in every window): the walk ends there, at an empty window,
+        // or at a token that names itself. Windows of videos known already (a page scrolled far
+        // seeded them) do not end it.
+        let round = !start && !q.infinite && self.queue_first.as_ref().is_some_and(|f| w.items.iter().any(|i| i.id == *f));
+        let empty = w.items.is_empty();
+        q.add_items(w.items, Some(&current), seed);
+        self.queue_windows += 1;
+        // 5000 videos (YouTube's largest playlist) are 250 windows.
+        let more = !round && !empty && self.queue_windows < 400;
+        q.more = w.next.filter(|n| more && Some(n) != asked.as_ref());
         match q.more.clone() {
             Some(t) if !q.infinite => self.load_queue(playlist_id, Some(t)),
             _ => {}
@@ -761,10 +793,6 @@ impl AppRig {
     /// a video started with one from elsewhere (YouTube's pick, a phone), takes a mix's videos
     /// from its watch page, and loads more of a mix as playback nears the end of what is known.
     fn follow_queue(&mut self) {
-        if self.stopped_ms.is_some_and(|s| self.now_ms.wrapping_sub(s) > 2_000) {
-            self.store.play_queue = None;
-            return;
-        }
         let current = self.player_view.video_id.clone();
         if current.is_empty() {
             return;
@@ -822,8 +850,7 @@ impl AppRig {
                         q.info.entry(i.id.clone()).or_insert(i);
                     }
                 }
-                self.store.play_queue = Some(q);
-                self.queue_gen += 1;
+                self.new_queue(Some(q));
                 if !panel.infinite {
                     self.load_queue(panel.id, None);
                 }
@@ -984,33 +1011,36 @@ impl AppRig {
                 self.store.toast = None;
             }
         }
+        // The viewer left the player for the lists (stopped, and no next video started within a
+        // moment): the play queue and the sleep timer end, once.
+        if crate::store::left_player(&mut self.stopped_ms, now_ms) {
+            self.new_queue(None);
+            self.queue_panel_for.clear();
+            self.store.sleep = None;
+        }
         self.follow_queue();
-        // Sleep timer (`store::SleepTimer`): ends when the viewer left the player for the lists
-        // (stopped, and no next video started within a moment), else warns, restarts or pauses.
+        // Sleep timer (`store::SleepTimer`): ended above when the viewer left the player, else
+        // warns, restarts or pauses.
         if let Some(t) = self.store.sleep {
-            if self.stopped_ms.is_some_and(|s| now_ms.wrapping_sub(s) > 2_000) {
-                self.store.sleep = None;
-            } else {
-                match crate::store::sleep_step(&t, now_ms, self.last_key_ms) {
-                    crate::store::SleepStep::Wait => {}
-                    crate::store::SleepStep::Warn => {
-                        self.store.sleep = Some(crate::store::SleepTimer { warned_ms: Some(now_ms), ..t });
-                        self.store.toast("Playback pauses in 1 minute. Press any key to keep watching.", now_ms);
-                        // Longer than a toast: it asks for a key.
-                        if let Some((_, until)) = &mut self.store.toast {
-                            *until = now_ms + 10_000;
-                        }
+            match crate::store::sleep_step(&t, now_ms, self.last_key_ms) {
+                crate::store::SleepStep::Wait => {}
+                crate::store::SleepStep::Warn => {
+                    self.store.sleep = Some(crate::store::SleepTimer { warned_ms: Some(now_ms), ..t });
+                    self.store.toast("Playback pauses in 1 minute. Press any key to keep watching.", now_ms);
+                    // Longer than a toast: it asks for a key.
+                    if let Some((_, until)) = &mut self.store.toast {
+                        *until = now_ms + 10_000;
                     }
-                    crate::store::SleepStep::Restart => {
-                        self.store.sleep = Some(crate::store::SleepTimer::start(t.mins, now_ms));
-                        self.store.toast(crate::i18n::tr("Sleep timer: {}").replace("{}", &crate::settings::sleep_label(t.mins)), now_ms);
-                    }
-                    crate::store::SleepStep::Lapse => {
-                        self.store.sleep = None;
-                        if self.player_view.phase == Phase::Playing {
-                            self.player.toggle_pause();
-                            self.store.toast("Sleep timer: playback paused", now_ms);
-                        }
+                }
+                crate::store::SleepStep::Restart => {
+                    self.store.sleep = Some(crate::store::SleepTimer::start(t.mins, now_ms));
+                    self.store.toast(crate::i18n::tr("Sleep timer: {}").replace("{}", &crate::settings::sleep_label(t.mins)), now_ms);
+                }
+                crate::store::SleepStep::Lapse => {
+                    self.store.sleep = None;
+                    if self.player_view.phase == Phase::Playing {
+                        self.player.toggle_pause();
+                        self.store.toast("Sleep timer: playback paused", now_ms);
                     }
                 }
             }
@@ -1154,7 +1184,7 @@ impl AppRig {
                     }
                     out.push((addr, YtMsg::Acted));
                 }
-                Work::Queue { gen, playlist_id, start, result } => self.queue_window(gen, playlist_id, start, result),
+                Work::Queue { gen, playlist_id, asked, result } => self.queue_window(gen, playlist_id, asked, result),
                 Work::Suggestions(s) => {
                     self.store.suggestions = s;
                     out.push((addr, YtMsg::Suggestions));
@@ -1808,6 +1838,13 @@ impl Rig<YtHost> for AppRig {
                 crate::log(&format!("play {video_id} (playlist {playlist:?})"));
                 self.queue_from = Some(from);
                 self.stopped_ms = None;
+                // The playlist panel of this playback is looked at afresh (the same video may come
+                // back with its playlist after the queue ended).
+                self.queue_panel_for.clear();
+                // A playlist video plays again: a "Play next" video that cut in is over.
+                if let Some(q) = self.store.play_queue.as_mut().filter(|q| q.contains(&video_id)) {
+                    q.resume_after = None;
+                }
                 // One pipeline at a time: a card's preview is unloaded before the player loads.
                 crate::preview::stop();
                 // A queued video leaves "Play next" once it plays, however it was started.
@@ -2146,8 +2183,11 @@ impl Rig<YtHost> for AppRig {
                 self.queue_from = Some(from);
                 // A YouTube playlist loads in full in the background (a mix as it plays).
                 let load = q.playlist_id.clone().filter(|_| !q.infinite);
-                self.store.play_queue = Some(q);
-                self.queue_gen += 1;
+                self.new_queue(Some(q));
+                // A video is about to start from this list: an earlier stop (the viewer left the
+                // player a while ago) must not end the queue while the player is still on its way
+                // under the page dip.
+                self.stopped_ms = None;
                 if let Some(id) = load {
                     self.load_queue(id, None);
                 }
@@ -2159,10 +2199,16 @@ impl Rig<YtHost> for AppRig {
                         q.shuffle(Some(&v), seed);
                     } else {
                         q.unshuffle();
+                        q.keep_order = true;
                     }
                 }
                 let label = format!("{}: {}", crate::i18n::tr("Shuffle"), crate::i18n::tr(if on { "On" } else { "Off" }));
                 self.store.toast(label, self.now_ms);
+            }
+            YtFx::QueueResume(video) => {
+                if let Some(q) = self.store.play_queue.as_mut().filter(|q| q.contains(&video)) {
+                    q.resume_after = Some(video);
+                }
             }
             YtFx::SetQueueOrder(order) => {
                 let (v, seed) = (self.player_view.video_id.clone(), crate::play_queue::seed(self.now_ms));

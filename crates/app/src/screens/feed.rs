@@ -17,7 +17,7 @@ const STYLE: RowStyle = RowStyle { w: 380.0, h: 214.0, gap: 44.0, ..RowStyle::HO
 /// Where the grid starts: lower on a channel page and a playlist's page, whose buttons (Subscribe;
 /// Play all and Shuffle) have a line of their own under the title.
 fn grid_top(key: &FeedKey) -> f32 {
-    if is_channel(key) || playlist_of(key).is_some() { 212.0 } else { 170.0 }
+    if is_channel(key) || playlist_of(key).is_some() { 234.0 } else { 170.0 }
 }
 
 /// A playlist's page: the YouTube playlist's id ("VL" taken off), or None for a playlist on this
@@ -40,12 +40,12 @@ fn spec(top: f32) -> GridSpec {
 const G: GroupId = GroupId(1);
 const G_BTN: GroupId = GroupId(2);
 const SUB_BTN: u32 = 0x7900_0000;
-const SUB_RECT: Rect = Rect::new(112.0, 112.0, 300.0, 50.0);
+const SUB_RECT: Rect = Rect::new(112.0, 134.0, 300.0, 50.0);
 /// A playlist's Play all and Shuffle, on the line where a channel has Subscribe.
 const PLAY_BTN: u32 = 0x7900_0001;
 const SHUFFLE_BTN: u32 = 0x7900_0002;
-const PLAY_RECT: Rect = Rect::new(112.0, 112.0, 300.0, 50.0);
-const SHUFFLE_RECT: Rect = Rect::new(436.0, 112.0, 300.0, 50.0);
+const PLAY_RECT: Rect = Rect::new(112.0, 134.0, 300.0, 50.0);
+const SHUFFLE_RECT: Rect = Rect::new(436.0, 134.0, 300.0, 50.0);
 
 struct State(String);
 impl LogicalState for State {
