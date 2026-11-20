@@ -15,12 +15,13 @@ webOS app framework); SmartTube is the feature reference throughout.
 
 ![The player in 4K with the SmartTube-style controls](docs/screenshots/player-smarttube.jpg)
 
-![Home: shelves of videos, the focused one raised, a members-only badge](docs/screenshots/home.jpg)
+![Home: shelves of videos, the focused one raised](docs/screenshots/home.jpg)
 
 | | |
 |---|---|
+| ![Settings in two panes: the categories on the left, Playback's options on the right (2160p, AV1, HDR)](docs/screenshots/settings.jpg) | ![SponsorBlock & DeArrow settings: a choice per segment category, on / off switches](docs/screenshots/settings-sponsorblock.jpg) |
 | ![The sidebar slid in over Home](docs/screenshots/sidebar.jpg) | ![Search results for "nasa"](docs/screenshots/search.jpg) |
-| ![The player with the YouTube-style controls (Settings > Player style)](docs/screenshots/player-youtube.jpg) | ![Playback settings: 2160p, AV1, HDR](docs/screenshots/settings.jpg) |
+| ![The on-screen keyboard with search suggestions](docs/screenshots/keyboard.jpg) | ![The player with the YouTube-style controls (Settings > Playback > Player style)](docs/screenshots/player-youtube.jpg) |
 | ![The sign-in screen: a code or a QR code](docs/screenshots/signin.jpg) | |
 
 The player screenshots are from an LG C3; the others are from the app's Windows simulator, which
@@ -39,6 +40,9 @@ runs the same UI code as the TV build.
    ```
 
 3. **ytnative** shows up in the list. Install it; new releases show up as updates.
+
+ytnative also looks for new releases itself and offers to install them (**Settings > Account &
+about > Check for updates**).
 
 ### Developer Mode / manual
 
@@ -60,20 +64,24 @@ Root is not required.
   webOS 3 is not supported.
 - Any GPU: the app links only the generic `libGLESv2`, loads EGL at runtime and falls back where
   an extension or shader precision is missing (developed on Mali; other GPUs are untested).
-- A Google account is optional: sign in with a code from **Settings > Account** to get your Home,
-  Subscriptions, History and playlists.
+- A Google account is optional: sign in with a code from **Settings > Account & about** to get
+  your Home, Subscriptions, History, playlists and notifications.
 
 ## Features
 
 Everything SmartTube users expect, rebuilt for webOS:
 
 **Browsing**
-- Home, Subscriptions, Channels, History, Library/playlists, Music, Gaming, News, Podcasts, Live,
-  Movies, Sports, Trending, pinned playlists/channels, channel groups and search (on-screen
-  keyboard, suggestions, filters, search history).
-- Hidden sidebar that slides in from the leftmost tile or with BACK; double BACK exits.
+- Home, Subscriptions, Channels, History, Library/playlists, Notifications, Music, Gaming, News,
+  Podcasts, Live, Movies, Sports, pinned playlists/channels, channel groups and search (on-screen
+  keyboard, suggestions, filters, search history). Each sidebar section can be shown or hidden.
+- Hidden sidebar that slides in from the leftmost tile or with BACK; a section opens with OK or a
+  click, double BACK exits.
+- Notifications: the newest videos of the channels whose bell is set to All videos.
 - Titles under thumbnails, configurable card size, OLED black background, accent colours,
   optional clock on the video lists.
+- Optional video previews: a muted preview plays in the card the focus rests on (Settings >
+  Interface, off by default).
 - Content filters: hide Shorts, watched videos, upcoming streams, mixes; block channels.
 - Multiple accounts and brand accounts, settings PIN, child mode.
 
@@ -83,18 +91,33 @@ Everything SmartTube users expect, rebuilt for webOS:
   used for 4K/VP9/AV1/HDR and live).
 - SmartTube's two rows of on-screen controls (playback mode, speed, chapters, comments, search,
   channel, like / dislike, subtitles, save to playlist, subscribe, video info, SponsorBlock) and a
-  suggestions row, all reachable with the arrow keys or the Magic Remote pointer.
+  suggestions row, all reachable with the arrow keys or the Magic Remote pointer. A YouTube-style
+  control layout is the alternative.
+- The subscribe button of a subscribed channel sets its notification bell (All videos,
+  Personalized, None) or unsubscribes, as on YouTube.
 - Chapter selector (a list of the video's chapters, OK jumps there), chapters on the seek bar,
-  storyboard previews while seeking, resume where you left off,
+  storyboard previews while seeking, resume where you left off, keep up with live streams,
   autoplay / repeat, playback speed (per channel if you like).
+- **Audio only**: sound alone over a black screen, no video downloaded.
+- **Same volume for every video**: loud videos are turned down, as YouTube's own players do.
+- **Ambient mode**: a soft glow in the video's colours in the black bars of 4:3 videos, Shorts
+  and films.
+- **Video details**: engine, codecs, resolution, bitrates, buffer and connection speed over the
+  video.
 - Subtitles with size, colour, font, bold, outline / shadow / box styles and auto-translate.
-- Comments in a side panel (the video shrinks beside it) with replies.
+- Comments in a side panel (the video shrinks beside it) with replies, and **live chat** beside
+  live streams, each message with the time it was sent.
+- Sleep timer: a countdown set in the player's options that runs across the next videos, warns a
+  minute before and pauses playback.
 - OSD, comments and subtitles are dimmed automatically over HDR video.
 
-**Options (SmartTube's, adapted to webOS)**
+**Settings**
+- Two panes: the categories (Playback, Subtitles, SponsorBlock & DeArrow, Content filters,
+  Interface, Remote control, Account & about) on the left, their options on the right, on / off
+  options as switches. **Search settings** finds any option by name.
 - Playback modes (play next, repeat, list once / repeat / shuffle / reverse, pause or close after
   each video), remembered speed (per video, per channel, for all), OK button behaviour, auto-hide,
-  seek step, number-key seeking, ending time, sleep timer, resume rules, preferred audio language.
+  seek step, number-key seeking, ending time, resume rules, preferred audio language.
 - Subtitles per channel, thumbnail picture, content country, channels sorting.
 - Content filters per section (Shorts, watched, upcoming, streams), blocked channels, watch and
   search history switches.
@@ -102,11 +125,15 @@ Everything SmartTube users expect, rebuilt for webOS:
 **Extras**
 - **SponsorBlock** (per-category skip / ask / off, segment markers on the seek bar),
   **DeArrow** titles and thumbnails, **Return YouTube Dislike**.
-- Cast from your phone: link with a TV code, or pick the TV from the YouTube app's cast menu (DIAL).
+- Cast from your phone: link with a TV code (Settings > Remote control), or, while the app is
+  open, pick the TV from the YouTube app's cast menu (DIAL).
 - Remote colour buttons can be mapped to actions; Magic Remote pointer, wheel and edge scrolling
   everywhere.
 - Interface in English, Hungarian, German, Spanish, French and Russian.
 - Settings backup and restore (USB or app storage).
+- **Problem report** (Settings > Account & about): the app's logs on screen, and a QR code to
+  download them on a phone on the same Wi-Fi, with sign-in tokens and stream addresses removed.
+  Attach the report when you open an issue.
 
 ## How it works
 
