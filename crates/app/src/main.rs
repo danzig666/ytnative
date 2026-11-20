@@ -15,6 +15,7 @@ mod host;
 mod images;
 mod input;
 mod i18n;
+mod live_chat;
 #[cfg(not(windows))]
 mod relaunch;
 #[cfg(not(windows))]

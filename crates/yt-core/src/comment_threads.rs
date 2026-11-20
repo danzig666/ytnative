@@ -16,7 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Continuations served by the web site carry this prefix (the TV ones have none).
 pub const PREFIX: &str = "web:";
 
-const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
+pub(crate) const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
 const CACHE_FILE: &str = "web_comments.json";
 const CACHE_SECS: u64 = 24 * 3600;
 
@@ -89,7 +89,7 @@ fn threaded(v: &Value) -> bool {
 }
 
 /// The web client's context: version and `configInfo` from the home page, kept for a day.
-fn context(http: &reqwest::blocking::Client, fresh: bool) -> Result<Value> {
+pub(crate) fn context(http: &reqwest::blocking::Client, fresh: bool) -> Result<Value> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let path = crate::paths::data_file(CACHE_FILE);
     if !fresh {

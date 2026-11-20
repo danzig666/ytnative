@@ -1,0 +1,71 @@
+{
+  "responseContext": {},
+  "continuationContents": {
+    "liveChatContinuation": {
+      "continuations": [
+        { "invalidationContinuationData": { "invalidationId": { "objectSource": 1056 }, "timeoutMs": 5000, "continuation": "NEXT-TOKEN" } }
+      ],
+      "actions": [
+        { "addChatItemAction": { "clientId": "c1", "item": { "liveChatTextMessageRenderer": {
+          "id": "msg-1",
+          "message": { "runs": [
+            { "text": "hello " },
+            { "emoji": { "emojiId": "👋", "shortcuts": [":waving_hand:", ":wave:"], "isCustomEmoji": false } },
+            { "text": " everyone" }
+          ] },
+          "authorName": { "simpleText": "Viewer One" },
+          "authorExternalChannelId": "UC000000000000000000000a",
+          "timestampUsec": "1700000000000000"
+        } } } },
+        { "addChatItemAction": { "item": { "liveChatTextMessageRenderer": {
+          "id": "msg-2",
+          "message": { "runs": [
+            { "text": "nice " },
+            { "emoji": { "emojiId": "❤" } },
+            { "text": " " },
+            { "emoji": { "emojiId": "UC000000000000000000000b/abc", "shortcuts": [":channel-wave:"], "isCustomEmoji": true } }
+          ] },
+          "authorName": { "simpleText": "Moderator Two" },
+          "authorBadges": [ { "liveChatAuthorBadgeRenderer": { "icon": { "iconType": "MODERATOR" }, "tooltip": "Moderator" } } ]
+        } } } },
+        { "addChatItemAction": { "item": { "liveChatPaidMessageRenderer": {
+          "id": "msg-3",
+          "authorName": { "simpleText": "Supporter Three" },
+          "purchaseAmountText": { "simpleText": "€5.00" },
+          "message": { "runs": [ { "text": "great stream" } ] },
+          "headerBackgroundColor": 4280191205,
+          "bodyBackgroundColor": 4280558628,
+          "authorBadges": [ { "liveChatAuthorBadgeRenderer": { "customThumbnail": { "thumbnails": [] }, "tooltip": "Member (2 months)" } } ]
+        } } } },
+        { "addChatItemAction": { "item": { "liveChatPaidStickerRenderer": {
+          "id": "msg-4",
+          "authorName": { "simpleText": "Sticker Four" },
+          "purchaseAmountText": { "simpleText": "$2.00" },
+          "backgroundColor": 4278239141
+        } } } },
+        { "removeChatItemAction": { "targetItemId": "msg-gone" } },
+        { "addChatItemAction": { "item": { "liveChatMembershipItemRenderer": {
+          "id": "msg-5",
+          "authorName": { "simpleText": "New Member Five" },
+          "headerSubtext": { "simpleText": "Welcome to the channel!" }
+        } } } },
+        { "addChatItemAction": { "item": { "liveChatMembershipItemRenderer": {
+          "id": "msg-6",
+          "authorName": { "simpleText": "Loyal Six" },
+          "headerPrimaryText": { "runs": [ { "text": "Member for " }, { "text": "6" }, { "text": " months" } ] },
+          "headerSubtext": { "simpleText": "Example Channel" },
+          "message": { "runs": [ { "text": "still here" } ] }
+        } } } },
+        { "addChatItemAction": { "item": { "liveChatSponsorshipsGiftPurchaseAnnouncementRenderer": {
+          "id": "msg-7",
+          "header": { "liveChatSponsorshipsHeaderRenderer": {
+            "authorName": { "simpleText": "Gift Giver" },
+            "primaryText": { "runs": [ { "text": "Gifted " }, { "text": "5" }, { "text": " memberships" } ] }
+          } }
+        } } } },
+        { "addChatItemAction": { "item": { "liveChatViewerEngagementMessageRenderer": { "id": "notice" } } } },
+        { "addLiveChatTickerItemAction": { "item": {} } }
+      ]
+    }
+  }
+}

@@ -5,6 +5,7 @@ pub mod comments;
 pub mod common;
 pub mod feed;
 pub mod info;
+pub mod live_chat;
 pub mod menu;
 pub mod pin;
 pub mod player;

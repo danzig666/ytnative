@@ -218,6 +218,7 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
             Opt("Resume short videos (under 5 minutes)", |s| on_off(s.resume_short_videos), |s, _| s.resume_short_videos = !s.resume_short_videos),
             Opt("Remember live stream position", |s| on_off(s.resume_live), |s, _| s.resume_live = !s.resume_live),
             Opt("Keep up with live", |s| on_off(s.keep_live), |s, _| s.keep_live = !s.keep_live),
+            Opt("Live chat in live streams", |s| on_off(s.live_chat), |s, _| s.live_chat = !s.live_chat),
             Opt("Loop Shorts", |s| on_off(s.loop_shorts), |s, _| s.loop_shorts = !s.loop_shorts),
             Opt("Leave the player with a double BACK", |s| on_off(s.double_back_exit), |s, _| s.double_back_exit = !s.double_back_exit),
             Opt("Show the controls when the next video starts", |s| on_off(s.hud_on_next_video), |s, _| s.hud_on_next_video = !s.hud_on_next_video),

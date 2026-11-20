@@ -409,6 +409,12 @@ impl PlayerScreen {
                     fx.push(Fx::App(YtFx::Toast("No chapters".into())));
                 }
             }
+            // A live stream with its chat offered: the comments button opens the live chat (its
+            // comments stay in the Options menu).
+            OSD_COMMENTS if super::live_chat::available(cx).is_some() => {
+                self.osd_sel = None;
+                fx.push(Fx::Nav(NavOp::Present(YtArg::LiveChat)));
+            }
             OSD_COMMENTS => {
                 if !st.video_id.is_empty() && !cx.views.store.settings.child_mode {
                     self.osd_sel = None;
@@ -1198,10 +1204,11 @@ impl Screen<YtHost> for PlayerScreen {
                 ui::icon::draw(p, *k, ir, ink, filled);
             }
             // The focused button's name under it (a tooltip, as SmartTube shows).
+            let name = if i == OSD_COMMENTS && super::live_chat::available(cx).is_some() { crate::i18n::tr("Live chat") } else { osd_name(i) };
             if self.osd_sel == Some(i) && i >= OSD_ROW_B {
-                ui::text(p, osd_name(i), b.x + b.w / 2.0, b.y + b.h + 6.0, 22, ui::WHITE, ui::ALIGN_CENTER, false);
+                ui::text(p, name, b.x + b.w / 2.0, b.y + b.h + 6.0, 22, ui::WHITE, ui::ALIGN_CENTER, false);
             } else if self.osd_sel == Some(i) {
-                ui::text(p, osd_name(i), b.x + b.w / 2.0, b.y - 32.0, 22, ui::WHITE, ui::ALIGN_CENTER, false);
+                ui::text(p, name, b.x + b.w / 2.0, b.y - 32.0, 22, ui::WHITE, ui::ALIGN_CENTER, false);
             }
         }
         // There is more below: the suggestions.

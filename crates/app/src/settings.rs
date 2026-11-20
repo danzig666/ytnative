@@ -489,6 +489,9 @@ pub struct Settings {
     pub audio_only: bool,
     /// The "Video details" panel over the playing video (off by default).
     pub video_details: bool,
+    /// A live stream's player offers its live chat (beside the video). Off by default: the chat
+    /// is polled every few seconds while its panel is open.
+    pub live_chat: bool,
 }
 
 impl Default for Settings {
@@ -603,6 +606,7 @@ impl Default for Settings {
             device_checked: false,
             audio_only: false,
             video_details: false,
+            live_chat: false,
         }
     }
 }

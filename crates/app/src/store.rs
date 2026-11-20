@@ -246,6 +246,8 @@ pub struct Store {
     /// Filters of the last search (the filters panel edits these).
     pub search_filters: yt_core::search_filters::Filters,
     pub comments: HashMap<String, Comments>,
+    /// The live chat of the video playing (while its panel is open).
+    pub live_chat: crate::live_chat::Chat,
     pub feeds: HashMap<FeedKey, Feed>,
     pub settings: Settings,
     pub account: Option<String>,

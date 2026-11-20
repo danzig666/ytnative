@@ -37,6 +37,8 @@ enum Act {
     SearchFor(String),
     User(UserAction),
     Comments(String),
+    /// The live chat of the live stream playing.
+    LiveChat,
     Info,
     Filter(u8),
     PickPlaylist(Video),
@@ -518,6 +520,9 @@ impl MenuScreen {
             if !cx.views.store.settings.child_mode {
                 acts.push((tr("Comments").to_string(), Act::Comments(st.video_id.clone())));
             }
+            if super::live_chat::available(cx).is_some() {
+                acts.push((tr("Live chat").to_string(), Act::LiveChat));
+            }
             if !st.channel_id.is_empty() {
                 acts.push((tr("Open {}").replace("{}", &st.author), Act::OpenChannel(st.channel_id.clone())));
             }
@@ -848,6 +853,10 @@ impl MenuScreen {
             Act::Comments(v) => {
                 fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
                 fx.push(Fx::Nav(NavOp::Present(YtArg::Comments(v.clone()))));
+            }
+            Act::LiveChat => {
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
+                fx.push(Fx::Nav(NavOp::Present(YtArg::LiveChat)));
             }
             Act::Filter(i) => {
                 let i = *i;
