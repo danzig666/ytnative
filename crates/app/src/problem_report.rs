@@ -220,8 +220,9 @@ const REMOVED_STREAM: &str = "<stream address removed>";
 const REMOVED: &str = "<removed>";
 
 /// Keys whose value is a secret wherever they appear (`key=value`, `"key": "value"`,
-/// `Key: value`). Matched without regard to case.
-const SECRET_KEYS: &[&str] = &["authorization", "access_token", "refresh_token", "id_token", "client_secret", "device_code", "set-cookie", "cookie", "sapisid", "bearer"];
+/// `Key: value`). Matched without regard to case. `sid`, `gsessionid` and `loungeidtoken` are
+/// the lounge channel's session ids, which its failed requests print inside their address.
+const SECRET_KEYS: &[&str] = &["authorization", "access_token", "refresh_token", "id_token", "client_secret", "device_code", "set-cookie", "cookie", "sapisid", "bearer", "sid", "gsessionid", "loungeidtoken"];
 
 /// The log text made safe to show and to hand to a phone.
 pub fn scrub(text: &str) -> String {
@@ -339,6 +340,15 @@ mod tests {
         let s = scrub("request Cookie: SID=abc; HSID=def");
         assert!(!s.contains("SID=abc") && !s.contains("HSID=def"), "{s}");
         assert!(!scrub("seen ya29.loose_token here").contains("ya29"));
+    }
+
+    #[test]
+    fn lounge_session_ids_are_cut() {
+        let s = scrub("lounge: long-poll failed: error sending request for url (https://www.youtube.com/api/lounge/bc/bind?device=LOUNGE_SCREEN&loungeIdToken=AGdO5p&SID=hYx_1-2&gsessionid=Qw3rTy&RID=rpc&TYPE=xmlhttp)");
+        assert!(!s.contains("AGdO5p") && !s.contains("hYx_1-2") && !s.contains("Qw3rTy"), "{s}");
+        assert!(s.contains("RID=rpc") && s.contains("device=LOUNGE_SCREEN"), "{s}");
+        // A word that only contains a key is not one.
+        assert_eq!(cut_values("inside=1 consider: yes"), "inside=1 consider: yes");
     }
 
     #[test]
