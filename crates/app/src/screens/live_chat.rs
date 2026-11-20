@@ -400,15 +400,20 @@ impl LiveChatScreen {
             if let Some(g) = ground(m) {
                 ui::fill(p, row, 12.0, g);
             }
+            // When it was sent, faint at the end of the author line.
+            let mut end = row.x + row.w - 20.0;
+            if let Some(t) = m.sent_secs.map(|t| super::common::clock_at(&f.cx.views, t)) {
+                end -= ui::text_raw(p, &t, end, y + 8.0, 22, ui::FAINT, ui::ALIGN_RIGHT, false) + 16.0;
+            }
             let mut x = row.x + 20.0;
-            x += ui::text_cut(p, f.measure, &m.author, x, y + 8.0, (row.w - 40.0) * 0.6, 22, author_ink(m.role), ui::ALIGN_LEFT, true);
+            x += ui::text_cut(p, f.measure, &m.author, x, y + 8.0, ((row.w - 40.0) * 0.6).min(end - x), 22, author_ink(m.role), ui::ALIGN_LEFT, true);
             let extra = match &m.kind {
                 Kind::Paid { amount } => Some(amount.as_str()),
                 Kind::Membership { header } if !header.is_empty() => Some(header.as_str()),
                 _ => None,
             };
             if let Some(e) = extra {
-                ui::text_cut(p, f.measure, &format!("  \u{2022}  {e}"), x, y + 8.0, row.x + row.w - 20.0 - x, 22, ui::WHITE, ui::ALIGN_LEFT, true);
+                ui::text_cut(p, f.measure, &format!("  \u{2022}  {e}"), x, y + 8.0, (end - x).max(0.0), 22, ui::WHITE, ui::ALIGN_LEFT, true);
             }
             for (j, line) in lines.iter().enumerate() {
                 let ly = y + 8.0 + HEAD + j as f32 * LINE;

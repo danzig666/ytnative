@@ -51,6 +51,9 @@ pub struct ChatMessage {
     pub role: Role,
     /// A Super Chat's colour (0xAARRGGBB), the tier YouTube shows it in.
     pub color: Option<u32>,
+    /// When it was sent, in seconds since 1970 (`timestampUsec`; `None` when not given).
+    #[serde(default)]
+    pub sent_secs: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -195,7 +198,17 @@ fn base(r: &Value, kind: Kind) -> ChatMessage {
         kind,
         role: role(&r["authorBadges"]),
         color: None,
+        sent_secs: sent_secs(r),
     }
+}
+
+/// `timestampUsec` (microseconds since 1970, sent as a string) in seconds.
+fn sent_secs(r: &Value) -> Option<i64> {
+    let us = match &r["timestampUsec"] {
+        Value::String(s) => s.parse::<i64>().ok()?,
+        v => v.as_i64()?,
+    };
+    (us > 0).then_some(us / 1_000_000)
 }
 
 /// A message's runs as text: emoji runs become their first shortcut (":smiling_face:"), or the
@@ -293,6 +306,15 @@ mod tests {
     }
 
     #[test]
+    fn the_time_a_message_was_sent() {
+        let m = |ts: Value| base(&json!({"id": "x", "timestampUsec": ts}), Kind::Text).sent_secs;
+        assert_eq!(m(json!("1763650000123456")), Some(1_763_650_000));
+        assert_eq!(m(json!(1763650000123456i64)), Some(1_763_650_000));
+        assert_eq!(m(json!("")), None);
+        assert_eq!(base(&json!({"id": "x"}), Kind::Text).sent_secs, None);
+    }
+
+    #[test]
     fn owner_badge_wins() {
         let b = json!([
             {"liveChatAuthorBadgeRenderer": {"customThumbnail": {}, "tooltip": "Member"}},
@@ -332,7 +354,7 @@ mod tests {
         let ids: Vec<String> = found.shelves.iter().flat_map(|sh| sh.items.iter()).filter(|i| i.kind == crate::model::ItemKind::Live).map(|i| i.id.clone()).take(5).collect();
         let token = ids.iter().find_map(|id| first_continuation(&s.http, id).ok().flatten()).expect("a live stream offers its chat");
         let p = s.live_chat(&token).unwrap();
-        eprintln!("first: {} messages, wait {:?}", p.messages.len(), p.timeout_ms);
+        eprintln!("first: {} messages ({} with the time sent), wait {:?}", p.messages.len(), p.messages.iter().filter(|m| m.sent_secs.is_some()).count(), p.timeout_ms);
         assert!(p.continuation.is_some());
         let p2 = s.live_chat(p.continuation.as_deref().unwrap()).unwrap();
         eprintln!("second: {} messages, wait {:?}", p2.messages.len(), p2.timeout_ms);

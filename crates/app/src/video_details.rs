@@ -257,38 +257,40 @@ const ROW: f32 = 36.0;
 const SIZE: i32 = 24;
 const LABEL_W: f32 = 270.0;
 
-/// The panel shows for this long after the last key press (or the start of the video), then
-/// fades out until the next key: on an OLED panel its box and labels must not stay put for the
-/// whole video. Any key brings it back.
-pub const SHOW_MS: u32 = 15_000;
-/// How long the fade out takes.
-pub const FADE_MS: u32 = 1_000;
+/// How bright the panel is drawn: it stays up as long as it is switched on, so it is kept a
+/// little softer than the other overlays (and it moves, [`drift`]).
+pub const ALPHA: f32 = 0.85;
+/// The panel moves to its next spot this often, so on an OLED panel its box and labels never
+/// stay on the same pixels for long.
+const DRIFT_MS: u64 = 60_000;
+/// How far (px) the panel wanders from its place, either way.
+const DRIFT_PX: f32 = 16.0;
 
-/// The panel's opacity `quiet_ms` after the last key press: whole for [`SHOW_MS`], then down to
-/// nothing over [`FADE_MS`].
-pub fn opacity(quiet_ms: u32) -> f32 {
-    match quiet_ms.checked_sub(SHOW_MS) {
-        None => 1.0,
-        Some(t) if t >= FADE_MS => 0.0,
-        Some(t) => 1.0 - t as f32 / FADE_MS as f32,
-    }
+/// The panel's offset from its place at `now_ms`: a new spot every [`DRIFT_MS`], going round a
+/// small loop of eight within [`DRIFT_PX`].
+pub fn drift(now_ms: u64) -> (f32, f32) {
+    const SPOTS: [(f32, f32); 8] = [(0.0, 0.0), (1.0, 0.5), (0.5, 1.0), (-0.5, 1.0), (-1.0, 0.5), (-1.0, -0.5), (-0.5, -1.0), (0.5, -1.0)];
+    let (x, y) = SPOTS[((now_ms / DRIFT_MS) % SPOTS.len() as u64) as usize];
+    (x * DRIFT_PX, y * DRIFT_PX)
 }
 
-/// Draws the panel with its top at `top` (the caller keeps it clear of the controls) at opacity
-/// `alpha` ([`opacity`]). Under the player's [`crate::ui::HdrDim`] and its screen dimming, like
+/// Draws the panel with its top at `top` (the caller keeps it clear of the controls) moved by
+/// `shift` ([`drift`]). Under the player's [`crate::ui::HdrDim`] and its screen dimming, like
 /// the other player overlays.
-pub fn draw(p: plx_ui::Painter, m: &dyn plx_machine::machine::Measure, st: &Status, top: f32, alpha: f32) {
+pub fn draw(p: plx_ui::Painter, m: &dyn plx_machine::machine::Measure, st: &Status, top: f32, shift: (f32, f32)) {
     use crate::ui;
-    let fade = |c: [f32; 4]| [c[0], c[1], c[2], c[3] * alpha];
+    let fade = |c: [f32; 4]| [c[0], c[1], c[2], c[3] * ALPHA];
+    let top = top + DRIFT_PX + shift.1;
+    let x0 = X + DRIFT_PX + shift.0;
     let rows = rows(st);
     let h = PAD * 2.0 + 44.0 + rows.len() as f32 * ROW;
-    ui::fill(p, Rect::new(X, top, W, h), 12.0, fade([0.0, 0.0, 0.0, 0.6]));
-    ui::text(p, "Video details", X + PAD, top + PAD, 26, fade(ui::WHITE), ui::ALIGN_LEFT, true);
-    let vx = X + PAD + LABEL_W;
+    ui::fill(p, Rect::new(x0, top, W, h), 12.0, fade([0.0, 0.0, 0.0, 0.6]));
+    ui::text(p, "Video details", x0 + PAD, top + PAD, 26, fade(ui::WHITE), ui::ALIGN_LEFT, true);
+    let vx = x0 + PAD + LABEL_W;
     let vw = W - PAD * 2.0 - LABEL_W;
     for (i, (label, val)) in rows.iter().enumerate() {
         let y = top + PAD + 44.0 + i as f32 * ROW;
-        ui::text_cut(p, m, crate::i18n::tr(label), X + PAD, y, LABEL_W - 12.0, SIZE, fade(ui::DIM), ui::ALIGN_LEFT, false);
+        ui::text_cut(p, m, crate::i18n::tr(label), x0 + PAD, y, LABEL_W - 12.0, SIZE, fade(ui::DIM), ui::ALIGN_LEFT, false);
         let (s, ink) = match val {
             Val::Unknown => (crate::i18n::tr("unknown").to_string(), ui::FAINT),
             Val::Raw(s) => (s.clone(), ui::WHITE),
@@ -398,12 +400,14 @@ mod tests {
     }
 
     #[test]
-    fn the_panel_fades_out_after_a_while_without_keys() {
-        assert_eq!(opacity(0), 1.0);
-        assert_eq!(opacity(SHOW_MS), 1.0);
-        assert!((opacity(SHOW_MS + FADE_MS / 2) - 0.5).abs() < 0.01);
-        assert_eq!(opacity(SHOW_MS + FADE_MS), 0.0);
-        assert_eq!(opacity(u32::MAX), 0.0);
+    fn the_panel_moves_every_minute_within_its_margin() {
+        assert_eq!(drift(0), (0.0, 0.0));
+        assert_eq!(drift(DRIFT_MS - 1), (0.0, 0.0));
+        assert_ne!(drift(DRIFT_MS), drift(0));
+        let spots: std::collections::HashSet<(i32, i32)> = (0..8).map(|i| drift(i * DRIFT_MS)).map(|(x, y)| (x as i32, y as i32)).collect();
+        assert_eq!(spots.len(), 8, "eight different spots");
+        assert_eq!(drift(8 * DRIFT_MS), drift(0), "then round again");
+        assert!((0..8).all(|i| { let (x, y) = drift(i * DRIFT_MS); x.abs() <= DRIFT_PX && y.abs() <= DRIFT_PX }));
     }
 
     #[test]

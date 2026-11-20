@@ -216,6 +216,14 @@ pub fn clock(views: &Views<'_>) -> String {
     clock_text(h, m, views.store.settings.time_24h)
 }
 
+/// The wall-clock time (as [`clock`] shows it) of `secs` since 1970: when a chat message was
+/// sent.
+pub fn clock_at(views: &Views<'_>, secs: i64) -> String {
+    let local = secs + local_offset_secs();
+    let (h, m) = ((local / 3600).rem_euclid(24), (local / 60).rem_euclid(60));
+    clock_text(h, m, views.store.settings.time_24h)
+}
+
 /// "HH:MM" on the 24-hour clock, or (English with the 12-hour clock chosen) the hour on the
 /// 12-hour clock with the part of the day in words ("9:41 in the evening"); never "AM" / "PM".
 /// The other interface languages tell the time on the 24-hour clock.
