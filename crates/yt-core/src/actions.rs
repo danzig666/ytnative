@@ -56,6 +56,27 @@ pub fn subscribe_body(channel_id: &str, params: Option<&str>) -> Value {
     json!({ "channelIds": [channel_id], "params": params.unwrap_or("") })
 }
 
+/// `%XX` escapes decoded (a malformed one is kept as it is).
+pub fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |c: u8| (c as char).to_digit(16);
+        match (b[i], b.get(i + 1).and_then(|c| hex(*c)), b.get(i + 2).and_then(|c| hex(*c))) {
+            (b'%', Some(h), Some(l)) => {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+            }
+            (c, _, _) => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+}
+
 pub fn params_body(params: &str) -> Value {
     json!({ "params": params })
 }
@@ -584,9 +605,10 @@ impl Session {
         Ok((like_info(&r), subscribe_info(&r)))
     }
 
-    /// Notification bell: `params` from a `NotificationOption`.
+    /// Notification bell: `params` from a `NotificationOption`. The page carries them
+    /// URL-encoded ("...BA%3D%3D"); YouTube wants them decoded ("invalid argument" otherwise).
     pub fn set_notifications(&mut self, params: &str) -> Result<()> {
-        self.signed_raw("notification/modify_channel_preference", params_body(params)).map(drop)
+        self.signed_raw("notification/modify_channel_preference", params_body(&percent_decode(params))).map(drop)
     }
 
     /// The user's playlists (Watch Later first), each saying whether it contains `video_id`.
@@ -720,6 +742,9 @@ mod tests {
         assert_eq!(playlist_target_body("PL1"), json!({"target":{"playlistId":"PL1"}}));
         assert_eq!(subscribe_body("UC1", Some("EgIIAhgA")), json!({"channelIds":["UC1"],"params":"EgIIAhgA"}));
         assert_eq!(subscribe_body("UC1", None)["params"], "");
+        assert_eq!(percent_decode("ChhVQ2NoQmF0ZF%2BgBA%3D%3D"), "ChhVQ2NoQmF0ZF+gBA==");
+        assert_eq!(percent_decode("plain"), "plain");
+        assert_eq!(percent_decode("bad%G1%"), "bad%G1%");
         assert_eq!(params_body("p"), json!({"params":"p"}));
         assert_eq!(get_add_to_playlist_body(&["v"]), json!({"videoIds":["v"]}));
         assert_eq!(
@@ -1079,5 +1104,27 @@ mod remove_live {
         let after = items(&mut s);
         eprintln!("before {} mid {} after {}; still there: {}", before.len(), mid.len(), after.len(), after.iter().any(|i| i.id == vid));
         assert!(!after.iter().any(|i| i.id == vid));
+    }
+}
+
+/// Live check of the bell (ignored: needs the network and `token.json` in the repo root). It
+/// sets Viva La Dirt League's bell to `BELL_STATE` (default: the choice it has now, a no-op).
+#[cfg(test)]
+mod live_bell {
+    #[test]
+    #[ignore]
+    fn live_bell() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        crate::paths::set_data_dir(root);
+        let mut s = crate::session::Session::new().unwrap();
+        // The video page's options, as the app has them (the channel page may carry none).
+        let page = s.browse("UCchBatdUMZoMfJ3rIzgV84g", None).unwrap();
+        let video = page.shelves.iter().flat_map(|sh| sh.items.iter()).find(|i| i.kind == crate::model::ItemKind::Video).expect("a video").id.clone();
+        let info = s.video_state(&video).unwrap().1.expect("subscribe info");
+        println!("options: {:?}", info.notifications.iter().map(|o| (&o.state, o.selected)).collect::<Vec<_>>());
+        let want = std::env::var("BELL_STATE").ok();
+        let o = info.notifications.iter().find(|o| want.as_deref().map_or(o.selected, |w| o.state == w)).expect("an option");
+        println!("setting {} ({})", o.state, o.label);
+        println!("{:?}", s.set_notifications(&o.params));
     }
 }

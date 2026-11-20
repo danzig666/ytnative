@@ -1431,7 +1431,10 @@ fn run_action(session: &Mutex<Option<yt_core::session::Session>>, a: &UserAction
     match r {
         Ok(m) => (m, false),
         Err(e) => {
-            crate::log(&format!("action {a:?}: {e:#}"));
+            // The action's kind only: its fields can be long (bell choices, playlists).
+            let dbg = format!("{a:?}");
+            let kind = dbg.split(|c: char| !c.is_alphanumeric()).next().unwrap_or_default();
+            crate::log(&format!("action {kind}: {e:#}"));
             ("That didn't work, try again".into(), false)
         }
     }
