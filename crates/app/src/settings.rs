@@ -495,6 +495,9 @@ pub struct Settings {
     /// "Same volume for every video": loud videos are turned down to YouTube's reference level
     /// (`loudness.rs`), as YouTube's own players do.
     pub same_volume: bool,
+    /// A soft glow in the colours of the picture in the bars around a video that does not fill
+    /// the screen (YouTube's ambient mode).
+    pub ambient_mode: bool,
 }
 
 impl Default for Settings {
@@ -616,6 +619,7 @@ impl Default for Settings {
             video_details: false,
             live_chat: false,
             same_volume: true,
+            ambient_mode: true,
         }
     }
 }

@@ -920,6 +920,9 @@ impl Screen<YtHost> for PlayerScreen {
         }
         // Everything below (captions, OSD, toasts) is dimmed over HDR video.
         let _dim = ui::HdrDim::begin(ui::hdr_playing(st));
+        if !no_picture {
+            crate::ambient::draw(p, st, cx.views.store.settings.ambient_mode, cx.views.now_ms);
+        }
         let ex = st.extras.clone();
         // Screen dimming: black over the picture (and its subtitles) at the chosen amount.
         let dim_alpha = if self.dimmed { cx.views.store.settings.screen_off_dimming.min(100) as f32 / 100.0 } else { 0.0 };
