@@ -2,7 +2,9 @@
 //! the Search key opens the results page.
 //!
 //! The same keyboard types names ([`SearchScreen::name`]): a playlist on this TV is named with
-//! it; the Save key keeps the name and goes back.
+//! it; the Save key keeps the name and goes back. It also types the words looked for among the
+//! settings ([`NamePurpose::SettingsSearch`]): its Search key leaves them for the settings screen
+//! and goes back.
 
 use crate::host::{LocalOp, NamePurpose, YtArg, YtFx, YtHost, YtMsg};
 use crate::store::FeedKey;
@@ -125,15 +127,20 @@ impl SearchScreen {
         s.query = match &purpose {
             NamePurpose::RenameLocal(_, t) => t.clone(),
             NamePurpose::NewLocal(_) => String::new(),
+            NamePurpose::SettingsSearch(q) => q.clone(),
         };
-        // A new name starts with a capital letter.
-        s.upper = s.query.is_empty();
+        // A new name starts with a capital letter (the settings are searched in any case).
+        s.upper = s.query.is_empty() && !matches!(purpose, NamePurpose::SettingsSearch(_));
         s.state = State(s.query.clone());
         s.naming = Some(purpose);
         s
     }
+    /// The keyboard types a name (not words to look for).
+    fn names(&self) -> bool {
+        self.naming.as_ref().is_some_and(|p| !matches!(p, NamePurpose::SettingsSearch(_)))
+    }
     fn keys(&self) -> Vec<K> {
-        keys_for(self.naming.is_some(), self.accents)
+        keys_for(self.names(), self.accents)
     }
     fn key_rect(i: usize) -> Rect {
         Rect::new(KEYS_X + (i % COLS) as f32 * (KEY_W + KEY_GAP), KEYS_Y + (i / COLS) as f32 * (KEY_H + KEY_GAP), KEY_W, KEY_H)
@@ -163,6 +170,11 @@ impl SearchScreen {
     /// nothing but say so.
     fn save_name(&self, fx: &mut Effects<'_, YtHost>) {
         let Some(purpose) = &self.naming else { return };
+        if matches!(purpose, NamePurpose::SettingsSearch(_)) {
+            super::settings_search::submit(&self.query);
+            fx.push(Fx::Nav(NavOp::Pop));
+            return;
+        }
         let title = self.query.trim().to_string();
         if title.is_empty() {
             fx.push(Fx::App(YtFx::Toast("Type a name first".into())));
@@ -171,6 +183,7 @@ impl SearchScreen {
         let op = match purpose {
             NamePurpose::NewLocal(videos) => LocalOp::Create { title, videos: videos.clone() },
             NamePurpose::RenameLocal(id, _) => LocalOp::Rename { list_id: id.clone(), title },
+            NamePurpose::SettingsSearch(_) => return,
         };
         fx.push(Fx::App(YtFx::Local(op)));
         fx.push(Fx::Nav(NavOp::Pop));
@@ -338,6 +351,7 @@ impl Screen<YtHost> for SearchScreen {
             None => "Search",
             Some(NamePurpose::NewLocal(_)) => "Name of the new playlist on this TV",
             Some(NamePurpose::RenameLocal(..)) => "New name of the playlist",
+            Some(NamePurpose::SettingsSearch(_)) => "Search settings",
         };
         ui::text(p, heading, 100.0, 60.0, 46, ui::WHITE, ui::ALIGN_LEFT, true);
         // Query field
@@ -346,7 +360,7 @@ impl Screen<YtHost> for SearchScreen {
         // The query as typed (its end, with the cursor, when it is longer than the field).
         let room = field.w - 72.0;
         if self.query.is_empty() {
-            let hint = crate::i18n::tr(if self.naming.is_some() { "Type the name with the keyboard below\u{2026}" } else { "Type with the keyboard below\u{2026}" });
+            let hint = crate::i18n::tr(if self.names() { "Type the name with the keyboard below\u{2026}" } else { "Type with the keyboard below\u{2026}" });
             ui::text_cut(p, f.measure, hint, field.x + 36.0, field.y + 26.0, room, 40, ui::FAINT, ui::ALIGN_LEFT, false);
         } else {
             // Longer than the field: its start fades out at the left edge.
@@ -354,7 +368,7 @@ impl Screen<YtHost> for SearchScreen {
         }
         // Keyboard
         let focused = cx.focus.current.filter(|k| k.entry == self.entry).map(|k| k.elem);
-        let naming = self.naming.is_some();
+        let naming = self.names();
         for (i, k) in self.keys().into_iter().enumerate() {
             let r = Self::key_rect(i);
             let is_focus = focused == Some(KEY_BASE + i as u32);
@@ -370,7 +384,7 @@ impl Screen<YtHost> for SearchScreen {
             let rows: Vec<Row> = sugs.iter().map(|s| Row::new(s.clone()).icon(ui::icon::Kind::Search).raw()).collect();
             self.sug.draw(p, f.measure, &rows, self.sug.focused(cx, sugs.len()));
             self.sug.stops(f, sugs.len());
-        } else if !naming {
+        } else if self.naming.is_none() {
             ui::text(p, "Suggestions appear here as you type.", 1000.0, 310.0, 28, ui::FAINT, ui::ALIGN_LEFT, false);
         }
         if self.query.is_empty() && !self.recent.is_empty() {

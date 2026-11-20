@@ -4,6 +4,11 @@
 //! a click) flips, or the value, where OK opens the list of values to pick from.
 //! A row that opens a page (blocked channels, segment markers) opens it in the right pane, the
 //! category staying selected on the left. Changes are saved immediately.
+//!
+//! "Search settings" heads the left pane: OK opens the on-screen keyboard, and the options found
+//! ([`super::settings_search`]) are listed on the right like a category's, each with its category
+//! dimmed after it. OK on one goes to the option in its category, focused (a sub-page's option
+//! opens the sub-page). Left and BACK in the results come back to "Search settings".
 
 use crate::host::{SettingsPage, YtArg, YtFx, YtHost};
 use crate::settings::{secs_label, Codec, ControlsTime, OkAction, PlaybackMode, PlayerStyle, RememberSpeed, SbAction, Settings, SLEEP_MINS, SPEEDS};
@@ -44,6 +49,68 @@ fn category_of(page: SettingsPage) -> usize {
     CATS.iter().position(|c| c.0 == p).unwrap_or(0)
 }
 
+/// The search results' slot beside the categories' (in `cat`, `right_last` and `tops`). Its row,
+/// "Search settings", heads the left pane, above the categories.
+const SEARCH: usize = CATS.len();
+/// The slots the right pane can show: the categories and the search results.
+const SLOTS: usize = CATS.len() + 1;
+/// The left pane's rows: "Search settings", then the categories.
+const LEFT_N: usize = CATS.len() + 1;
+
+/// The slot a left-pane row shows.
+fn slot_of_row(row: usize) -> usize {
+    if row == 0 { SEARCH } else { row - 1 }
+}
+
+/// The left-pane row of a slot.
+fn row_of_slot(slot: usize) -> usize {
+    if slot == SEARCH { 0 } else { slot + 1 }
+}
+
+/// The pages a settings search looks through, in the order their results are listed (a sub-page
+/// right after the category that opens it). The blocked channels are content, not options.
+const SEARCHED: [SettingsPage; 8] = [
+    SettingsPage::Playback,
+    SettingsPage::Subtitles,
+    SettingsPage::SponsorBlock,
+    SettingsPage::Markers,
+    SettingsPage::Content,
+    SettingsPage::Interface,
+    SettingsPage::Remote,
+    SettingsPage::About,
+];
+
+/// A search result: the option's page, its row there and its label.
+type Hit = (SettingsPage, usize, &'static str);
+
+/// The options whose label, as shown or in English, holds every word of `query`.
+fn find(query: &str, s: &Settings) -> Vec<Hit> {
+    let words = super::settings_search::words(query);
+    let mut out = Vec::new();
+    for page in SEARCHED {
+        for (i, it) in items(page, s).iter().enumerate() {
+            let l = match it {
+                Item::Opt(l, ..) | Item::Page(l, _) | Item::Action(l, _) | Item::Info(l, _) => *l,
+                Item::Blocked(_) | Item::Hit(..) => continue,
+            };
+            if super::settings_search::matches(&words, crate::i18n::tr(l), l) {
+                out.push((page, i, l));
+            }
+        }
+    }
+    out
+}
+
+/// The category a result is under, as its row names it (a sub-page after its category).
+fn hit_place(page: SettingsPage) -> String {
+    let top = CATS[category_of(page)].0;
+    if top == page {
+        crate::i18n::tr(title(page)).to_string()
+    } else {
+        format!("{} \u{203A} {}", crate::i18n::tr(title(top)), crate::i18n::tr(title(page)))
+    }
+}
+
 // Layout (the 1920 x 1080 frame).
 const LEFT_W: f32 = 600.0;
 const RIGHT_X: f32 = 676.0;
@@ -65,6 +132,8 @@ enum Item {
     Info(&'static str, fn(&Cx<'_, YtHost>) -> String),
     /// A blocked channel (by index in the settings): OK unblocks it.
     Blocked(usize),
+    /// A settings search result ([`Hit`]): OK goes to the option.
+    Hit(SettingsPage, usize, &'static str),
 }
 
 fn cycle_key(k: &mut String, d: i32) {
@@ -512,16 +581,17 @@ pub struct SettingsScreen {
     /// `Root`: the two panes with the categories focusable; a sub-page (blocked channels, segment
     /// markers): its rows on the right, its category shown selected on the left.
     page: SettingsPage,
-    /// The categories (left pane).
+    /// "Search settings" and the categories (left pane).
     left: VList,
-    /// The options of the category shown (right pane).
+    /// The options of the category shown, or the search results (right pane).
     list: VList,
-    /// The category shown on the right: the focused one while the focus is on the left.
+    /// The slot shown on the right (a category or [`SEARCH`]): the focused one while the focus is
+    /// on the left.
     cat: std::cell::Cell<usize>,
-    /// The option row last focused in each category (Right returns to it).
-    right_last: std::cell::Cell<[usize; CATS.len()]>,
-    /// The first option row shown, per category ([`Self::top`]).
-    tops: std::cell::Cell<[usize; CATS.len()]>,
+    /// The option row last focused in each slot (Right returns to it).
+    right_last: std::cell::Cell<[usize; SLOTS]>,
+    /// The first option row shown, per slot ([`Self::top`]).
+    tops: std::cell::Cell<[usize; SLOTS]>,
     /// Which option rows are on / off switches, by page and row (worked out once: it never changes).
     switches: std::cell::RefCell<std::collections::HashMap<(u8, usize), bool>>,
     /// A focus the screen moved itself (into a category's options, BACK out of them).
@@ -530,11 +600,28 @@ pub struct SettingsScreen {
     choice: Option<ui::ChoiceBox>,
     /// The row a closed drop-down belonged to (focus returns there).
     closed_row: std::cell::Cell<usize>,
+    /// The words last looked for among the settings, and the options found.
+    query: String,
+    hits: Vec<Hit>,
+    /// The row that opened a sub-page for a search result: the focus returns to it, not to the
+    /// result, when the sub-page closes (the result list is no longer shown then).
+    back_to: std::cell::Cell<Option<usize>>,
+    /// The row a sub-page starts on (the option a search result led to).
+    start: usize,
     state: State,
 }
 
 impl SettingsScreen {
     pub fn new(entry: EntryId, page: SettingsPage) -> Self {
+        let start = if page == SettingsPage::Root { None } else { super::settings_search::take_start(page) };
+        let list = VList {
+            entry,
+            group: G_RIGHT,
+            base: RIGHT_BASE,
+            rect: Rect::new(RIGHT_X, LIST_Y, RIGHT_W, RIGHT_ROW_H * RIGHT_ROWS),
+            row_h: RIGHT_ROW_H,
+            text_size: TEXT,
+        };
         SettingsScreen {
             page,
             choice: None,
@@ -543,23 +630,20 @@ impl SettingsScreen {
                 entry,
                 group: G_LEFT,
                 base: LEFT_BASE,
-                rect: Rect::new(36.0, LIST_Y, LEFT_W - 72.0, 84.0 * CATS.len() as f32),
+                rect: Rect::new(36.0, LIST_Y, LEFT_W - 72.0, 84.0 * LEFT_N as f32),
                 row_h: 84.0,
                 text_size: 30,
             },
-            list: VList {
-                entry,
-                group: G_RIGHT,
-                base: RIGHT_BASE,
-                rect: Rect::new(RIGHT_X, LIST_Y, RIGHT_W, RIGHT_ROW_H * RIGHT_ROWS),
-                row_h: RIGHT_ROW_H,
-                text_size: TEXT,
-            },
             cat: std::cell::Cell::new(category_of(page)),
-            right_last: std::cell::Cell::new([0; CATS.len()]),
-            tops: std::cell::Cell::new([0; CATS.len()]),
+            right_last: std::cell::Cell::new([0; SLOTS]),
+            tops: std::cell::Cell::new([0; SLOTS]),
             switches: Default::default(),
-            focus_req: std::cell::Cell::new(None),
+            focus_req: std::cell::Cell::new(start.map(|r| list.elem(r))),
+            list,
+            query: String::new(),
+            hits: Vec::new(),
+            back_to: std::cell::Cell::new(None),
+            start: start.unwrap_or(0),
             state: State(format!("{page:?}")),
         }
     }
@@ -568,33 +652,61 @@ impl SettingsScreen {
         self.page == SettingsPage::Root
     }
 
-    /// The category shown: follows the focus while it is on the left pane.
+    /// The slot shown: follows the focus while it is on the left pane.
     fn category(&self, cx: &Cx<'_, YtHost>) -> usize {
         if self.root() {
-            if let Some(i) = self.left.focused(cx, CATS.len()) {
-                self.cat.set(i);
+            if let Some(i) = self.left.focused(cx, LEFT_N) {
+                self.cat.set(slot_of_row(i));
             }
         }
         self.cat.get()
     }
 
-    /// The page whose rows the right pane shows.
+    /// The page whose rows the right pane shows (`Root` for the search results).
     fn shown(&self, cx: &Cx<'_, YtHost>) -> SettingsPage {
-        if self.root() {
-            CATS[self.category(cx)].0
-        } else {
-            self.page
+        if !self.root() {
+            return self.page;
+        }
+        match self.category(cx) {
+            SEARCH => SettingsPage::Root,
+            c => CATS[c].0,
         }
     }
 
     fn rows(&self, cx: &Cx<'_, YtHost>) -> Vec<Item> {
+        if self.root() && self.category(cx) == SEARCH {
+            return self.hits.iter().map(|&(p, i, l)| Item::Hit(p, i, l)).collect();
+        }
         items(self.shown(cx), &cx.views.store.settings)
     }
 
-    /// The option row Right lands on in category `c`: the one last focused there.
+    /// The option row Right lands on in slot `c`: the one last focused there.
     fn right_key(&self, c: usize, cx: &Cx<'_, YtHost>) -> FocusKey<u32> {
-        let n = items(CATS[c].0, &cx.views.store.settings).len();
+        let n = if c == SEARCH { self.hits.len() } else { items(CATS[c].0, &cx.views.store.settings).len() };
         self.list.key(self.right_last.get()[c].min(n.saturating_sub(1)))
+    }
+
+    /// OK on a search result: the option in its category, with the focus on it. An option on a
+    /// sub-page opens that page focused on it, the row opening it focused beneath.
+    fn go_to(&self, page: SettingsPage, row: usize, label: &'static str, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
+        let s = &cx.views.store.settings;
+        // Found again by its label: rows may have come or gone since the search (an update found).
+        let row = items(page, s).iter().position(|it| matches!(it, Item::Opt(l, ..) | Item::Page(l, _) | Item::Action(l, _) | Item::Info(l, _) if *l == label)).unwrap_or(row);
+        let c = category_of(page);
+        let target = if CATS[c].0 == page {
+            row
+        } else {
+            let opener = items(CATS[c].0, s).iter().position(|it| matches!(it, Item::Page(_, p) if *p == page)).unwrap_or(0);
+            super::settings_search::set_start(page, row);
+            self.back_to.set(Some(opener));
+            fx.push(Fx::Nav(NavOp::Push(YtArg::Settings(page))));
+            opener
+        };
+        self.cat.set(c);
+        let mut last = self.right_last.get();
+        last[c] = target;
+        self.right_last.set(last);
+        self.focus(self.list.elem(target), fx);
     }
 
     /// The focus is on an option row (not a category, not an open drop-down).
@@ -625,6 +737,7 @@ impl SettingsScreen {
                 fx.invalidate(plx_machine::present::Provenance::Input);
             }
             Some(Item::Action(_, act)) if dir >= 0 => act(fx),
+            Some(Item::Hit(page, row, label)) if dir >= 0 => self.go_to(*page, *row, label, cx, fx),
             _ => {}
         }
     }
@@ -732,11 +845,16 @@ impl Machine<YtHost> for SettingsScreen {
                 fx.invalidate(plx_machine::present::Provenance::Input);
                 Handled::Yes
             }
-            // OK (or a click) on a category: into its options.
-            ScreenEvent::Activate(e) if self.root() && self.left.index(*e, CATS.len()).is_some() => {
-                let c = self.left.index(*e, CATS.len()).unwrap_or(0);
+            // OK (or a click) on a category: into its options. On "Search settings": the keyboard,
+            // with the words looked for last.
+            ScreenEvent::Activate(e) if self.root() && self.left.index(*e, LEFT_N).is_some() => {
+                let c = slot_of_row(self.left.index(*e, LEFT_N).unwrap_or(1));
                 self.cat.set(c);
-                self.focus(self.right_key(c, cx).elem, fx);
+                if c == SEARCH {
+                    fx.push(Fx::Nav(NavOp::Push(YtArg::NameEntry(crate::host::NamePurpose::SettingsSearch(self.query.clone())))));
+                } else {
+                    self.focus(self.right_key(c, cx).elem, fx);
+                }
                 Handled::Yes
             }
             ScreenEvent::Activate(e) => {
@@ -764,12 +882,35 @@ impl Machine<YtHost> for SettingsScreen {
             // BACK in the options: back to their category (BACK there closes the settings).
             ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: Key::Back, edge, .. }, .. }) if self.root() && self.on_right(cx) => {
                 if *edge == Edge::Down {
-                    self.focus(self.left.elem(self.cat.get()), fx);
+                    self.focus(self.left.elem(row_of_slot(self.cat.get())), fx);
                 }
                 Handled::Yes
             }
             ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: Key::Left | Key::Right, .. }, .. }) if self.choice.is_some() => Handled::Yes,
             ScreenEvent::Uncover => {
+                let s = &cx.views.store.settings;
+                if let Some(q) = super::settings_search::take_query().filter(|_| self.root()) {
+                    // Back from the keyboard: the results on the right, the focus on the first
+                    // (on "Search settings" when nothing matched).
+                    self.hits = find(&q, s);
+                    self.query = q;
+                    self.cat.set(SEARCH);
+                    let mut last = self.right_last.get();
+                    last[SEARCH] = 0;
+                    self.right_last.set(last);
+                    let mut tops = self.tops.get();
+                    tops[SEARCH] = 0;
+                    self.tops.set(tops);
+                    self.focus(if self.hits.is_empty() { self.left.elem(0) } else { self.list.elem(0) }, fx);
+                } else {
+                    if !self.query.is_empty() {
+                        // Options may have come or gone meanwhile (an update found).
+                        self.hits = find(&self.query, s);
+                    }
+                    if let Some(r) = self.back_to.take() {
+                        self.focus(self.list.elem(r), fx);
+                    }
+                }
                 fx.invalidate(plx_machine::present::Provenance::Nav);
                 Handled::Yes
             }
@@ -786,7 +927,7 @@ impl Focusable<YtHost> for SettingsScreen {
             return;
         }
         if self.root() {
-            out.push(self.left.spec(CATS.len()));
+            out.push(self.left.spec(LEFT_N));
         }
         out.push(self.list.spec(self.rows(cx).len()));
     }
@@ -803,14 +944,17 @@ impl Focusable<YtHost> for SettingsScreen {
         if let Some(c) = &self.choice {
             return c.list.neighbour(key, dir, c.options.len());
         }
-        if let Some(c) = self.left.index(key.elem, CATS.len()).filter(|_| self.root()) {
+        if let Some(r) = self.left.index(key.elem, LEFT_N).filter(|_| self.root()) {
+            let c = slot_of_row(r);
             return match dir {
+                // No results to go into: the focus stays.
+                Dir::Right if c == SEARCH && self.hits.is_empty() => Step::Move(key),
                 Dir::Right => Step::Move(self.right_key(c, cx)),
-                _ => self.left.neighbour(key, dir, CATS.len()),
+                _ => self.left.neighbour(key, dir, LEFT_N),
             };
         }
         match self.list.neighbour(key, dir, self.rows(cx).len()) {
-            Step::Edge if dir == Dir::Left && self.root() => Step::Move(self.left.key(self.cat.get())),
+            Step::Edge if dir == Dir::Left && self.root() => Step::Move(self.left.key(row_of_slot(self.cat.get()))),
             s => s,
         }
     }
@@ -819,8 +963,8 @@ impl Focusable<YtHost> for SettingsScreen {
             let n = c.options.len();
             return c.list.place(*key, n, c.list.focused(cx, n));
         }
-        if self.root() && self.left.index(*key, CATS.len()).is_some() {
-            return self.left.place(*key, CATS.len(), None);
+        if self.root() && self.left.index(*key, LEFT_N).is_some() {
+            return self.left.place(*key, LEFT_N, None);
         }
         let n = self.rows(cx).len();
         self.list.place_top(*key, n, self.top(cx, n))
@@ -836,14 +980,14 @@ impl Focusable<YtHost> for SettingsScreen {
         if want.elem >= ui::CHOICE_BASE {
             return self.list.key(self.closed_row.get());
         }
-        if self.root() && self.left.index(want.elem, CATS.len()).is_some() {
+        if self.root() && self.left.index(want.elem, LEFT_N).is_some() {
             return want;
         }
         if self.list.index(want.elem, self.rows(cx).len()).is_some() {
             return want;
         }
         if self.root() {
-            self.left.key(self.cat.get())
+            self.left.key(row_of_slot(self.cat.get()))
         } else {
             self.list.key(0)
         }
@@ -853,12 +997,12 @@ impl Focusable<YtHost> for SettingsScreen {
             return c.list.key(c.current);
         }
         if g == G_LEFT {
-            return self.left.key(self.cat.get());
+            return self.left.key(row_of_slot(self.cat.get()));
         }
         if self.root() {
             self.right_key(self.cat.get(), cx)
         } else {
-            self.list.key(0)
+            self.list.key(self.start)
         }
     }
 }
@@ -885,7 +1029,7 @@ impl Screen<YtHost> for SettingsScreen {
             last[cat] = i;
             self.right_last.set(last);
         }
-        let lf = if self.root() { self.left.focused(cx, CATS.len()) } else { None };
+        let lf = if self.root() { self.left.focused(cx, LEFT_N) } else { None };
         self.draw_left(p, f.measure, cat, lf);
         // The row an open drop-down belongs to stays lit.
         let lit = self.choice.as_ref().map(|c| c.row).or(rf);
@@ -901,7 +1045,7 @@ impl Screen<YtHost> for SettingsScreen {
                 // While the options have the focus, the pointer passing over a category does not
                 // take it (a click still does): the options stay put under a resting pointer.
                 let hover = if self.on_right(cx) { Hover::OnlyIfFocused } else { Hover::Focus };
-                for i in 0..CATS.len() {
+                for i in 0..LEFT_N {
                     let r = self.left.row_rect(i, 0);
                     f.stop(p, Stop { key: self.left.key(i), rect: r, rest_rect: r, clip: self.left.rect, hover, activate: Activate::Press });
                 }
@@ -918,18 +1062,27 @@ impl Screen<YtHost> for SettingsScreen {
 }
 
 impl SettingsScreen {
-    /// The left pane: the title, the categories, the version at the bottom.
+    /// The left pane: the title, "Search settings" (a search field, showing the words looked
+    /// for), the categories, the version at the bottom.
     fn draw_left(&self, p: Painter, m: &dyn Measure, cat: usize, focus: Option<usize>) {
         ui::fill(p, Rect::new(0.0, 0.0, LEFT_W, 1080.0), 0.0, [1.0, 1.0, 1.0, 0.035]);
         ui::icon::draw(p, ui::icon::Kind::Gear, Rect::new(64.0, 70.0, 46.0, 46.0), ui::WHITE, false);
         ui::text(p, "Settings", 130.0, 64.0, 46, ui::WHITE, ui::ALIGN_LEFT, true);
-        for (i, (page, icon)) in CATS.iter().enumerate() {
+        for i in 0..LEFT_N {
+            let slot = slot_of_row(i);
+            let (label, icon) = match slot {
+                SEARCH if self.query.is_empty() => (crate::i18n::tr("Search settings"), ui::icon::Kind::Search),
+                // The words typed: shown as they are.
+                SEARCH => (self.query.as_str(), ui::icon::Kind::Search),
+                c => (crate::i18n::tr(title(CATS[c].0)), CATS[c].1),
+            };
             let r = self.left.row_rect(i, 0);
             let focused = focus == Some(i);
-            let selected = i == cat;
+            let selected = slot == cat;
             if focused {
                 ui::fill(p, r, 14.0, ui::ROW_FOCUS);
-            } else if selected {
+            } else if selected || slot == SEARCH {
+                // The search row always looks like a field.
                 ui::fill(p, r, 14.0, [1.0, 1.0, 1.0, 0.06]);
             }
             if selected {
@@ -937,9 +1090,9 @@ impl SettingsScreen {
             }
             let ink = if focused || selected { ui::WHITE } else { ui::DIM };
             let s = 36.0;
-            ui::icon::draw(p, *icon, Rect::new(r.x + 30.0, r.y + (r.h - s) / 2.0, s, s), if selected { ui::accent() } else { ink }, false);
+            ui::icon::draw(p, icon, Rect::new(r.x + 30.0, r.y + (r.h - s) / 2.0, s, s), if selected { ui::accent() } else { ink }, false);
             let ty = r.y + (r.h - 30.0 * 1.3) / 2.0;
-            ui::text_cut(p, m, crate::i18n::tr(title(*page)), r.x + 92.0, ty, r.w - 116.0, 30, ink, ui::ALIGN_LEFT, focused || selected);
+            ui::text_cut(p, m, label, r.x + 92.0, ty, r.w - 116.0, 30, ink, ui::ALIGN_LEFT, focused || selected);
         }
         ui::text_raw(p, &format!("ytnative {}", app_version()), 64.0, 1008.0, 22, ui::FAINT, ui::ALIGN_LEFT, false);
     }
@@ -947,11 +1100,21 @@ impl SettingsScreen {
     /// The right pane: the category's (or sub-page's) title and its rows.
     fn draw_right(&self, p: Painter, m: &dyn Measure, cx: &Cx<'_, YtHost>, cat: usize, rows: &[Item], focus: Option<usize>, top: usize) {
         let s = &cx.views.store.settings;
-        let (top_page, icon) = CATS[cat];
-        if self.root() {
-            ui::text(p, title(top_page), RIGHT_X + 28.0, 64.0, 46, ui::WHITE, ui::ALIGN_LEFT, true);
+        if self.root() && cat == SEARCH {
+            ui::text(p, "Search settings", RIGHT_X + 28.0, 64.0, 46, ui::WHITE, ui::ALIGN_LEFT, true);
+            if rows.is_empty() {
+                let note = if self.query.is_empty() {
+                    crate::i18n::tr("Press OK and type part of an option's name.").to_string()
+                } else {
+                    crate::i18n::tr("No option matches \u{201C}{}\u{201D}.").replace("{}", &self.query)
+                };
+                ui::text_cut(p, m, &note, RIGHT_X + 28.0, LIST_Y + 14.0, RIGHT_W - 56.0, TEXT, ui::FAINT, ui::ALIGN_LEFT, false);
+            }
+        } else if self.root() {
+            ui::text(p, title(CATS[cat].0), RIGHT_X + 28.0, 64.0, 46, ui::WHITE, ui::ALIGN_LEFT, true);
         } else {
             // A sub-page: its category above its title.
+            let (top_page, icon) = CATS[cat];
             ui::icon::draw(p, icon, Rect::new(RIGHT_X + 28.0, 40.0, 26.0, 26.0), ui::DIM, false);
             ui::text(p, title(top_page), RIGHT_X + 66.0, 38.0, 24, ui::DIM, ui::ALIGN_LEFT, false);
             ui::text(p, title(self.page), RIGHT_X + 28.0, 82.0, 46, ui::WHITE, ui::ALIGN_LEFT, true);
@@ -980,7 +1143,7 @@ impl SettingsScreen {
                         c + value(p, m, crate::i18n::tr(&v), right - c, ty, r.w, ink)
                     }
                 }
-                Item::Page(..) => chevron(p, right, r, ink),
+                Item::Page(..) | Item::Hit(..) => chevron(p, right, r, ink),
                 // The value is content (a code, an address, a version) or translated where made.
                 Item::Info(_, get) => value(p, m, &get(cx), right, ty, r.w, if focused { ui::WHITE } else { [1.0, 1.0, 1.0, 0.8] }),
                 Item::Blocked(_) => value(p, m, crate::i18n::tr("Unblock"), right, ty, r.w, if focused { ui::WHITE } else { ui::FAINT }),
@@ -991,7 +1154,7 @@ impl SettingsScreen {
             let label = match item {
                 // A channel's name: shown as it is.
                 Item::Blocked(b) => s.blocked_channels.get(*b).cloned().unwrap_or_default(),
-                Item::Opt(l, ..) | Item::Page(l, _) | Item::Action(l, _) | Item::Info(l, _) => crate::i18n::tr(l).to_string(),
+                Item::Opt(l, ..) | Item::Page(l, _) | Item::Action(l, _) | Item::Info(l, _) | Item::Hit(_, _, l) => crate::i18n::tr(l).to_string(),
             };
             let label_ink = match item {
                 _ if focused => ui::WHITE,
@@ -999,6 +1162,13 @@ impl SettingsScreen {
                 _ => [1.0, 1.0, 1.0, 0.84],
             };
             ui::text_cut(p, m, &label, lx, ty, room, TEXT, label_ink, ui::ALIGN_LEFT, focused);
+            // A search result: its category after it, dimmed.
+            if let Item::Hit(page, ..) = item {
+                let w = ui::text_width(m, &label, TEXT, focused).min(room) + 22.0;
+                if room - w > 60.0 {
+                    ui::text_cut(p, m, &hit_place(*page), lx + w, ty, room - w, TEXT, if focused { ui::DIM } else { ui::FAINT }, ui::ALIGN_LEFT, false);
+                }
+            }
         }
         // A scroll bar when the rows do not all fit.
         if n > vis {
@@ -1078,5 +1248,43 @@ mod version_tests {
         let v = super::app_version();
         assert!(v.split('.').count() == 3 && v.split('.').all(|n| n.parse::<u32>().is_ok()), "{v}");
         assert_ne!(v, "0.1.0");
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    #[test]
+    fn the_search_row_heads_the_left_pane() {
+        assert_eq!(slot_of_row(0), SEARCH);
+        for c in 0..CATS.len() {
+            assert_eq!(slot_of_row(row_of_slot(c)), c);
+        }
+        assert_eq!(row_of_slot(SEARCH), 0);
+    }
+
+    #[test]
+    fn options_are_found_on_every_page_and_sub_page() {
+        let s = Settings::default();
+        let hits = find("speed", &s);
+        assert!(hits.iter().any(|h| h.0 == SettingsPage::Playback && h.2 == "Default speed"), "{hits:?}");
+        // A sub-page's option, with its row there, listed right after its category's.
+        let hits = find("outro", &s);
+        let pages: Vec<SettingsPage> = hits.iter().map(|h| h.0).collect();
+        assert_eq!(pages, [SettingsPage::SponsorBlock, SettingsPage::Markers]);
+        let (_, row, label) = hits[1];
+        assert!(matches!(items(SettingsPage::Markers, &s)[row], Item::Opt(l, ..) if l == label));
+        // Words in any order, capitals and accents ignored; nothing for a blank query.
+        assert!(find("LIVE keep", &s).iter().any(|h| h.2 == "Keep up with live"));
+        assert!(find("s\u{e9}ek st\u{e9}p", &s).iter().any(|h| h.2 == "Seek step"));
+        assert!(find("  ", &s).is_empty());
+        assert!(find("no option is called this", &s).is_empty());
+    }
+
+    #[test]
+    fn a_result_names_its_category() {
+        assert_eq!(hit_place(SettingsPage::Playback), "Playback");
+        assert_eq!(hit_place(SettingsPage::Markers), "SponsorBlock & DeArrow \u{203A} Segment markers");
     }
 }
