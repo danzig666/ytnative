@@ -599,6 +599,7 @@ fn main() {
             }
             plx_machine::idle::frame_begin(dt);
             images::THUMBS.deliver();
+            rig.screen_shown = foreground && !blanked;
             let results = rig.drain(now);
             if std::env::var_os("YTNATIVE_PTR_DEBUG").is_some() {
                 for e in &inputs {

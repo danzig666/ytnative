@@ -438,6 +438,10 @@ pub struct AppRig {
     audio_only_pick: Option<bool>,
     /// The video that was started audio only (the player screen draws it black).
     audio_only_video: Option<String>,
+    /// The app is in front and its screen is not blanked (set by the frame loop each frame).
+    pub screen_shown: bool,
+    /// The live chat panel that started the polling (its answers go to it).
+    live_chat_from: Option<MachineId>,
 }
 
 impl AppRig {
@@ -495,6 +499,8 @@ impl AppRig {
             library_page: None,
             audio_only_pick: None,
             audio_only_video: None,
+            screen_shown: true,
+            live_chat_from: None,
         };
         rig.store.local = yt_core::local_playlists::Store::load();
         rig.local_feeds();
@@ -982,6 +988,13 @@ impl AppRig {
                         out.push((addr, YtMsg::SignIn));
                     }
                 }
+            }
+        }
+        // The live chat is polled only while its panel can be seen over its video playing.
+        let shown = crate::live_chat::may_poll(self.screen_shown, &self.store.live_chat.video_id, &self.player_view.video_id, &self.player_view.phase);
+        if let Some(poll) = self.store.live_chat.set_active(shown) {
+            if let Some(to) = self.live_chat_from {
+                self.spawn_live_chat(to, poll);
             }
         }
         out
@@ -1862,6 +1875,7 @@ impl Rig<YtHost> for AppRig {
             }
             YtFx::Toast(m) => self.store.toast(m, self.now_ms),
             YtFx::LiveChat(Some((video_id, token))) => {
+                self.live_chat_from = Some(from);
                 let poll = self.store.live_chat.open(&video_id, token.as_deref());
                 self.spawn_live_chat(from, poll);
             }
