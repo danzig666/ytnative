@@ -67,6 +67,8 @@ pub enum YtArg {
     SearchFilters(String),
     /// The automatic check found a newer version.
     UpdatePrompt,
+    /// The live chat of the live stream playing, beside it.
+    LiveChat,
 }
 
 impl ScreenArg for YtArg {
@@ -95,6 +97,7 @@ impl ScreenArg for YtArg {
             YtArg::NameEntry(_) => 18,
             YtArg::SuggestionMenu(_) => 19,
             YtArg::UpdatePrompt => 20,
+            YtArg::LiveChat => 21,
         })
     }
     fn title(&self) -> Option<&str> {
@@ -230,6 +233,9 @@ pub enum YtFx {
     Toast(String),
     /// Add the video to "Play next" (or take it out).
     PlayNext { video: yt_core::local_playlists::Video, add: bool },
+    /// The live chat panel opened on (video id, the chat's first continuation if known), or
+    /// closed (None).
+    LiveChat(Option<(String, Option<String>)>),
 }
 
 pub enum YtMsg {
@@ -239,6 +245,7 @@ pub enum YtMsg {
     SignIn,
     Acted,
     Comments,
+    LiveChat,
 }
 
 /// Snapshot of playback state for the screens, refreshed once per frame.
@@ -307,6 +314,7 @@ impl Mounter<YtHost> for Mount {
             YtArg::PlaylistPicker(v) => Box::new(screens::menu::MenuScreen::playlists(entry, v.clone(), cx)),
             YtArg::NameEntry(p) => Box::new(screens::search::SearchScreen::name(entry, p.clone())),
             YtArg::SearchFilters(q) => Box::new(screens::menu::MenuScreen::filters(entry, q.clone())),
+            YtArg::LiveChat => Box::new(screens::live_chat::LiveChatScreen::new(entry)),
         }
     }
 }
@@ -330,6 +338,9 @@ enum Work {
     SignIn(u32, SignIn),
     /// A YouTube playlist's videos, read for "Copy to this TV": (title, videos or the error).
     CopiedToTv(String, Result<Vec<yt_core::local_playlists::Video>, String>),
+    /// A live chat request's answer, for the polling generation that asked.
+    /// `Ok(None)`: the video has no live chat.
+    LiveChat { gen: u64, page: Result<Option<yt_core::live_chat::LiveChatPage>, String> },
 }
 
 pub struct AppRig {
@@ -643,6 +654,12 @@ impl AppRig {
         }
     }
 
+    /// One live chat request (it waits its turn on the worker; see `crate::live_chat`).
+    fn spawn_live_chat(&mut self, from: MachineId, poll: crate::live_chat::Poll) {
+        let gen = poll.gen;
+        self.spawn(from, "live chat", move |s| Work::LiveChat { gen, page: crate::live_chat::run(s, poll) });
+    }
+
     /// Main thread, once per frame: snapshot the player, move finished worker results into the
     /// store, and return the notifications for the screens that asked.
     pub fn drain(&mut self, now_ms: u32) -> Vec<(Addr, YtMsg)> {
@@ -884,6 +901,12 @@ impl AppRig {
                     }
                     c.loading = false;
                     out.push((addr, YtMsg::Comments));
+                }
+                Work::LiveChat { gen, page } => {
+                    if let Some(poll) = self.store.live_chat.apply(gen, page) {
+                        self.spawn_live_chat(addr.to, poll);
+                    }
+                    out.push((addr, YtMsg::LiveChat));
                 }
                 Work::ChannelInfo(id, sub) => {
                     if let Some(s) = sub {
@@ -1785,6 +1808,11 @@ impl Rig<YtHost> for AppRig {
                 });
             }
             YtFx::Toast(m) => self.store.toast(m, self.now_ms),
+            YtFx::LiveChat(Some((video_id, token))) => {
+                let poll = self.store.live_chat.open(&video_id, token.as_deref());
+                self.spawn_live_chat(from, poll);
+            }
+            YtFx::LiveChat(None) => self.store.live_chat.close(),
             YtFx::PlayNext { video, add } => {
                 self.store.play_next.retain(|v| v.video_id != video.video_id);
                 let msg = if add {

@@ -484,6 +484,9 @@ pub struct Settings {
     pub settings_pin: String,
     /// The TV's capabilities were read once (first start) and the playback settings set from them.
     pub device_checked: bool,
+    /// A live stream's player offers its live chat (beside the video). Off by default: the chat
+    /// is polled every few seconds while its panel is open.
+    pub live_chat: bool,
 }
 
 impl Default for Settings {
@@ -596,6 +599,7 @@ impl Default for Settings {
             child_mode: false,
             settings_pin: String::new(),
             device_checked: false,
+            live_chat: false,
         }
     }
 }

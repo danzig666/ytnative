@@ -27,7 +27,7 @@ const LINE: f32 = 31.0;
 const WHEEL_PX: f32 = 150.0;
 
 /// Word wrap to `w` px; a word wider than a line is broken by characters. Every line is kept.
-fn wrap_px(m: &dyn plx_machine::machine::Measure, s: &str, w: f32, size: i32) -> Vec<String> {
+pub(crate) fn wrap_px(m: &dyn plx_machine::machine::Measure, s: &str, w: f32, size: i32) -> Vec<String> {
     let width = |t: &str| std::ffi::CString::new(t).map_or(0.0, |c| m.width(&c, size, false));
     let mut lines = Vec::new();
     for para in s.lines() {
