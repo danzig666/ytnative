@@ -476,7 +476,7 @@ mod engine {
                 }
             }
         };
-        let prefs = yt_core::streams::Prefs { min_height: super::HEIGHT, max_height: super::HEIGHT, codec: "avc1", audio_track: None, audio_language: None };
+        let prefs = yt_core::streams::Prefs { min_height: super::HEIGHT, max_height: super::HEIGHT, codec: "avc1", audio_track: None, audio_language: None, audio_only: false };
         let mpd = (!resolved.is_live && !resolved.is_upcoming).then(|| resolved.mpd(prefs)).flatten().and_then(|m| super::video_only(&m));
         CACHE.lock().unwrap().put(video_id, now, mpd.clone());
         mpd.ok_or_else(|| anyhow::anyhow!("this video has no preview"))
@@ -630,7 +630,7 @@ mod tests {
 
     #[test]
     fn the_manifest_loses_its_audio_set() {
-        let prefs = yt_core::streams::Prefs { min_height: HEIGHT, max_height: HEIGHT, codec: "avc1", audio_track: None, audio_language: None };
+        let prefs = yt_core::streams::Prefs { min_height: HEIGHT, max_height: HEIGHT, codec: "avc1", audio_track: None, audio_language: None, audio_only: false };
         let f = |itag: u64, mime: &str, h: u64| {
             serde_json::json!({"itag": itag, "mimeType": mime, "width": h * 16 / 9, "height": h, "bitrate": 1000, "url": "https://x/v?a=1",
                 "initRange": {"start": "0", "end": "9"}, "indexRange": {"start": "10", "end": "19"}})

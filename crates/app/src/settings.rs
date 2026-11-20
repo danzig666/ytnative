@@ -489,9 +489,12 @@ pub struct Settings {
     pub audio_only: bool,
     /// The "Video details" panel over the playing video (off by default).
     pub video_details: bool,
-    /// A live stream's player offers its live chat (beside the video). Off by default: the chat
-    /// is polled every few seconds while its panel is open.
+    /// A live stream's player offers its live chat (beside the video). The chat is polled every
+    /// few seconds, but only while its panel is open.
     pub live_chat: bool,
+    /// The Notifications sidebar section was added to this viewer's sections once (settings
+    /// saved before it existed get it on their first start; turned off, it stays off).
+    pub notifications_offered: bool,
     /// "Same volume for every video": loud videos are turned down to YouTube's reference level
     /// (`loudness.rs`), as YouTube's own players do.
     pub same_volume: bool,
@@ -584,10 +587,9 @@ impl Default for Settings {
             search_history: true,
             pinned: Vec::new(),
             // Trending is off by default: YouTube retired the page (browse answers HTTP 400).
-            // Notifications is opt-in (Settings > Interface).
             sections: crate::store::Section::ALL
                 .iter()
-                .filter(|s| !matches!(s, crate::store::Section::Trending | crate::store::Section::Notifications))
+                .filter(|s| !matches!(s, crate::store::Section::Trending))
                 .map(|s| s.key().to_string())
                 .collect(),
             boot_section: "home".into(),
@@ -619,7 +621,8 @@ impl Default for Settings {
             device_checked: false,
             audio_only: false,
             video_details: false,
-            live_chat: false,
+            live_chat: true,
+            notifications_offered: true,
             same_volume: true,
             ambient_mode: true,
             video_previews: false,
@@ -671,6 +674,17 @@ impl Settings {
         // so only a first start (no settings yet) is set from the TV.
         if !has("device_checked") {
             self.device_checked = true;
+        }
+        // The Notifications section came after these settings were saved: show it once, in its
+        // place in the sidebar's order (signed out, the sidebar leaves it out anyway).
+        if !has("notifications_offered") {
+            let key = crate::store::Section::Notifications.key().to_string();
+            if !self.sections.contains(&key) {
+                self.sections.push(key);
+                let order: Vec<&str> = crate::store::Section::ALL.iter().map(|x| x.key()).collect();
+                self.sections.sort_by_key(|x| order.iter().position(|o| o == x).unwrap_or(99));
+            }
+            self.notifications_offered = true;
         }
         if !has("playback_mode") {
             self.playback_mode = match v["repeat"].as_str() {
@@ -745,6 +759,20 @@ mod tests {
         assert!(Settings::from_json(Some(serde_json::json!({"codec": "Avc"}))).device_checked);
         assert!(!Settings::from_json(Some(serde_json::json!({"device_checked": false}))).device_checked);
         assert!(!Settings::from_json(None).device_checked);
+    }
+
+    #[test]
+    fn notifications_join_the_sidebar_once() {
+        let n = || crate::store::Section::Notifications.key().to_string();
+        // Saved before the section existed: it is added, in the sidebar's order.
+        let old = Settings::from_json(Some(serde_json::json!({"sections": ["home", "subscriptions"]})));
+        assert!(old.sections.contains(&n()), "{:?}", old.sections);
+        assert_eq!(old.sections.first().map(String::as_str), Some("home"));
+        // Turned off afterwards: it stays off.
+        let off = Settings::from_json(Some(serde_json::json!({"sections": ["home"], "notifications_offered": true})));
+        assert!(!off.sections.contains(&n()));
+        // A first start has it.
+        assert!(Settings::default().sections.contains(&n()));
     }
 
     #[test]
