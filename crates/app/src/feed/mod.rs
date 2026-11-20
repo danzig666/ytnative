@@ -168,6 +168,10 @@ impl FeedPlayer {
             author: resolved.author.clone(),
             duration_ms,
             position_ms: start_ms.unwrap_or(0),
+            details: crate::video_details::Details {
+                formats: Arc::new(crate::video_details::Formats::chosen(crate::video_details::Engine::Feed, &choice.video, choice.audio.as_ref())),
+                ..Default::default()
+            },
             ..Default::default()
         };
         drop(st);

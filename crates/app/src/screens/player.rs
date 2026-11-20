@@ -515,7 +515,7 @@ impl Machine<YtHost> for PlayerScreen {
                 // Always keep ticking: the end of the video must be noticed with the controls
                 // hidden too (it used to wait for a key press). Redraw only when something shows.
                 fx.push(Fx::Timer { id: T_TICK, after_ms: 500 });
-                if self.hud || p.phase != Phase::Playing {
+                if self.hud || p.phase != Phase::Playing || cx.views.store.settings.video_details {
                     fx.invalidate(plx_machine::present::Provenance::Timer(T_TICK));
                 }
                 Handled::Yes
@@ -957,6 +957,11 @@ impl Screen<YtHost> for PlayerScreen {
         }
         if dim_alpha > 0.0 {
             ui::fill(p, Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, [0.0, 0.0, 0.0, dim_alpha]);
+        }
+        if cx.views.store.settings.video_details && !ui::comments_open() {
+            // Below the YouTube style's title while its controls are up.
+            let top = if self.hud && yt_style(cx) && self.sugg_sel.is_none() { 240.0 } else { 40.0 };
+            crate::video_details::draw(p, f.measure, st, top);
         }
         if ui::comments_open() {
             return;

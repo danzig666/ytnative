@@ -39,6 +39,8 @@ mod sim;
 mod store;
 mod ui;
 mod update;
+#[cfg_attr(windows, allow(dead_code))] // engine A and B's parts are used by the TV build only
+mod video_details;
 #[cfg(not(windows))]
 mod vplane;
 #[cfg_attr(windows, path = "sim/wl.rs")]

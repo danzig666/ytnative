@@ -166,11 +166,26 @@ pub struct SourceCtl {
     pub target_ns: AtomicI64,
     /// Content-time playhead (ns), for read-ahead and SABR pacing.
     pub playhead_ns: AtomicI64,
+    /// The video download speed (bits per second, 0: not measured yet), for "Video details".
+    pub speed_bps: AtomicU64,
 }
 
 impl SourceCtl {
     fn current(&self) -> (u64, i64) {
         (self.gen.load(Acquire), self.target_ns.load(Acquire))
+    }
+
+    /// A video segment of `bytes` took `ms` to download.
+    fn note_speed(&self, bytes: u64, ms: u64) {
+        let prev = Some(self.speed_bps.load(Relaxed)).filter(|s| *s > 0);
+        if let Some(s) = crate::video_details::blend_speed(prev, bytes, ms) {
+            self.speed_bps.store(s, Relaxed);
+        }
+    }
+
+    /// The measured video download speed (bits per second), if any.
+    pub fn speed(&self) -> Option<u64> {
+        Some(self.speed_bps.load(Relaxed)).filter(|s| *s > 0)
     }
 }
 
@@ -316,6 +331,9 @@ pub fn run_ranged(fmt: serde_json::Value, ua: String, lane: Arc<Lane>, ctl: Arc<
                     // than half its playing time to arrive.
                     let ms = fetch_start.elapsed().as_millis().max(1);
                     let s = track.segments[seg];
+                    if kind == Kind::Video && skip == 0 {
+                        ctl.note_speed(s.size, ms as u64);
+                    }
                     if ms as i64 * 2_000_000 > s.duration_ns {
                         let (held, reach) = lane.stats();
                         crate::log(&format!(
@@ -359,6 +377,9 @@ pub fn run_ranged(fmt: serde_json::Value, ua: String, lane: Arc<Lane>, ctl: Arc<
                 renewals = 0;
                 if ctl.gen.load(Acquire) != gen {
                     continue;
+                }
+                if kind == Kind::Video {
+                    ctl.note_speed(track.segments[seg].size, fetch_start.elapsed().as_millis() as u64);
                 }
                 for u in trim.apply(kind, frame_all(&framer, aus)) {
                     if !lane.push(gen, u) {

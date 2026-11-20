@@ -528,3 +528,21 @@ The report is shared only while this screen is open. Stream addresses, sign-in t
 This TV has no network address, so the report cannot be downloaded.	A TV-nek nincs hálózati címe, ezért a jelentés nem tölthető le.	Dieser Fernseher hat keine Netzwerkadresse, daher kann der Bericht nicht heruntergeladen werden.	Este televisor no tiene dirección de red, así que no se puede descargar el informe.	Ce téléviseur n'a pas d'adresse réseau, le rapport ne peut donc pas être téléchargé.	У этого телевизора нет сетевого адреса, поэтому отчёт нельзя скачать.
 The report cannot be shared: {}	A jelentés nem osztható meg: {}	Der Bericht kann nicht geteilt werden: {}	No se puede compartir el informe: {}	Le rapport ne peut pas être partagé : {}	Не удалось поделиться отчётом: {}
 Audio only	Csak hang	Nur Audio	Solo audio	Audio uniquement	Только звук
+Video details	Videó részletei	Videodetails	Detalles del vídeo	Détails de la vidéo	Сведения о видео
+Engine B	B motor	Engine B	Motor B	Moteur B	Движок B
+Simulator, no video	Szimulátor, nincs videó	Simulator, kein Video	Simulador, sin vídeo	Simulateur, pas de vidéo	Симулятор, без видео
+Video codec	Videokodek	Videocodec	Códec de vídeo	Codec vidéo	Видеокодек
+Resolution	Felbontás	Auflösung	Resolución	Résolution	Разрешение
+Frame rate	Képkockasebesség	Bildrate	Velocidad de fotogramas	Fréquence d'images	Частота кадров
+Video bitrate	Videó bitsebessége	Video-Bitrate	Tasa de bits del vídeo	Débit vidéo	Битрейт видео
+Audio codec	Hangkodek	Audiocodec	Códec de audio	Codec audio	Аудиокодек
+Audio bitrate	Hang bitsebessége	Audio-Bitrate	Tasa de bits del audio	Débit audio	Битрейт звука
+Buffered ahead	Előre pufferelve	Vorausgepuffert	Búfer por delante	Mémoire tampon en avance	Буфер впереди
+Connection speed	Kapcsolat sebessége	Verbindungsgeschwindigkeit	Velocidad de conexión	Vitesse de connexion	Скорость соединения
+Video ID	Videóazonosító	Video-ID	ID del vídeo	Identifiant de la vidéo	Идентификатор видео
+None	Nincs	Keines	Ninguno	Aucun	Нет
+unknown	ismeretlen	unbekannt	desconocido	inconnu	неизвестно
+{} megabits per second	{} megabit másodpercenként	{} Megabit pro Sekunde	{} megabits por segundo	{} mégabits par seconde	{} мегабит в секунду
+{} kilobits per second	{} kilobit másodpercenként	{} Kilobit pro Sekunde	{} kilobits por segundo	{} kilobits par seconde	{} килобит в секунду
+{} frames per second	{} képkocka másodpercenként	{} Bilder pro Sekunde	{} fotogramas por segundo	{} images par seconde	{} кадров в секунду
+{} seconds	{} másodperc	{} Sekunden	{} segundos	{} secondes	{} секунды

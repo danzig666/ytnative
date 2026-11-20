@@ -142,6 +142,8 @@ pub struct Status {
     /// The video plays as sound alone (`audio_only.rs`): the screen stays black. Filled in by the
     /// host, like `quality_pick`.
     pub audio_only: bool,
+    /// What the "Video details" panel shows: the formats played, the buffer, the connection speed.
+    pub details: crate::video_details::Details,
 }
 
 #[cfg(not(windows))]
@@ -587,9 +589,11 @@ fn run(
         let path = "/tmp/ytnative/live.m3u8";
         std::fs::write(path, master)?;
         crate::log("player: live stream via HLS");
+        status.lock().unwrap().details.formats = Arc::new(crate::video_details::Formats { engine: crate::video_details::Engine::System, ..Default::default() });
         path
     } else {
         let mpd = resolved.mpd(prefs).ok_or_else(|| anyhow::anyhow!("no H.264 streams for this video"))?;
+        status.lock().unwrap().details.formats = Arc::new(crate::video_details::Formats::from_mpd(crate::video_details::Engine::System, &mpd));
         let path = "/tmp/ytnative/play.mpd";
         std::fs::write(path, mpd)?;
         path
@@ -670,6 +674,11 @@ fn on_event(status: &Mutex<Status>, msg: &str) {
         crate::log(&format!("player: video {}x{}@{}", s.width, s.height, s.fps));
     } else if let Some(d) = v["sourceInfo"]["programInfo"][0]["duration"].as_u64() {
         s.duration_ms = d;
+    } else if let Some(end) = v["bufferRange"]["endTime"].as_u64() {
+        // For "Video details". Taken as milliseconds like currentTime; a reach behind the
+        // playhead (another unit, or nothing buffered) reads unknown.
+        s.details.buffered_ms = end.checked_sub(s.position_ms).filter(|_| end > 0);
+        return; // nothing on screen changes until the panel's next refresh
     } else if let Some(e) = v.get("error") {
         crate::log(&format!("player: media error {e}"));
         s.phase = Phase::Failed(e["errorText"].as_str().unwrap_or("playback error").to_string());

@@ -82,6 +82,8 @@ enum Act {
     RepeatMode,
     /// Sound alone over a black screen (it restarts the video at the same position).
     AudioOnly,
+    /// The "Video details" panel on / off.
+    VideoDetails,
     /// SponsorBlock on / off for a channel (by name).
     SbChannel(String),
     Close,
@@ -180,6 +182,7 @@ fn step_setting(act: &Act, s: &mut crate::settings::Settings, dir: i32) {
         }
         Act::Subtitles => s.subtitles = !s.subtitles,
         Act::SubBold => s.subtitle_bold = !s.subtitle_bold,
+        Act::VideoDetails => s.video_details = !s.video_details,
         Act::SubSize => {
             let i = SUB_SIZES.iter().position(|v| *v == s.subtitle_size).unwrap_or(2);
             s.subtitle_size = SUB_SIZES[clamp(i, dir, SUB_SIZES.len())];
@@ -534,6 +537,7 @@ impl MenuScreen {
             (tr("Subtitle font").to_string(), Act::SubFont),
             (tr("Bold subtitles").to_string(), Act::SubBold),
             (tr("When the video ends").to_string(), Act::RepeatMode),
+            (tr("Video details").to_string(), Act::VideoDetails),
         ]);
         if cx.views.store.settings.sponsorblock && !st.author.is_empty() {
             acts.push((tr("SponsorBlock on this channel").to_string(), Act::SbChannel(st.author.clone())));
@@ -629,6 +633,7 @@ impl MenuScreen {
             Act::SubFont => format!("{}  \u{203A}", crate::i18n::tr(&s.subtitle_font)),
             Act::SubStyle => format!("{}  \u{203A}", crate::i18n::tr(&s.subtitle_style)),
             Act::RepeatMode => format!("{}  \u{203A}", crate::i18n::tr(s.playback_mode.label())),
+            Act::VideoDetails => format!("{}  \u{203A}", crate::i18n::tr(if s.video_details { "On" } else { "Off" })),
             Act::SbChannel(ch) => crate::i18n::tr(if s.sb_excluded_channels.contains(ch) { "Off" } else { "On" }).to_string(),
             _ => return None,
         })
@@ -748,7 +753,7 @@ impl MenuScreen {
                 fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| step_setting(&act, s, dir)))));
                 fx.push(Fx::App(YtFx::Toast("Applies to the next video".into())));
             }
-            Act::Sleep | Act::Subtitles | Act::SubSize | Act::SubColor | Act::SubBold | Act::SubFont | Act::SubStyle | Act::RepeatMode => {
+            Act::Sleep | Act::Subtitles | Act::SubSize | Act::SubColor | Act::SubBold | Act::SubFont | Act::SubStyle | Act::RepeatMode | Act::VideoDetails => {
                 let act = act.clone();
                 fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| step_setting(&act, s, dir)))));
             }
@@ -1161,6 +1166,9 @@ mod tests {
         step_setting(&Act::Subtitles, &mut s, 1);
         step_setting(&Act::SubBold, &mut s, -1);
         assert_eq!((s.subtitles, s.subtitle_bold), (!sub, !bold));
+        assert!(!s.video_details, "Video details is off by default");
+        step_setting(&Act::VideoDetails, &mut s, 1);
+        assert!(s.video_details);
     }
 
     #[test]

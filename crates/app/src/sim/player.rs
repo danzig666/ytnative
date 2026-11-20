@@ -41,6 +41,7 @@ impl Player {
         let gen = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         let (status, generation) = (self.status.clone(), self.generation.clone());
         let max_h = prefs.max_height;
+        let mpd_prefs = prefs.clone();
         let spawned = plx_base::task::spawn("play", move || {
             let r = crate::host::with_session(&session, |s| s.resolve(&video_id));
             match r {
@@ -65,6 +66,9 @@ impl Player {
                         s.height = s.qualities.iter().map(|q| q.0).find(|h| *h as u64 <= max_h).unwrap_or(max_h.min(1080) as u32);
                         s.width = s.height * 16 / 9;
                         s.fps = 30;
+                        // What engine A would be handed, for "Video details".
+                        let mpd = resolved.mpd(mpd_prefs.clone()).unwrap_or_default();
+                        s.details.formats = Arc::new(crate::video_details::Formats::from_mpd(crate::video_details::Engine::Simulator, &mpd));
                         s.position_ms = start_ms.filter(|ms| *ms > 2000).unwrap_or(0);
                         s.phase = Phase::Playing;
                     }

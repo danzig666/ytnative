@@ -487,6 +487,8 @@ pub struct Settings {
     /// Every video starts as sound alone over a black screen (the player's options switch it per
     /// run; see `audio_only.rs`).
     pub audio_only: bool,
+    /// The "Video details" panel over the playing video (off by default).
+    pub video_details: bool,
 }
 
 impl Default for Settings {
@@ -600,6 +602,7 @@ impl Default for Settings {
             settings_pin: String::new(),
             device_checked: false,
             audio_only: false,
+            video_details: false,
         }
     }
 }
