@@ -62,7 +62,7 @@ impl Lounge {
     /// Main thread, every frame: next command, if any, as an action.
     pub fn poll(&mut self, status: &crate::player::Status) -> Action {
         let Ok(cmd) = self.commands.try_recv() else { return Action::None };
-        crate::log(&format!("lounge: {cmd:?}"));
+        crate::log(&log_text(&cmd));
         match cmd {
             // A queue change for the video already playing: keep playing it.
             Command::UpdatePlaylist(p) if p.video_id == status.video_id => Action::None,
@@ -124,6 +124,30 @@ impl Lounge {
     }
 }
 
+/// A command as the log shows it. Devices are logged by type and pairing only: their names, ids
+/// and `user` (the phone's Google account name) are personal. Unknown commands keep only their
+/// name, since their payload is unchecked.
+fn log_text(cmd: &Command) -> String {
+    let device = |d: &yt_core::lounge::Device| format!("{} via {}", or_unknown(&d.device_type), or_unknown(&d.pairing_type));
+    match cmd {
+        Command::RemoteConnected(d) => format!("lounge: remote connected ({})", device(d)),
+        Command::RemoteDisconnected(d) => format!("lounge: remote disconnected ({})", device(d)),
+        Command::LoungeStatus { devices, .. } => {
+            format!("lounge: status, {} device(s): {}", devices.len(), devices.iter().map(device).collect::<Vec<_>>().join(", "))
+        }
+        Command::Unknown { name, .. } => format!("lounge: unknown command {name}"),
+        c => format!("lounge: {c:?}"),
+    }
+}
+
+fn or_unknown(s: &str) -> &str {
+    if s.is_empty() {
+        "?"
+    } else {
+        s
+    }
+}
+
 /// A phone's name for messages.
 fn device_name(d: &yt_core::lounge::Device) -> String {
     [&d.name, &d.client_name].into_iter().find(|n| !n.trim().is_empty()).cloned().unwrap_or_else(|| crate::i18n::tr("A phone").to_string())
@@ -161,5 +185,43 @@ fn start_dial(screen: &LoungeScreen, device_name: &str, tx: Sender<Command>) -> 
             // Without SSDP the phone cannot discover us; HTTP alone is pointless.
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use yt_core::lounge::Device;
+
+    fn phone() -> Device {
+        Device {
+            id: "abc-123".into(),
+            name: "Pixel 7".into(),
+            device_type: "REMOTE_CONTROL".into(),
+            pairing_type: "manual".into(),
+            client_name: "android".into(),
+            user: "Jane Example".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn device_commands_log_no_names() {
+        for cmd in [
+            Command::RemoteConnected(phone()),
+            Command::RemoteDisconnected(phone()),
+            Command::LoungeStatus { devices: vec![phone()], queue_id: Some("q".into()) },
+        ] {
+            let line = log_text(&cmd);
+            assert!(!line.contains("Jane") && !line.contains("Pixel") && !line.contains("abc-123"), "{line}");
+            assert!(line.contains("REMOTE_CONTROL via manual"), "{line}");
+        }
+    }
+
+    #[test]
+    fn other_commands_log_in_full_except_unknown_payloads() {
+        assert_eq!(log_text(&Command::SeekTo(12.0)), "lounge: SeekTo(12.0)");
+        let line = log_text(&Command::Unknown { name: "somethingNew".into(), payload: serde_json::json!({"user": "Jane"}) });
+        assert_eq!(line, "lounge: unknown command somethingNew");
     }
 }

@@ -370,6 +370,8 @@ mod engine {
         media_id: Arc<Mutex<Option<String>>>,
         /// Bumped by every start and stop: a worker of an older number drops what it made.
         gen: Arc<AtomicU64>,
+        /// The current start's state; replaced (not reset) by every start and stop, so a worker
+        /// and its media events only ever write to the Play of their own start.
         play: Arc<Mutex<Play>>,
         /// webOS 4 (no exported window) was found and said once.
         unavailable: bool,
@@ -405,7 +407,9 @@ mod engine {
             let window_id = wid.to_string_lossy().into_owned();
             self.window = Some(wid);
             let my = self.gen.fetch_add(1, SeqCst) + 1;
-            *self.play.lock().unwrap() = Play::default();
+            // Each start owns its own state: an older worker that fails late marks its own Play
+            // done, never the one a newer preview reads.
+            self.play = Arc::default();
             let (gen, media_id, play, video_id) = (self.gen.clone(), self.media_id.clone(), self.play.clone(), video_id.to_string());
             let spawned = plx_base::task::spawn("preview", move || {
                 let live = || gen.load(SeqCst) == my;
@@ -441,7 +445,7 @@ mod engine {
                     unsafe { destroy(w.as_ptr()) };
                 }
             }
-            *self.play.lock().unwrap() = Play::default();
+            self.play = Arc::default();
         }
 
         pub fn showing(&self) -> bool {
