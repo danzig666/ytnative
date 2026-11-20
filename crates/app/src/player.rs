@@ -139,6 +139,9 @@ pub struct Status {
     /// Engine B: paused while the download catches up (since this app time, ms), the picture
     /// kept on screen.
     pub buffering_since: Option<u32>,
+    /// The video plays as sound alone (`audio_only.rs`): the screen stays black. Filled in by the
+    /// host, like `quality_pick`.
+    pub audio_only: bool,
 }
 
 #[cfg(not(windows))]
@@ -532,7 +535,10 @@ fn run(
             .max()
             .unwrap_or(0) as u32;
     }
-    if let Some((fp, prefer, slot)) = feed {
+    // Audio only: engine A plays a manifest without video (any TV, any video codec); only a stream
+    // it cannot play that way (live, no AAC) goes on as usual.
+    let audio_mpd = if prefs.audio_only && !resolved.is_live { resolved.audio_mpd(&prefs) } else { None };
+    if let Some((fp, prefer, slot)) = feed.filter(|_| audio_mpd.is_none()) {
         if wants_feed(&resolved, &fp, prefer, window_id.is_none()) {
             crate::log("player: handing the video to engine B (Feed)");
             if !live() {
@@ -550,20 +556,34 @@ fn run(
             return Ok(true);
         }
     }
-    // webOS 4 (no exported window): engine A would play sound over a black screen.
-    let Some(window_id) = window_id else {
-        anyhow::bail!(if crate::feed::FeedPlayer::available() {
+    // webOS 4 (no exported window): engine A would play sound over a black screen, which is all
+    // audio only asks of it.
+    let window_id = match window_id {
+        Some(w) => Some(w),
+        None if audio_mpd.is_some() => None,
+        None => anyhow::bail!(if crate::feed::FeedPlayer::available() {
             "webOS 4: this video has no stream engine B can play"
         } else {
             "webOS 4: engine B (Starfish) is not available, and the system player has no video plane here"
-        });
+        }),
     };
     std::fs::create_dir_all("/tmp/ytnative")?;
     // Live: the HLS master reduced to H.264 renditions (DASH-from-formats only works for VOD).
     // Needs TV validation: LG's hlsdemux2 stalled on YouTube's VOD TS playlists in early tests.
-    let path = if resolved.is_live || resolved.adaptive.iter().all(|f| f["initRange"].is_null()) {
+    let path = if let Some(mpd) = audio_mpd {
+        let path = "/tmp/ytnative/play.mpd";
+        std::fs::write(path, mpd)?;
+        crate::log("player: audio only (a manifest without video)");
+        path
+    } else if resolved.is_live || resolved.adaptive.iter().all(|f| f["initRange"].is_null()) {
         let http = yt_core::net::builder().timeout(std::time::Duration::from_secs(15)).build()?;
-        let master = resolved.hls_master(&http, prefs.max_height)?;
+        let mut master = resolved.hls_master(&http, prefs.max_height)?;
+        // Audio only: YouTube's HLS renditions carry video, so the shortest one.
+        if prefs.audio_only {
+            if let Some(h) = yt_core::streams::hls_lowest_height(&master) {
+                master = yt_core::streams::filter_hls(&master, h);
+            }
+        }
         let path = "/tmp/ytnative/live.m3u8";
         std::fs::write(path, master)?;
         crate::log("player: live stream via HLS");
@@ -579,11 +599,8 @@ fn run(
         return Ok(false);
     }
     let app_id = plx_base::paths::app_id();
-    let load = format!(
-        r#"{{"uri":"file://{path}","type":"media","payload":{{"option":{{"appId":{},"windowId":{}}}}}}}"#,
-        json_str(app_id),
-        json_str(window_id)
-    );
+    let window = window_id.map_or(String::new(), |w| format!(r#","windowId":{}"#, json_str(w)));
+    let load = format!(r#"{{"uri":"file://{path}","type":"media","payload":{{"option":{{"appId":{}{window}}}}}}}"#, json_str(app_id));
     let r = luna.call("luna://com.webos.media/load", &load);
     crate::log(&format!("player: load -> {r}"));
     let v: serde_json::Value = serde_json::from_str(&r).unwrap_or_default();

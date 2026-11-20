@@ -80,6 +80,8 @@ enum Act {
     SubFont,
     SubBold,
     RepeatMode,
+    /// Sound alone over a black screen (it restarts the video at the same position).
+    AudioOnly,
     /// SponsorBlock on / off for a channel (by name).
     SbChannel(String),
     Close,
@@ -520,6 +522,7 @@ impl MenuScreen {
         acts.extend(vec![
             (tr("Playback speed").to_string(), Act::Speed),
             (tr("Audio language").to_string(), Act::AudioTrack),
+            (tr("Audio only").to_string(), Act::AudioOnly),
             (tr("Video zoom").to_string(), Act::ZoomMode),
             (tr("Sleep timer").to_string(), Act::Sleep),
             (tr("Quality").to_string(), Act::Quality),
@@ -619,6 +622,7 @@ impl MenuScreen {
             ),
             Act::Sleep => format!("{}  \u{203A}", crate::settings::sleep_label(s.sleep_timer_mins)),
             Act::Subtitles => format!("{}  \u{203A}", crate::i18n::tr(if s.subtitles { "On" } else { "Off" })),
+            Act::AudioOnly => format!("{}  \u{203A}", crate::i18n::tr(if cx.views.player.audio_only { "On" } else { "Off" })),
             Act::SubSize => format!("{}  \u{203A}", s.subtitle_size),
             Act::SubColor => format!("{}  \u{203A}", crate::i18n::tr(&s.subtitle_color)),
             Act::SubBold => format!("{}  \u{203A}", crate::i18n::tr(if s.subtitle_bold { "On" } else { "Off" })),
@@ -732,6 +736,7 @@ impl MenuScreen {
                     fx.push(Fx::App(YtFx::SetAudioTrack(next)));
                 }
             }
+            Act::AudioOnly => fx.push(Fx::App(YtFx::SetAudioOnly(!cx.views.player.audio_only))),
             Act::ZoomMode => {
                 use crate::player::Zoom;
                 const Z: &[Zoom] = &[Zoom::Fit, Zoom::Fill, Zoom::Zoom];

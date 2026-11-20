@@ -484,6 +484,9 @@ pub struct Settings {
     pub settings_pin: String,
     /// The TV's capabilities were read once (first start) and the playback settings set from them.
     pub device_checked: bool,
+    /// Every video starts as sound alone over a black screen (the player's options switch it per
+    /// run; see `audio_only.rs`).
+    pub audio_only: bool,
 }
 
 impl Default for Settings {
@@ -596,6 +599,7 @@ impl Default for Settings {
             child_mode: false,
             settings_pin: String::new(),
             device_checked: false,
+            audio_only: false,
         }
     }
 }
@@ -742,5 +746,11 @@ mod tests {
         assert!(s.device_checked);
         assert_eq!(s.player_style, PlayerStyle::SmartTube);
         assert_eq!(s.color_keys[1], "subtitles");
+    }
+
+    #[test]
+    fn audio_only_is_off_in_old_settings_files() {
+        assert!(!Settings::from_json(Some(serde_json::json!({"max_height": 720}))).audio_only);
+        assert!(Settings::from_json(Some(serde_json::json!({"audio_only": true}))).audio_only);
     }
 }

@@ -52,12 +52,24 @@ pub fn build_with_audio(
     max_height: u64,
     audio_track: Option<&str>,
 ) -> Option<(String, usize, usize)> {
-    let built = build_inner(formats, duration_ms, video_codec, min_height, max_height, audio_track);
+    let built = build_inner(formats, duration_ms, video_codec, min_height, max_height, audio_track, true);
     // A track id that matches nothing here (kept from another video): the default track.
     if built.is_none() && audio_track.is_some() {
-        return build_inner(formats, duration_ms, video_codec, min_height, max_height, None);
+        return build_inner(formats, duration_ms, video_codec, min_height, max_height, None, true);
     }
     built
+}
+
+/// Audio only: a manifest with the audio adaptation set alone (the chosen track, as in
+/// [`build_with_audio`]), so the player downloads and decodes no video at all. Returns the
+/// manifest and the number of audio representations.
+pub fn build_audio_only(formats: &[Value], duration_ms: u64, audio_track: Option<&str>) -> Option<(String, usize)> {
+    let built = build_inner(formats, duration_ms, "", 0, 0, audio_track, false);
+    let built = match built {
+        None if audio_track.is_some() => build_inner(formats, duration_ms, "", 0, 0, None, false),
+        b => b,
+    };
+    built.map(|(m, _, na)| (m, na))
 }
 
 /// A video format's quality rung: its short side (a vertical 1080p video is 1080x1920).
@@ -76,6 +88,7 @@ fn build_inner(
     min_height: u64,
     max_height: u64,
     audio_track: Option<&str>,
+    with_video: bool,
 ) -> Option<(String, usize, usize)> {
     // The tallest rung under the cap among the formats this manifest can use (a direct URL and
     // both ranges).
@@ -101,6 +114,9 @@ fn build_inner(
             "<BaseURL>{}</BaseURL><SegmentBase indexRange=\"{index}\"><Initialization range=\"{init}\"/></SegmentBase>",
             esc(&path_style(url))
         );
+        if mime.starts_with("video/") && !with_video {
+            continue;
+        }
         if mime.starts_with("video/mp4") && c.starts_with(video_codec) {
             let h = f["height"].as_u64().unwrap_or(0);
             if rung(f) > max_height || rung(f) < min_height {
@@ -126,17 +142,22 @@ fn build_inner(
             na += 1;
         }
     }
-    if nv == 0 || na == 0 {
+    if (with_video && nv == 0) || na == 0 {
         return None;
     }
     let secs = duration_ms as f64 / 1000.0;
+    let video_set = if with_video {
+        format!("<AdaptationSet id=\"0\" contentType=\"video\" mimeType=\"video/mp4\" subsegmentAlignment=\"true\" startWithSAP=\"1\">
+{video}</AdaptationSet>
+")
+    } else {
+        String::new()
+    };
     let mpd = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <MPD xmlns="urn:mpeg:dash:schema:mpd:2011" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011" type="static" minBufferTime="PT1.5S" mediaPresentationDuration="PT{secs:.3}S">
 <Period>
-<AdaptationSet id="0" contentType="video" mimeType="video/mp4" subsegmentAlignment="true" startWithSAP="1">
-{video}</AdaptationSet>
-<AdaptationSet id="1" contentType="audio" mimeType="audio/mp4" lang="und" subsegmentAlignment="true" startWithSAP="1">
+{video_set}<AdaptationSet id="1" contentType="audio" mimeType="audio/mp4" lang="und" subsegmentAlignment="true" startWithSAP="1">
 {audio}</AdaptationSet>
 </Period>
 </MPD>
@@ -166,5 +187,20 @@ mod tests {
         assert!(mpd.contains("id=\"137\"") && !mpd.contains("id=\"135\""));
         // A track id that is not there falls back to the default track.
         assert!(build_with_audio(&f, 60_000, "avc1", 720, 1080, Some("xx.9")).is_some());
+    }
+
+    #[test]
+    fn audio_only_has_no_video_set() {
+        let v = "video/mp4; codecs=\"avc1.640028\"";
+        let a = json!({"itag": 140, "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"", "bitrate": 128000, "url": "https://x/a",
+                       "initRange": {"start": "0", "end": "9"}, "indexRange": {"start": "10", "end": "19"}});
+        let f = [fmt(137, v, 1920, 1080), fmt(136, v, 1280, 720), a];
+        let (mpd, na) = build_audio_only(&f, 60_000, None).unwrap();
+        assert_eq!(na, 1);
+        assert!(mpd.contains("id=\"140\"") && mpd.contains("contentType=\"audio\""));
+        assert!(!mpd.contains("contentType=\"video\"") && !mpd.contains("id=\"137\""));
+        // An unknown track falls back to the default one; no audio at all is no manifest.
+        assert!(build_audio_only(&f, 60_000, Some("xx.9")).is_some());
+        assert!(build_audio_only(&f[..2], 60_000, None).is_none());
     }
 }
