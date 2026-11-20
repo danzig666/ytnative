@@ -527,15 +527,12 @@ pub fn hdr_playing(st: &crate::player::Status) -> bool {
     !st.hdr.is_empty() && !st.hdr.eq_ignore_ascii_case("none")
 }
 
-/// `col` as drawn under the current [`HdrDim`]: bright ink is scaled down, dark scrims get a
-/// little more opaque.
+/// `col` as drawn under the current [`HdrDim`]: bright ink is scaled down; dark scrims stay as
+/// they are (made more opaque, the controls' see-through shade turned solid black over HDR).
 pub(crate) fn dimmed(col: [f32; 4]) -> [f32; 4] {
     let k = UI_DIM.with(|d| d.get());
-    if k >= 1.0 {
+    if k >= 1.0 || col[0].max(col[1]).max(col[2]) < 0.12 {
         return col;
-    }
-    if col[0].max(col[1]).max(col[2]) < 0.12 {
-        return [col[0], col[1], col[2], (col[3] * 1.3).min(1.0)];
     }
     [col[0] * k, col[1] * k, col[2] * k, col[3]]
 }
