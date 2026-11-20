@@ -227,6 +227,8 @@ pub enum YtFx {
     /// Play `video_id` again from the start (Repeat one).
     Replay { video_id: String, playlist: Option<String> },
     Stop,
+    /// The sleep timer: this many minutes from now (0: off). See `store::SleepTimer`.
+    SetSleep(u32),
     TogglePause,
     /// OK in the player: skip an offered SponsorBlock segment, else toggle pause.
     OkInPlayer,
@@ -419,6 +421,9 @@ pub struct AppRig {
     audio_choice: Option<(String, String)>,
     /// Last key press (ms, frame clock): the sleep timer pauses after a while without one.
     pub last_key_ms: u32,
+    /// When the player last stopped with no next video started yet (the sleep timer ends when
+    /// the viewer left the player).
+    stopped_ms: Option<u32>,
     /// The last video a phone started ("no watch history for videos started from the phone").
     pub phone_video: Option<String>,
     /// Engine B refused a speed change this run: videos wanting a speed other than 1x go to the
@@ -505,6 +510,7 @@ impl AppRig {
             current_playlist: None,
             audio_choice: None,
             last_key_ms: 0,
+            stopped_ms: None,
             phone_video: None,
             pending_private: None,
             private_video: None,
@@ -822,12 +828,35 @@ impl AppRig {
                 self.store.toast = None;
             }
         }
-        // Sleep timer: pause after the chosen time without a key press (any key starts it over).
-        let sleep_ms = self.store.settings.sleep_timer_mins.saturating_mul(60_000);
-        if sleep_ms > 0 && self.player_view.phase == Phase::Playing && now_ms.wrapping_sub(self.last_key_ms) >= sleep_ms {
-            self.last_key_ms = now_ms;
-            self.player.toggle_pause();
-            self.store.toast("Sleep timer: playback paused", now_ms);
+        // Sleep timer (`store::SleepTimer`): ends when the viewer left the player for the lists
+        // (stopped, and no next video started within a moment), else warns, restarts or pauses.
+        if let Some(t) = self.store.sleep {
+            if self.stopped_ms.is_some_and(|s| now_ms.wrapping_sub(s) > 2_000) {
+                self.store.sleep = None;
+            } else {
+                match crate::store::sleep_step(&t, now_ms, self.last_key_ms) {
+                    crate::store::SleepStep::Wait => {}
+                    crate::store::SleepStep::Warn => {
+                        self.store.sleep = Some(crate::store::SleepTimer { warned_ms: Some(now_ms), ..t });
+                        self.store.toast("Playback pauses in 1 minute. Press any key to keep watching.", now_ms);
+                        // Longer than a toast: it asks for a key.
+                        if let Some((_, until)) = &mut self.store.toast {
+                            *until = now_ms + 10_000;
+                        }
+                    }
+                    crate::store::SleepStep::Restart => {
+                        self.store.sleep = Some(crate::store::SleepTimer::start(t.mins, now_ms));
+                        self.store.toast(crate::i18n::tr("Sleep timer: {}").replace("{}", &crate::settings::sleep_label(t.mins)), now_ms);
+                    }
+                    crate::store::SleepStep::Lapse => {
+                        self.store.sleep = None;
+                        if self.player_view.phase == Phase::Playing {
+                            self.player.toggle_pause();
+                            self.store.toast("Sleep timer: playback paused", now_ms);
+                        }
+                    }
+                }
+            }
         }
         let v = &self.player_view;
         if !v.video_id.is_empty() && !v.author.is_empty() && self.channel_speed_for != v.video_id && matches!(v.phase, Phase::Loading | Phase::Playing | Phase::Paused) {
@@ -1616,6 +1645,7 @@ impl Rig<YtHost> for AppRig {
             }
             YtFx::Play { video_id, playlist } => {
                 crate::log(&format!("play {video_id} (playlist {playlist:?})"));
+                self.stopped_ms = None;
                 // One pipeline at a time: a card's preview is unloaded before the player loads.
                 crate::preview::stop();
                 // A queued video leaves "Play next" once it plays, however it was started.
@@ -1718,6 +1748,11 @@ impl Rig<YtHost> for AppRig {
                 }
                 self.player.stop();
                 self.restore_global_subtitles();
+                // The next video starts within a moment; if none does, the viewer left the player.
+                self.stopped_ms = Some(self.now_ms);
+            }
+            YtFx::SetSleep(mins) => {
+                self.store.sleep = (mins > 0).then(|| crate::store::SleepTimer::start(mins, self.now_ms));
             }
             YtFx::TogglePause => self.player.toggle_pause(),
             YtFx::OkInPlayer => {

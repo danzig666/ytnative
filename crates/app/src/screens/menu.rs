@@ -158,14 +158,15 @@ fn quality_label(h: u32, fps: u32) -> String {
 /// The maximum video heights the quality row offers.
 const QUALITIES: &[u32] = &[480, 720, 1080, 1440, 2160];
 
+/// The running sleep timer's length in [`SLEEP_MINS`] (0: off).
+fn sleep_index(cx: &Cx<'_, YtHost>) -> usize {
+    cx.views.store.sleep.and_then(|t| SLEEP_MINS.iter().position(|m| *m == t.mins)).unwrap_or(0)
+}
+
 /// The values of a row that edits a setting, and the current one (`None` for other rows).
 fn setting_choices(act: &Act, s: &crate::settings::Settings) -> Option<(Vec<String>, usize)> {
     Some(match act {
         Act::MaxQuality => (QUALITIES.iter().map(|q| format!("{q}p")).collect(), QUALITIES.iter().position(|q| *q == s.max_height).unwrap_or(2)),
-        Act::Sleep => (
-            SLEEP_MINS.iter().map(|m| crate::settings::sleep_label(*m)).collect(),
-            SLEEP_MINS.iter().position(|m| *m == s.sleep_timer_mins).unwrap_or(0),
-        ),
         Act::SubSize => (SUB_SIZES.iter().map(|v| v.to_string()).collect(), SUB_SIZES.iter().position(|v| *v == s.subtitle_size).unwrap_or(2)),
         Act::SubColor => (SUB_COLORS.iter().map(|v| v.to_string()).collect(), SUB_COLORS.iter().position(|v| *v == s.subtitle_color).unwrap_or(0)),
         Act::SubFont => (SUB_FONTS.iter().map(|v| v.to_string()).collect(), SUB_FONTS.iter().position(|v| *v == s.subtitle_font).unwrap_or(0)),
@@ -191,10 +192,6 @@ fn step_setting(act: &Act, s: &mut crate::settings::Settings, dir: i32) {
             let i = QUALITIES.iter().position(|q| *q == s.max_height).unwrap_or(2);
             s.max_height = QUALITIES[clamp(i, dir, QUALITIES.len())];
             s.min_height = s.min_height.min(s.max_height);
-        }
-        Act::Sleep => {
-            let i = SLEEP_MINS.iter().position(|m| *m == s.sleep_timer_mins).unwrap_or(0);
-            s.sleep_timer_mins = SLEEP_MINS[wrap(i, dir, SLEEP_MINS.len())];
         }
         Act::Subtitles => s.subtitles = !s.subtitles,
         Act::SubBold => s.subtitle_bold = !s.subtitle_bold,
@@ -678,7 +675,10 @@ impl MenuScreen {
                     crate::player::Zoom::Zoom => "Zoom in",
                 })
             ),
-            Act::Sleep => format!("{}  \u{203A}", crate::settings::sleep_label(s.sleep_timer_mins)),
+            Act::Sleep => match cx.views.store.sleep {
+                Some(t) => format!("{}  \u{203A}", t.left_label(cx.views.now_ms)),
+                None => format!("{}  \u{203A}", crate::i18n::tr("Off")),
+            },
             Act::Subtitles => format!("{}  \u{203A}", crate::i18n::tr(if s.subtitles { "On" } else { "Off" })),
             Act::AudioOnly => format!("{}  \u{203A}", crate::i18n::tr(if cx.views.player.audio_only { "On" } else { "Off" })),
             Act::SubSize => format!("{}  \u{203A}", s.subtitle_size),
@@ -721,6 +721,8 @@ impl MenuScreen {
                 let cur = st.audio_track.clone().or_else(|| st.audio_tracks.iter().find(|t| t.2).map(|t| t.0.clone()));
                 (st.audio_tracks.iter().map(|t| t.1.clone()).collect(), st.audio_tracks.iter().position(|t| Some(&t.0) == cur.as_ref()).unwrap_or(0))
             }
+            // The timer's lengths; the one running is shown as its length.
+            Act::Sleep => (SLEEP_MINS.iter().map(|m| crate::settings::sleep_label(*m)).collect(), sleep_index(cx)),
             _ => return setting_choices(act, s),
         })
     }
@@ -824,7 +826,13 @@ impl MenuScreen {
                 fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| step_setting(&act, s, dir)))));
                 fx.push(Fx::App(YtFx::Toast("Applies to the next video".into())));
             }
-            Act::Sleep | Act::Subtitles | Act::SubSize | Act::SubColor | Act::SubBold | Act::SubFont | Act::SubStyle | Act::RepeatMode | Act::VideoDetails => {
+            Act::Sleep => {
+                let n = SLEEP_MINS.len() as i32;
+                let mins = SLEEP_MINS[(sleep_index(cx) as i32 + dir).rem_euclid(n) as usize];
+                fx.push(Fx::App(YtFx::SetSleep(mins)));
+                fx.push(Fx::App(YtFx::Toast(if mins == 0 { tr("Sleep timer off").to_string() } else { tr("Sleep timer: {}").replace("{}", &crate::settings::sleep_label(mins)) })));
+            }
+            Act::Subtitles | Act::SubSize | Act::SubColor | Act::SubBold | Act::SubFont | Act::SubStyle | Act::RepeatMode | Act::VideoDetails => {
                 let act = act.clone();
                 fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| step_setting(&act, s, dir)))));
             }
@@ -1209,7 +1217,7 @@ mod tests {
         assert!(repeats(&Act::SubSize));
     }
 
-    const VALUED: [Act; 7] = [Act::MaxQuality, Act::Sleep, Act::SubSize, Act::SubColor, Act::SubFont, Act::SubStyle, Act::RepeatMode];
+    const VALUED: [Act; 6] = [Act::MaxQuality, Act::SubSize, Act::SubColor, Act::SubFont, Act::SubStyle, Act::RepeatMode];
 
     /// Picking value `k` from a row's list runs the row `k - current` steps: it must land on `k`
     /// for every row and every value, from every starting value.
@@ -1235,7 +1243,6 @@ mod tests {
     fn the_settings_defaults_are_values_the_rows_offer() {
         let s = Settings::default();
         assert!(QUALITIES.contains(&s.max_height), "max_height {}", s.max_height);
-        assert!(SLEEP_MINS.contains(&s.sleep_timer_mins));
         assert!(SUB_SIZES.contains(&s.subtitle_size), "subtitle_size {}", s.subtitle_size);
         assert!(SUB_COLORS.contains(&s.subtitle_color.as_str()), "subtitle_color {}", s.subtitle_color);
         assert!(SUB_FONTS.contains(&s.subtitle_font.as_str()), "subtitle_font {}", s.subtitle_font);

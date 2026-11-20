@@ -269,7 +269,8 @@ pub fn dim_timeout_label(secs: u32) -> String {
     }
 }
 
-/// Sleep timer choices in minutes: off, then half an hour to ten hours in half-hour steps.
+/// Sleep timer choices in minutes: off, then half an hour to ten hours in half-hour steps. The
+/// timer is set in the player's options and lasts until it pauses playback (it is not saved).
 pub const SLEEP_MINS: &[u32] = &[0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330, 360, 390, 420, 450, 480, 510, 540, 570, 600];
 
 /// "Off" / "1.5 hours" (translated).
@@ -340,8 +341,6 @@ pub struct Settings {
     pub ok_action: OkAction,
     /// The look of the player's controls.
     pub player_style: PlayerStyle,
-    /// Pause after this many minutes without a key press (0 = off).
-    pub sleep_timer_mins: u32,
     /// Screen dimming in the player (SmartTube's "Screen off"): how dark, in percent (100 = black).
     pub screen_off_dimming: u32,
     /// Seconds without a key press before the armed dimming starts; 0 = the button dims at once.
@@ -529,7 +528,6 @@ impl Default for Settings {
             controls_time: ControlsTime::Remaining,
             ok_action: OkAction::Controls,
             player_style: PlayerStyle::SmartTube,
-            sleep_timer_mins: 0,
             screen_off_dimming: 100,
             screen_off_timeout_secs: 0,
             screen_off_armed: false,

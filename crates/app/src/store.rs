@@ -288,6 +288,8 @@ pub struct Store {
     pub account: Option<String>,
     pub signed_in: bool,
     pub toast: Option<(String, u32)>,
+    /// The sleep timer, while it runs ([`SleepTimer`]).
+    pub sleep: Option<SleepTimer>,
     pub suggestions: Vec<String>,
     pub lounge_code: Option<String>,
     next_elem: u32,
@@ -518,6 +520,84 @@ impl Store {
 
     pub fn toast(&mut self, msg: impl Into<String>, now_ms: u32) {
         self.toast = Some((msg.into(), now_ms + 3500));
+    }
+}
+
+/// The sleep timer: set once in the player's options, it runs across the next videos and pauses
+/// playback when it lapses; leaving the player for the lists, or setting it to Off, ends it.
+/// A minute before, a notice says so, and a key then starts it over with the same length.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SleepTimer {
+    /// Its length, minutes (one of `settings::SLEEP_MINS`).
+    pub mins: u32,
+    /// When it lapses (app time, ms).
+    pub ends_ms: u32,
+    /// When the "one minute left" notice was shown.
+    pub warned_ms: Option<u32>,
+}
+
+impl SleepTimer {
+    pub fn start(mins: u32, now_ms: u32) -> SleepTimer {
+        SleepTimer { mins, ends_ms: now_ms.wrapping_add(mins.saturating_mul(60_000)), warned_ms: None }
+    }
+
+    /// Milliseconds left at `now_ms` (0 once it lapsed).
+    pub fn left_ms(&self, now_ms: u32) -> u32 {
+        let left = self.ends_ms.wrapping_sub(now_ms) as i32;
+        left.max(0) as u32
+    }
+
+    /// "24 minutes left" (rounded up; translated).
+    pub fn left_label(&self, now_ms: u32) -> String {
+        let m = self.left_ms(now_ms).div_ceil(60_000).max(1);
+        if m == 1 {
+            crate::i18n::tr("1 minute left").to_string()
+        } else {
+            crate::i18n::tr("{} minutes left").replace("{}", &m.to_string())
+        }
+    }
+}
+
+/// What the sleep timer does at `now_ms` ([`SleepStep`]); `key_ms`: the last key press.
+pub fn sleep_step(t: &SleepTimer, now_ms: u32, key_ms: u32) -> SleepStep {
+    if t.left_ms(now_ms) == 0 {
+        return SleepStep::Lapse;
+    }
+    match t.warned_ms {
+        // A key after the notice: the viewer is watching.
+        Some(w) if (key_ms.wrapping_sub(w) as i32) > 0 => SleepStep::Restart,
+        None if t.left_ms(now_ms) <= 60_000 => SleepStep::Warn,
+        _ => SleepStep::Wait,
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum SleepStep {
+    Wait,
+    /// Show the "pauses in a minute" notice.
+    Warn,
+    /// A key answered the notice: start over with the same length.
+    Restart,
+    /// Time is up: pause, and the timer ends.
+    Lapse,
+}
+
+#[cfg(test)]
+mod sleep_tests {
+    use super::*;
+
+    #[test]
+    fn the_sleep_timer_warns_restarts_and_lapses() {
+        let t = SleepTimer::start(30, 1_000);
+        assert_eq!(sleep_step(&t, 1_000, 0), SleepStep::Wait);
+        assert_eq!(t.left_label(1_000), "30 minutes left");
+        let warn_at = 1_000 + 29 * 60_000;
+        assert_eq!(sleep_step(&t, warn_at, 0), SleepStep::Warn);
+        assert_eq!(t.left_label(warn_at + 1), "1 minute left");
+        let warned = SleepTimer { warned_ms: Some(warn_at), ..t };
+        assert_eq!(sleep_step(&warned, warn_at + 10_000, warn_at - 5), SleepStep::Wait, "a key before the notice does not count");
+        assert_eq!(sleep_step(&warned, warn_at + 10_000, warn_at + 9_000), SleepStep::Restart);
+        assert_eq!(sleep_step(&warned, 1_000 + 30 * 60_000, 0), SleepStep::Lapse);
     }
 }
 

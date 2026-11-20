@@ -11,7 +11,7 @@
 //! opens the sub-page). Left and BACK in the results come back to "Search settings".
 
 use crate::host::{SettingsPage, YtArg, YtFx, YtHost};
-use crate::settings::{secs_label, Codec, ControlsTime, OkAction, PlaybackMode, PlayerStyle, RememberSpeed, SbAction, Settings, SLEEP_MINS, SPEEDS};
+use crate::settings::{secs_label, Codec, ControlsTime, OkAction, PlaybackMode, PlayerStyle, RememberSpeed, SbAction, Settings, SPEEDS};
 use crate::store::Section;
 use crate::ui::{self, VList};
 use plx_machine::machine::{
@@ -276,7 +276,6 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
             Opt("Seek with number keys", |s| on_off(s.seek_number_keys), |s, _| s.seek_number_keys = !s.seek_number_keys),
             Opt("Time in the controls", |s| s.controls_time.label().into(), |s, d| s.controls_time = cycle(ControlsTime::ALL, s.controls_time, d)),
             Opt("Clock in player", |s| on_off(s.show_clock), |s, _| s.show_clock = !s.show_clock),
-            Opt("Sleep timer", |s| crate::settings::sleep_label(s.sleep_timer_mins), |s, d| s.sleep_timer_mins = cycle(SLEEP_MINS, s.sleep_timer_mins, d)),
             Opt("Screen dimming amount", |s| format!("{} %", s.screen_off_dimming), |s, d| {
                 s.screen_off_dimming = cycle(crate::settings::DIM_PERCENTS, s.screen_off_dimming, d)
             }),
