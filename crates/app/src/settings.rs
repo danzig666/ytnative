@@ -498,6 +498,8 @@ pub struct Settings {
     /// A soft glow in the colours of the picture in the bars around a video that does not fill
     /// the screen (YouTube's ambient mode).
     pub ambient_mode: bool,
+    /// Play a muted preview inside the focused video card's thumbnail (`preview.rs`).
+    pub video_previews: bool,
 }
 
 impl Default for Settings {
@@ -620,6 +622,7 @@ impl Default for Settings {
             live_chat: false,
             same_volume: true,
             ambient_mode: true,
+            video_previews: false,
         }
     }
 }

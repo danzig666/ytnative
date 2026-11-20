@@ -27,6 +27,7 @@ mod loudness;
 mod next_up;
 mod playback_rules;
 mod problem_report;
+mod preview;
 // The Windows desktop simulator swaps the TV-only modules (LS2 bus, Wayland surface, FIFO remote)
 // for stand-ins under `sim/`; see `sim/mod.rs`.
 #[cfg_attr(windows, path = "sim/ls2.rs")]
@@ -695,6 +696,17 @@ fn main() {
             let r = d.frame_with(&mut rig, tick, inputs, results, &mut NoTap, false);
             perf.step(step_t0.elapsed().as_micros() as u64);
             d.prune(&r.unmounted);
+            // Video previews (Settings > Interface): after this pass's navigation, before the draw.
+            preview::frame(
+                &preview::Scene {
+                    enabled: rig.store.settings.video_previews,
+                    top: d.top_screen().map(|s| s.name()),
+                    covered: ui::sidebar_shown() || ui::menu_open() || ui::comments_open(),
+                    player_active: rig.player.active(),
+                    visible: foreground && !blanked,
+                },
+                now,
+            );
             plx_ui::tex::note_queued(&mut d.budget);
 
             let present = foreground && !blanked && (r.presented || had_input || input_echo > 0 || ui::take_animating() || plx_machine::idle::should_present(now) || plx_ui::tex::has_pending());
@@ -725,9 +737,11 @@ fn main() {
                     let c = ui::bg_rgb();
                     plx_gfx::gfx::frame_clear(c.0, c.1, c.2);
                 }
+                preview::begin_draw();
                 plx_ui::guard(|| {
                     d.draw(&mut rig, true);
                 });
+                preview::punch();
                 #[cfg(windows)]
                 if let Some(r) = remote.as_mut() {
                     let (mut dw, mut dh) = (0, 0);

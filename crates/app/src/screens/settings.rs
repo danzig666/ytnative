@@ -427,6 +427,7 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
                 let i = C.iter().position(|c| *c == s.accent).unwrap_or(0) as i32;
                 s.accent = C[((i + d).rem_euclid(C.len() as i32)) as usize].into();
             }),
+            Opt("Play a preview of the focused video", |s| on_off(s.video_previews), |s, _| s.video_previews = !s.video_previews),
             ];
             // One toggle per sidebar section.
             macro_rules! section_toggle {
