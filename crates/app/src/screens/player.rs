@@ -1894,6 +1894,15 @@ fn row_len(kind: RowKind, cx: &Cx<'_, YtHost>, current: &str) -> usize {
     }
 }
 
+/// Whether the playing playlist is shuffled, as its Shuffle button shows it (the Shuffle playback
+/// mode shuffles it unless the viewer switched that off); `None` when it offers no shuffle (no
+/// playlist, or a mix).
+pub(crate) fn playlist_shuffle(cx: &Cx<'_, YtHost>) -> Option<bool> {
+    let q = playing_list(cx, &cx.views.player.video_id)?;
+    let mode_on = cx.views.store.settings.playback_mode == PlaybackMode::Shuffle && !q.keep_order;
+    (shuffle_offset(q) > 0).then(|| q.shuffled() || mode_on)
+}
+
 /// The card in column `col` of a row.
 fn tile(kind: RowKind, cx: &Cx<'_, YtHost>, current: &str, col: usize) -> Option<Tile> {
     match kind {
@@ -1901,9 +1910,7 @@ fn tile(kind: RowKind, cx: &Cx<'_, YtHost>, current: &str, col: usize) -> Option
             let q = playing_list(cx, current)?;
             let off = shuffle_offset(q);
             if col < off {
-                // The Shuffle playback mode shuffles the list unless the viewer switched it off.
-                let mode_on = cx.views.store.settings.playback_mode == PlaybackMode::Shuffle && !q.keep_order;
-                return Some(Tile::Shuffle(q.shuffled() || mode_on));
+                return Some(Tile::Shuffle(playlist_shuffle(cx).unwrap_or(false)));
             }
             // The playing video's own tile in a mix's panel comes without its title: the
             // player's.

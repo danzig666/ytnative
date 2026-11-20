@@ -93,6 +93,10 @@ enum Act {
     AudioOnly,
     /// The "Video details" panel on / off.
     VideoDetails,
+    /// The playing playlist's shuffle on / off.
+    ShufflePlaylist,
+    /// The playing playlist in a new random order (shuffle on).
+    Reshuffle,
     /// "Notify me of new videos from this channel" on / off for the playing video's channel.
     Bell,
     /// SponsorBlock on / off for a channel (by name).
@@ -225,7 +229,7 @@ fn step_setting(act: &Act, s: &mut crate::settings::Settings, dir: i32) {
 /// Whether a held Left / Right keeps stepping the row. A switch does not: held, it would flip on
 /// and off with every repeat, and "Audio only" restarts the stream at each flip.
 fn repeats(act: &Act) -> bool {
-    !matches!(act, Act::AudioOnly | Act::VideoDetails | Act::Bell)
+    !matches!(act, Act::AudioOnly | Act::VideoDetails | Act::Bell | Act::ShufflePlaylist | Act::Reshuffle)
 }
 
 fn step_speed(current: f32, dir: i32) -> f32 {
@@ -283,9 +287,23 @@ impl MenuScreen {
 
     /// The card menu for one of the playing video's suggestions (hold OK on it in the player).
     pub fn suggestion(entry: EntryId, video_id: &str, cx: &Cx<'_, YtHost>) -> Self {
-        let item = cx.views.player.extras.watch.as_ref().and_then(|w| {
-            w.suggestions.iter().flat_map(|s| s.items.iter()).find(|it| it.id == video_id).cloned()
-        });
+        // A suggestion, else a video of the playlist row (the playing queue's details, the
+        // watch page's playlist window), else a bare card for it: never a menu with nothing in it.
+        let w = cx.views.player.extras.watch.as_ref();
+        let queue = cx.views.store.play_queue.as_ref();
+        let item = w
+            .and_then(|w| w.suggestions.iter().flat_map(|s| s.items.iter()).find(|it| it.id == video_id).cloned())
+            .or_else(|| queue.and_then(|q| q.info.get(video_id).cloned()))
+            .or_else(|| w.and_then(|w| w.playlist.as_ref()).and_then(|p| p.items.iter().find(|it| it.id == video_id).cloned()))
+            .or_else(|| {
+                queue.filter(|q| q.items.iter().any(|v| v == video_id)).map(|q| yt_core::model::Item {
+                    id: video_id.to_string(),
+                    kind: yt_core::model::ItemKind::Video,
+                    endpoint: Some(yt_core::model::Endpoint::Watch { video_id: video_id.to_string(), playlist_id: q.playlist_id.clone(), params: None }),
+                    thumbnail: Some(format!("https://i.ytimg.com/vi/{video_id}/hqdefault.jpg")),
+                    ..Default::default()
+                })
+            });
         let card = item.map(|it| crate::store::Card {
             elem: 0, // no feed's card: not in a playlist on this TV, not a subscribed channel
             title: it.title.clone(),
@@ -424,8 +442,10 @@ impl MenuScreen {
     }
 
     /// Opens the player on `v`: over the player it takes the playing video's place.
-    fn play_op(&self, v: &str) -> NavOp<YtArg> {
-        let arg = YtArg::Player { video_id: v.to_string(), playlist: None };
+    /// Plays `v`; over the player, a video of the playing playlist plays within it.
+    fn play_op(&self, v: &str, cx: &Cx<'_, YtHost>) -> NavOp<YtArg> {
+        let playlist = cx.views.store.play_queue.as_ref().filter(|q| self.over_player && q.items.iter().any(|x| x == v)).and_then(|q| q.playlist_id.clone());
+        let arg = YtArg::Player { video_id: v.to_string(), playlist };
         if self.over_player { NavOp::Replace(arg) } else { NavOp::Push(arg) }
     }
 
@@ -587,6 +607,12 @@ impl MenuScreen {
             (tr("When the video ends").to_string(), Act::RepeatMode),
             (tr("Video details").to_string(), Act::VideoDetails),
         ]);
+        // The playing playlist's shuffle (as the Shuffle button at the start of its row), and a
+        // new random order (which also turns shuffle on).
+        if super::player::playlist_shuffle(cx).is_some() {
+            acts.push((tr("Shuffle this playlist").to_string(), Act::ShufflePlaylist));
+            acts.push((tr("Shuffle in a new order").to_string(), Act::Reshuffle));
+        }
         if cx.views.store.signed_in && !st.video_id.is_empty() && !st.channel_id.is_empty() {
             acts.push((tr("Notify me of new videos from this channel").to_string(), Act::Bell));
         }
@@ -688,6 +714,7 @@ impl MenuScreen {
             Act::SubStyle => format!("{}  \u{203A}", crate::i18n::tr(&s.subtitle_style)),
             Act::RepeatMode => format!("{}  \u{203A}", crate::i18n::tr(s.playback_mode.label())),
             Act::VideoDetails => format!("{}  \u{203A}", crate::i18n::tr(if s.video_details { "On" } else { "Off" })),
+            Act::ShufflePlaylist => format!("{}  \u{203A}", crate::i18n::tr(if super::player::playlist_shuffle(cx) == Some(true) { "On" } else { "Off" })),
             Act::Bell => {
                 let on = yt_core::bell_channels::contains(&cx.views.player.channel_id);
                 format!("{}  \u{203A}", crate::i18n::tr(if on { "On" } else { "Off" }))
@@ -731,12 +758,12 @@ impl MenuScreen {
         match act {
             Act::Play(v) => {
                 fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
-                fx.push(Fx::Nav(self.play_op(v)));
+                fx.push(Fx::Nav(self.play_op(v, cx)));
             }
             Act::PlayWith(v, from_start, no_history) => {
                 fx.push(Fx::App(YtFx::PlayOptions { video_id: v.clone(), from_start: *from_start, no_history: *no_history }));
                 fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
-                fx.push(Fx::Nav(self.play_op(v)));
+                fx.push(Fx::Nav(self.play_op(v, cx)));
             }
             Act::UnblockChannel(ch) => {
                 let ch = ch.clone();
@@ -831,6 +858,14 @@ impl MenuScreen {
                 let mins = SLEEP_MINS[(sleep_index(cx) as i32 + dir).rem_euclid(n) as usize];
                 fx.push(Fx::App(YtFx::SetSleep(mins)));
                 fx.push(Fx::App(YtFx::Toast(if mins == 0 { tr("Sleep timer off").to_string() } else { tr("Sleep timer: {}").replace("{}", &crate::settings::sleep_label(mins)) })));
+            }
+            Act::ShufflePlaylist => {
+                let on = super::player::playlist_shuffle(cx) == Some(true);
+                fx.push(Fx::App(YtFx::ShuffleQueue(!on)));
+            }
+            Act::Reshuffle => {
+                fx.push(Fx::App(YtFx::ShuffleQueue(true)));
+                fx.push(Fx::App(YtFx::Toast(tr("Playlist shuffled in a new order").to_string())));
             }
             Act::Subtitles | Act::SubSize | Act::SubColor | Act::SubBold | Act::SubFont | Act::SubStyle | Act::RepeatMode | Act::VideoDetails => {
                 let act = act.clone();
