@@ -1676,9 +1676,9 @@ impl PlayerScreen {
                 for (k, it) in peek.iter().enumerate() {
                     let r = Rect::new(96.0 + k as f32 * (TW + 32.0), 1000.0, TW, TW * 9.0 / 16.0);
                     let url = it.thumbnail.clone().unwrap_or_default();
-                    let (tex, _, _) = plx_ui::tex::resolve_wh_on(0, &url, 0, 0, false);
+                    let (tex, tw_px, th_px) = plx_ui::tex::resolve_wh_on(0, &url, 0, 0, false);
                     if tex != 0 {
-                        p.tex_uv(tex, [0.0, 0.0, 1.0, 1.0], r, 14.0, ui::dimmed([1.0, 1.0, 1.0, 0.85]));
+                        p.tex_uv(tex, crop_16_9(tw_px, th_px), r, 14.0, ui::dimmed([1.0, 1.0, 1.0, 0.85]));
                     } else {
                         ui::fill(p, r, 14.0, [1.0, 1.0, 1.0, 0.08]);
                     }
@@ -1934,6 +1934,37 @@ fn ease_to(x: &mut f32, to: f32, dt: f32) -> bool {
     }
 }
 
+/// The part of a `w` x `h` thumbnail (as `tex_uv` takes it: x, y, width, height) that fills a
+/// 16:9 card: its middle. YouTube's playlist and mix items often come as 4:3 pictures with black
+/// bars baked in above and below; stretched over the card, the picture looked squashed.
+fn crop_16_9(w: f32, h: f32) -> [f32; 4] {
+    if w <= 0.0 || h <= 0.0 {
+        return [0.0, 0.0, 1.0, 1.0];
+    }
+    let card = 16.0 / 9.0;
+    let pic = w / h;
+    if pic < card {
+        // Taller than 16:9: the middle band.
+        let vh = pic / card;
+        [0.0, (1.0 - vh) / 2.0, 1.0, vh]
+    } else {
+        // Wider: the middle part across.
+        let uw = card / pic;
+        [(1.0 - uw) / 2.0, 0.0, uw, 1.0]
+    }
+}
+
+#[cfg(test)]
+mod crop_tests {
+    #[test]
+    fn a_4_3_thumbnail_shows_its_16_9_middle() {
+        let c = super::crop_16_9(480.0, 360.0);
+        assert!((c[1] - 0.125).abs() < 1e-4 && (c[3] - 0.75).abs() < 1e-4, "{c:?}");
+        assert_eq!(super::crop_16_9(1280.0, 720.0), [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(super::crop_16_9(0.0, 0.0), [0.0, 0.0, 1.0, 1.0]);
+    }
+}
+
 fn with_alpha(c: [f32; 4], a: f32) -> [f32; 4] {
     [c[0], c[1], c[2], c[3] * a]
 }
@@ -2042,9 +2073,9 @@ fn draw_cards(
             Tile::Video(it) => it,
         };
         let url = it.thumbnail.clone().unwrap_or_default();
-        let (tex, _, _) = plx_ui::tex::resolve_wh_on(0, &url, 0, 0, false);
+        let (tex, tw_px, th_px) = plx_ui::tex::resolve_wh_on(0, &url, 0, 0, false);
         if tex != 0 {
-            p.tex_uv(tex, [0.0, 0.0, 1.0, 1.0], r, 14.0, with_alpha(ui::dimmed(ui::WHITE), alpha));
+            p.tex_uv(tex, crop_16_9(tw_px, th_px), r, 14.0, with_alpha(ui::dimmed(ui::WHITE), alpha));
         } else {
             ui::fill(p, r, 14.0, [1.0, 1.0, 1.0, 0.08 * alpha]);
         }
