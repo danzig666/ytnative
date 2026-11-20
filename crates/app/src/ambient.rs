@@ -30,9 +30,13 @@ const FADE_MS: u32 = 3000;
 /// Paused this long, the glow fades away (and comes back when playback resumes).
 const PAUSE_OFF_MS: u32 = 60_000;
 /// Opacity of the glow against the picture, before the slow breathing and the HDR dimming.
-const PEAK: f32 = 0.38;
+/// (0.38 was barely visible on an OLED panel.)
+const PEAK: f32 = 0.75;
 /// No colour brighter than this: a white frame glows a soft grey, not a white bar.
-const MAX_INK: f32 = 0.8;
+const MAX_INK: f32 = 0.85;
+/// Edge colours are lifted by this power (hue kept): a frame's edge averages come out dark,
+/// and a dark glow does not show in the black bars.
+const LIFT: f32 = 0.75;
 /// Texels across a bar, from the picture's edge to the screen's: the falloff curve, which the
 /// GPU's linear filtering smooths between them.
 const FALLOFF_TEXELS: usize = 8;
@@ -118,8 +122,11 @@ fn average(s: &Sheet, x0: u32, x1: u32, y0: u32, y1: u32) -> Rgb {
     acc.map(|v| v as f32 / n as f32 / 255.0)
 }
 
-/// Bright colours scaled down (hue kept) so the brightest channel is at most [`MAX_INK`].
+/// Dark colours lifted ([`LIFT`]) and bright ones scaled down so the brightest channel is at
+/// most [`MAX_INK`], the hue kept either way.
 fn tame(c: Rgb) -> Rgb {
+    let m = c[0].max(c[1]).max(c[2]);
+    let c = if m > 0.0 && m < 1.0 { c.map(|v| v * m.powf(LIFT) / m) } else { c };
     let m = c[0].max(c[1]).max(c[2]);
     if m > MAX_INK {
         c.map(|v| v * MAX_INK / m)
@@ -191,10 +198,10 @@ pub fn bars(content: Rect) -> Option<(bool, [Rect; 2])> {
 }
 
 /// The glow's opacity at texel `i` of [`FALLOFF_TEXELS`] counted from the picture's edge: high
-/// against the picture, nothing at the screen's edge.
+/// against the picture, falling to nothing exactly at the screen's edge.
 fn falloff(i: usize) -> f32 {
-    let d = (i as f32 + 0.5) / FALLOFF_TEXELS as f32;
-    (1.0 - d).max(0.0).powf(1.6)
+    let d = i as f32 / (FALLOFF_TEXELS - 1) as f32;
+    (1.0 - d).max(0.0).powf(1.1)
 }
 
 /// The texture of one bar (straight alpha RGBA, in screen orientation): three texels along the
