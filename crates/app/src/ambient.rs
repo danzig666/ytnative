@@ -46,8 +46,12 @@ const OVERLAP: f32 = 3.0;
 /// A frame edge darker than this (brightest channel, 0..1) is a black border of the video
 /// itself; the glow covers it.
 const BLACK: f32 = 0.07;
-/// At most this share of the frame is taken for a black border, either side.
-const MAX_BORDER: f32 = 0.2;
+/// At most this share of the frame is taken for a black border, either side (the video's own
+/// strips are thin; more is a dark scene).
+const MAX_BORDER: f32 = 0.08;
+/// The picture right past a border must be at least this bright (brightest channel, 0..1): a
+/// strip ends in a hard edge, while a dark scene only fades out toward the frame's edge.
+const EDGE: f32 = 0.2;
 /// Reduced sheets kept (each about 40 KB): enough for the sheets of a long video seeked around.
 const SHEETS_KEPT: usize = 48;
 /// The reduced copy of a sheet is at most this wide.
@@ -145,29 +149,29 @@ fn tame(c: Rgb) -> Rgb {
 
 /// How much of the frame at `(x, y, w, h)` (sheet pixels) is a black border of the video itself
 /// on the two sides that face the bars (left and right when `pillar`, else top and bottom), as
-/// shares of the frame's width (or height), each at most [`MAX_BORDER`]: many videos carry black
-/// strips in their frames, which would show as a dark line between the picture and the glow.
-pub fn black_edges(s: &Sheet, frame: (u32, u32, u32, u32), pillar: bool) -> [f32; 2] {
+/// shares of the frame's width (or height): many videos carry black strips in their frames,
+/// which would show as a dark line between the picture and the glow. `None` for a side where
+/// this frame cannot tell: dark lines up to [`MAX_BORDER`] that do not end in a bright edge
+/// ([`EDGE`]) are a dark scene, not a border. `Some(0.0)`: the picture reaches the edge.
+pub fn black_edges(s: &Sheet, frame: (u32, u32, u32, u32), pillar: bool) -> [Option<f32>; 2] {
     let (fx, fy, fw, fh) = frame;
     let (x0, y0) = (fx / s.f, fy / s.f);
     let (x1, y1) = (((fx + fw) / s.f).min(s.w), ((fy + fh) / s.f).min(s.h));
     if x1 < x0 + 4 || y1 < y0 + 4 {
-        return [0.0; 2];
+        return [None; 2];
     }
-    let dark = |c: Rgb| c[0].max(c[1]).max(c[2]) < BLACK;
+    let bright = |c: Rgb| c[0].max(c[1]).max(c[2]);
     let (len, cap) = if pillar { (x1 - x0, ((x1 - x0) as f32 * MAX_BORDER) as u32) } else { (y1 - y0, ((y1 - y0) as f32 * MAX_BORDER) as u32) };
-    // Lines (columns or rows) counted from one edge while they are dark.
-    let count = |from_far: bool| {
-        (0..cap)
-            .take_while(|&i| {
-                let at = if from_far { len - 1 - i } else { i };
-                let line = if pillar { average(s, x0 + at, x0 + at + 1, y0, y1) } else { average(s, x0, x1, y0 + at, y0 + at + 1) };
-                dark(line)
-            })
-            .count() as f32
-            / len as f32
+    let line = |i: u32, from_far: bool| {
+        let at = if from_far { len - 1 - i } else { i };
+        bright(if pillar { average(s, x0 + at, x0 + at + 1, y0, y1) } else { average(s, x0, x1, y0 + at, y0 + at + 1) })
     };
-    [count(false), count(true)]
+    // Dark lines (columns or rows) counted from one edge, then the line past them must be bright.
+    let side = |from_far: bool| {
+        let n = (0..=cap).take_while(|&i| line(i, from_far) < BLACK).count() as u32;
+        (n <= cap && line(n, from_far) >= EDGE).then(|| n as f32 / len as f32)
+    };
+    [side(false), side(true)]
 }
 
 /// The colours along the two edges of the frame at `(x, y, w, h)` (sheet pixels) that face the
@@ -182,7 +186,7 @@ pub fn edge_palette(s: &Sheet, frame: (u32, u32, u32, u32), pillar: bool) -> Opt
         return None;
     }
     let (w, h) = (x1 - x0, y1 - y0);
-    let border = black_edges(s, frame, pillar);
+    let border = black_edges(s, frame, pillar).map(|b| b.unwrap_or(0.0));
     let past = |share: f32, len: u32| (share * len as f32).ceil() as u32;
     let third = |a: u32, len: u32, i: u32| (a + len * i / 3, a + len * (i + 1) / 3);
     let mut p: Palette = [[[0.0; 3]; 3]; 2];
@@ -330,8 +334,10 @@ pub struct Glow {
     paused_since: Option<u32>,
     tex: [u32; 2],
     uploaded: Option<(bool, [[[u8; 3]; 3]; 2])>,
-    /// The video's own black borders on the two sides ([`black_edges`]): the glow covers them.
-    border: [f32; 2],
+    /// The video's own black borders on the two sides: the narrowest any frame of this video has
+    /// shown ([`black_edges`]; a strip is in every frame, a dark scene is not), `None` until a
+    /// frame could tell. The glow covers them.
+    border: [Option<f32>; 2],
 }
 
 impl Glow {
@@ -360,6 +366,16 @@ impl Glow {
         self.t0 = now_ms;
         self.pillar = pillar;
         self.has = true;
+    }
+
+    /// A frame's black borders: each side keeps the narrowest seen, so a dark scene never
+    /// widens the glow over the picture.
+    pub fn note_border(&mut self, seen: [Option<f32>; 2]) {
+        for (have, new) in self.border.iter_mut().zip(seen) {
+            if let Some(n) = new {
+                *have = Some(have.map_or(n, |h| h.min(n)));
+            }
+        }
     }
 
     /// Eases [`Self::master`] toward `on` over `dt_ms`: in over about a second, out more slowly.
@@ -422,7 +438,7 @@ pub fn draw(p: Painter, st: &crate::player::Status, enabled: bool, now_ms: u32) 
                 if let Some(s) = sheet(&fr.sheet_url) {
                     if let Some(pal) = edge_palette(&s, (fr.x, fr.y, fr.w, fr.h), pillar) {
                         g.retarget(pal, pillar, now_ms);
-                        g.border = black_edges(&s, (fr.x, fr.y, fr.w, fr.h), pillar);
+                        g.note_border(black_edges(&s, (fr.x, fr.y, fr.w, fr.h), pillar));
                         g.frame = Some(key);
                     }
                 }
@@ -447,7 +463,8 @@ pub fn draw(p: Painter, st: &crate::player::Status, enabled: bool, now_ms: u32) 
         }
         let ink = crate::ui::dimmed([1.0, 1.0, 1.0, g.master * PEAK * breath(now_ms)]);
         let content = content_rect(vw, vh, zoom.unwrap_or(1.0));
-        let rects = content.map_or(rects, |c| reach_in(rects, c, pillar, g.border));
+        let border = g.border.map(|b| b.unwrap_or(0.0));
+        let rects = content.map_or(rects, |c| reach_in(rects, c, pillar, border));
         for side in 0..2 {
             if g.tex[side] != 0 && rects[side].w > 0.0 && rects[side].h > 0.0 {
                 p.tex_uv(g.tex[side], [0.0, 0.0, 1.0, 1.0], rects[side], 0.0, ink);
@@ -476,12 +493,24 @@ mod tests {
 
     #[test]
     fn a_videos_black_strips_are_found() {
-        let e = black_edges(&bordered(2, 1), (0, 0, 20, 10), true);
-        assert!((e[0] - 0.10).abs() < 1e-6 && (e[1] - 0.05).abs() < 1e-6, "{e:?}");
-        assert_eq!(black_edges(&bordered(0, 0), (0, 0, 20, 10), true), [0.0, 0.0]);
-        // A black frame is not all border: at most MAX_BORDER either side.
-        let all = black_edges(&bordered(20, 0), (0, 0, 20, 10), true);
-        assert!(all[0] <= MAX_BORDER + 1e-6, "{all:?}");
+        let e = black_edges(&bordered(1, 1), (0, 0, 20, 10), true);
+        assert_eq!(e, [Some(0.05), Some(0.05)]);
+        assert_eq!(black_edges(&bordered(0, 0), (0, 0, 20, 10), true), [Some(0.0), Some(0.0)]);
+        // A dark scene (or a strip wider than MAX_BORDER) tells nothing.
+        assert_eq!(black_edges(&bordered(20, 0), (0, 0, 20, 10), true)[0], None);
+        assert_eq!(black_edges(&bordered(5, 0), (0, 0, 20, 10), true)[0], None);
+    }
+
+    #[test]
+    fn a_dark_scene_never_widens_the_border() {
+        let mut g = Glow::default();
+        g.note_border([None, None]);
+        assert_eq!(g.border, [None, None], "nothing known yet");
+        g.note_border([Some(0.05), Some(0.0)]);
+        g.note_border([Some(0.2), None]);
+        assert_eq!(g.border, [Some(0.05), Some(0.0)], "the narrowest stays");
+        g.note_border([Some(0.0), None]);
+        assert_eq!(g.border[0], Some(0.0), "content reaching the edge ends the border");
     }
 
     #[test]
