@@ -162,6 +162,7 @@ impl FeedPlayer {
             author: resolved.author.clone(),
             duration_ms,
             position_ms: start_ms.unwrap_or(0),
+            loudness_db: yt_core::loudness::loudness_db(&resolved.raw, choice.audio.as_ref()),
             ..Default::default()
         };
         drop(st);

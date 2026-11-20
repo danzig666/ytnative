@@ -19,6 +19,8 @@ mod relaunch;
 #[cfg(not(windows))]
 mod voice;
 mod lounge;
+#[cfg_attr(windows, allow(dead_code))] // applied by the TV player only
+mod loudness;
 mod next_up;
 mod playback_rules;
 // The Windows desktop simulator swaps the TV-only modules (LS2 bus, Wayland surface, FIFO remote)

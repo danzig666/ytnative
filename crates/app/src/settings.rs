@@ -484,6 +484,9 @@ pub struct Settings {
     pub settings_pin: String,
     /// The TV's capabilities were read once (first start) and the playback settings set from them.
     pub device_checked: bool,
+    /// "Same volume for every video": loud videos are turned down to YouTube's reference level
+    /// (`loudness.rs`), as YouTube's own players do.
+    pub same_volume: bool,
 }
 
 impl Default for Settings {
@@ -596,6 +599,7 @@ impl Default for Settings {
             child_mode: false,
             settings_pin: String::new(),
             device_checked: false,
+            same_volume: true,
         }
     }
 }

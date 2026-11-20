@@ -188,6 +188,7 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
                 l.extend(language_codes());
                 cycle_str(&l, &mut s.audio_language, d);
             }),
+            Opt("Same volume for every video", |s| on_off(s.same_volume), |s, _| s.same_volume = !s.same_volume),
         ],
         SettingsPage::Subtitles => vec![
             Opt("Subtitles", |s| on_off(s.subtitles), |s, _| s.subtitles = !s.subtitles),
