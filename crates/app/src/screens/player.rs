@@ -473,6 +473,7 @@ impl Machine<YtHost> for PlayerScreen {
             }
             ScreenEvent::Unmount => {
                 fx.push(Fx::App(YtFx::Stop));
+                ui::set_player_dim(0, false);
                 Handled::Yes
             }
             ScreenEvent::Uncover => {
@@ -515,6 +516,15 @@ impl Machine<YtHost> for PlayerScreen {
                 // Screen dimming after the timeout without a key press (while playing).
                 {
                     let s = &cx.views.store.settings;
+                    // A key taken by a panel over the video (the live chat) counts as a key here,
+                    // and lifts a dim a key lifts (the panel let it do nothing else).
+                    if let Some(t) = ui::take_panel_key() {
+                        self.last_key_ms = t;
+                        if self.dimmed && ui::key_lifts_dim(s.screen_off_dimming, s.screen_off_timeout_secs) {
+                            self.dimmed = false;
+                            fx.invalidate(plx_machine::present::Provenance::Timer(T_TICK));
+                        }
+                    }
                     let quiet = cx.views.now_ms.wrapping_sub(self.last_key_ms) / 1000;
                     if s.screen_off_armed && s.screen_off_timeout_secs > 0 && !self.dimmed && p.phase == Phase::Playing && !self.hud
                         && quiet >= s.screen_off_timeout_secs
@@ -607,7 +617,7 @@ impl Machine<YtHost> for PlayerScreen {
                 // partial dim at once stays until its button is pressed again.
                 if self.dimmed && *edge == Edge::Down {
                     let s = &cx.views.store.settings;
-                    if s.screen_off_dimming >= 100 || s.screen_off_timeout_secs > 0 {
+                    if ui::key_lifts_dim(s.screen_off_dimming, s.screen_off_timeout_secs) {
                         self.dimmed = false;
                         fx.invalidate(plx_machine::present::Provenance::Input);
                         return Handled::Yes;
@@ -887,6 +897,11 @@ impl Screen<YtHost> for PlayerScreen {
         let p = f.painter;
         let cx = f.cx;
         let st = cx.views.player;
+        // For a panel over the video (the live chat), drawn after this, to dim with the picture.
+        {
+            let s = &cx.views.store.settings;
+            ui::set_player_dim(if self.dimmed { s.screen_off_dimming } else { 0 }, ui::key_lifts_dim(s.screen_off_dimming, s.screen_off_timeout_secs));
+        }
         // Status in the middle while there is no picture yet / on failure.
         let centre = match &st.phase {
             Phase::Idle | Phase::Resolving | Phase::Loading => Some(String::new()),

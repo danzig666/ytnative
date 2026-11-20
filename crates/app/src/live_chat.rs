@@ -1,13 +1,15 @@
 //! Live chat beside a live stream: the messages kept for the panel, the polling that brings new
 //! ones, and the panel's scroll position.
 //!
-//! The chat is polled only while its panel is open. Each request is one worker job: it waits the
+//! The chat is polled only while its panel is open and can be seen over its video playing (see
+//! [`may_poll`]). Each request is one worker job: it waits the
 //! time YouTube asked for (`timeoutMs`), then makes the request; its answer, applied on the main
 //! thread, starts the next job. Closing the panel moves the generation on, so a job still waiting
 //! gives up without a request and an answer still on its way is dropped.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use crate::player::Phase;
 use yt_core::live_chat::{ChatMessage, LiveChatPage};
 
 /// Messages kept: older ones are dropped from the top as new ones arrive.
@@ -41,6 +43,8 @@ pub struct Chat {
     failures: u32,
     /// The current generation, shared with the waiting job so it can see it was given up.
     gen: Arc<AtomicU64>,
+    /// Polling stopped while the panel cannot be seen (see [`Chat::set_active`]).
+    paused: bool,
 }
 
 /// One request to make on a worker: wait `delay_ms`, then ask with `token`.
@@ -65,6 +69,7 @@ impl Chat {
             self.no_chat = false;
         }
         self.open = true;
+        self.paused = false;
         self.loading = self.messages.is_empty();
         self.error = None;
         self.failures = 0;
@@ -74,7 +79,33 @@ impl Chat {
     /// The panel closed: no more requests.
     pub fn close(&mut self) {
         self.open = false;
+        self.paused = false;
         self.gen.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Whether polling may go on now (from [`may_poll`], every frame). Going away gives up the
+    /// waiting request (an answer already on its way is dropped; the same continuation is asked
+    /// again later, and repeated messages are kept once); coming back gives the request to start,
+    /// at once.
+    pub fn set_active(&mut self, active: bool) -> Option<Poll> {
+        let polling = self.open && !self.ended && !self.no_chat;
+        if !active {
+            if polling && !self.paused {
+                self.paused = true;
+                self.gen.fetch_add(1, Ordering::Relaxed);
+            }
+            return None;
+        }
+        if std::mem::replace(&mut self.paused, false) && polling {
+            return Some(self.next(0));
+        }
+        None
+    }
+
+    /// Nothing more will come to the panel: the chat is over (or there is none), or the video it
+    /// belongs to is no longer the one playing, or its playback ended or failed.
+    pub fn over(&self, player_video: &str, phase: &Phase) -> bool {
+        self.ended || self.no_chat || self.video_id != player_video || matches!(phase, Phase::Idle | Phase::Ended | Phase::Failed(_))
     }
 
     fn next(&mut self, delay_ms: u64) -> Poll {
@@ -128,6 +159,12 @@ impl Chat {
     }
 }
 
+/// The chat may be polled: the app is in front with its screen not blanked, and the player is on
+/// the chat's video and neither stopped, ended nor failed.
+pub fn may_poll(screen_shown: bool, chat_video: &str, player_video: &str, phase: &Phase) -> bool {
+    screen_shown && !chat_video.is_empty() && chat_video == player_video && matches!(phase, Phase::Resolving | Phase::Loading | Phase::Playing | Phase::Paused)
+}
+
 /// A worker's part of a [`Poll`]: wait, then ask, unless the panel closed meanwhile (the first
 /// time, the chat's first continuation is looked up on the web watch page). `Ok(None)`: the
 /// video has no live chat. The session is held only to borrow its connection and configuration,
@@ -173,7 +210,6 @@ impl Default for Scroll {
 
 impl Scroll {
     /// At the newest message, following new ones.
-    #[cfg(test)]
     pub fn following(&self) -> bool {
         self.anchor.is_none()
     }
@@ -317,6 +353,54 @@ mod tests {
         let p = c.open("v", None);
         assert!(!c.no_chat && c.loading);
         assert_eq!(p.token, "");
+    }
+
+    #[test]
+    fn polling_stops_while_the_panel_cannot_be_seen() {
+        let mut c = Chat::default();
+        let p = c.open("v", Some("T0"));
+        let p = c.apply(p.gen, Ok(Some(page(&["1"], Some("T1"), Some(8000))))).unwrap();
+        // Hidden: the waiting request gives up, its answer is dropped, nothing new starts.
+        assert!(c.set_active(false).is_none());
+        assert_ne!(p.current.load(Ordering::Relaxed), p.gen);
+        assert!(c.apply(p.gen, Ok(Some(page(&["2"], Some("T2"), None)))).is_none());
+        assert!(c.set_active(false).is_none());
+        // Back: one request at once, with the continuation not yet answered.
+        let p = c.set_active(true).unwrap();
+        assert_eq!((p.token.as_str(), p.delay_ms), ("T1", 0));
+        assert!(c.set_active(true).is_none());
+        assert!(c.apply(p.gen, Ok(Some(page(&["2"], Some("T2"), None)))).is_some());
+        assert_eq!(c.messages.len(), 2);
+        // Closed, or the chat over: coming back starts nothing.
+        c.close();
+        c.set_active(false);
+        assert!(c.set_active(true).is_none());
+        let p = c.open("v", Some("T0"));
+        c.apply(p.gen, Ok(Some(page(&[], None, None))));
+        assert!(c.ended);
+        c.set_active(false);
+        assert!(c.set_active(true).is_none());
+    }
+
+    #[test]
+    fn polls_only_over_its_video_playing_on_a_shown_screen() {
+        assert!(may_poll(true, "v", "v", &Phase::Playing));
+        assert!(may_poll(true, "v", "v", &Phase::Paused));
+        assert!(may_poll(true, "v", "v", &Phase::Loading));
+        assert!(!may_poll(false, "v", "v", &Phase::Playing));
+        assert!(!may_poll(true, "v", "w", &Phase::Playing));
+        assert!(!may_poll(true, "", "", &Phase::Playing));
+        for ph in [Phase::Idle, Phase::Ended, Phase::Failed("x".into())] {
+            assert!(!may_poll(true, "v", "v", &ph));
+        }
+        let mut c = Chat::default();
+        let p = c.open("v", Some("T0"));
+        assert!(!c.over("v", &Phase::Playing));
+        assert!(c.over("w", &Phase::Playing));
+        assert!(c.over("v", &Phase::Ended));
+        assert!(c.over("v", &Phase::Failed("x".into())));
+        c.apply(p.gen, Ok(None));
+        assert!(c.over("v", &Phase::Playing));
     }
 
     #[test]

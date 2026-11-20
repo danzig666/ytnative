@@ -360,6 +360,43 @@ pub fn comments_open() -> bool {
     COMMENTS_OPEN.load(std::sync::atomic::Ordering::Relaxed) > 0
 }
 
+/// The player's screen dimming, for a panel presented over it (the live chat) to dim with the
+/// picture: how much black it draws (percent; 0: none), and bit 8 set when a key lifts it.
+static PLAYER_DIM: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// The last key or wheel a panel over the player took (frame clock ms; 0: none since the player
+/// last looked), so the player's quiet time before dimming counts it.
+static PANEL_KEY_MS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Whether a key press lifts the player's screen dimming: a full dim or a timed one does; a
+/// partial dim switched on at once stays until its button is pressed again.
+pub fn key_lifts_dim(dimming: u32, timeout_secs: u32) -> bool {
+    dimming >= 100 || timeout_secs > 0
+}
+
+/// The player publishes its dimming (`percent` 0 when not dimmed).
+pub fn set_player_dim(percent: u32, key_lifts: bool) {
+    PLAYER_DIM.store(percent.min(100) | if key_lifts { 0x100 } else { 0 }, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The player's dimming now: the black's opacity (0..=1) and whether a key lifts it.
+pub fn player_dim() -> (f32, bool) {
+    let v = PLAYER_DIM.load(std::sync::atomic::Ordering::Relaxed);
+    ((v & 0xFF) as f32 / 100.0, v & 0x100 != 0)
+}
+
+/// A panel over the player took a key (or the wheel) at `now_ms`.
+pub fn panel_key(now_ms: u32) {
+    PANEL_KEY_MS.store(now_ms.max(1), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The player looks for a key a panel took since it last looked.
+pub fn take_panel_key() -> Option<u32> {
+    match PANEL_KEY_MS.swap(0, std::sync::atomic::Ordering::Relaxed) {
+        0 => None,
+        t => Some(t),
+    }
+}
+
 static ANIMATING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// A time-driven animation (marquee, sliding sidebar, comments panel) needs another frame.
@@ -1235,5 +1272,28 @@ pub mod icon {
             return;
         }
         plx_ui::icons::draw_svg(p, plx_ui::icons::Svg::new(svg(k, filled)), r, tint);
+    }
+}
+
+#[cfg(test)]
+mod dim_tests {
+    use super::*;
+
+    #[test]
+    fn player_dim_and_panel_keys_reach_the_other_side() {
+        assert!(key_lifts_dim(100, 0) && key_lifts_dim(40, 30) && !key_lifts_dim(40, 0));
+        set_player_dim(60, false);
+        assert_eq!(player_dim(), (0.6, false));
+        set_player_dim(250, true);
+        assert_eq!(player_dim(), (1.0, true));
+        set_player_dim(0, true);
+        assert_eq!(player_dim().0, 0.0);
+        // A key a panel took is seen once; the clock's zero still counts as a key.
+        assert_eq!(take_panel_key(), None);
+        panel_key(0);
+        assert_eq!(take_panel_key(), Some(1));
+        panel_key(5000);
+        assert_eq!(take_panel_key(), Some(5000));
+        assert_eq!(take_panel_key(), None);
     }
 }
