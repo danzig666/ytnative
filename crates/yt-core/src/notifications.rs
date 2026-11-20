@@ -61,6 +61,10 @@ fn next_token(c: &Value) -> Option<String> {
 /// message after its colon, as SmartTube shows it) and the rest of the message ("Channel
 /// uploaded") with the time it was sent as the detail line. Notifications that open no video
 /// (a channel, a community post) are left out: OK could not play them.
+///
+/// The card's id is the notification's own, not the video's: lists drop cards whose id they
+/// already hold, and one video can have several notifications (an upload, then a reply to a
+/// comment on it, or a premiere and then its going live). The video id is in the endpoint.
 fn item(n: &Value) -> Option<Item> {
     let ep = &n["navigationEndpoint"]["watchEndpoint"];
     let video_id = ep["videoId"].as_str().filter(|v| !v.is_empty())?.to_string();
@@ -74,9 +78,15 @@ fn item(n: &Value) -> Option<Item> {
         lines.push(t.trim().to_string());
     }
     let thumbnail = n["videoThumbnail"]["thumbnails"].as_array().and_then(|l| largest(l));
+    let id = match n["notificationId"].as_str().filter(|v| !v.is_empty()) {
+        Some(nid) => format!("notification:{nid}"),
+        // Without YouTube's id, what tells two notifications of one video apart: their message
+        // and the time they were sent.
+        None => format!("notification:{video_id}:{message}:{}", lines.last().map(String::as_str).unwrap_or_default()),
+    };
     Some(Item {
         kind: ItemKind::Video,
-        id: video_id.clone(),
+        id,
         title,
         lines,
         thumbnail,
@@ -124,6 +134,7 @@ mod tests {
                                 { "url": "//i.ytimg.com/vi/vid00000001/small.jpg", "width": 120 },
                                 { "url": "https://i.ytimg.com/vi/vid00000001/big.jpg", "width": 640 }
                             ] },
+                            "notificationId": "1111",
                             "navigationEndpoint": { "watchEndpoint": { "videoId": "vid00000001" } }
                         } },
                         { "notificationRenderer": {
@@ -152,7 +163,7 @@ mod tests {
         assert_eq!(p.shelves.len(), 1);
         let items = &p.shelves[0].items;
         assert_eq!(items.len(), 2, "the notification without a video is left out");
-        assert_eq!(items[0].id, "vid00000001");
+        assert_eq!(items[0].id, "notification:1111");
         assert_eq!(items[0].title, "A video about cats");
         assert_eq!(items[0].lines, ["Some Channel uploaded", "2 hours ago"]);
         assert_eq!(items[0].thumbnail.as_deref(), Some("https://i.ytimg.com/vi/vid00000001/big.jpg"));
@@ -163,6 +174,30 @@ mod tests {
             &items[1].endpoint,
             Some(Endpoint::Watch { video_id, params: Some(p), .. }) if video_id == "vid00000002" && p == "cGFyYW1z"
         ));
+    }
+
+    /// Two notifications of one video (an upload, then a reply) are two cards: their ids differ,
+    /// and both open the video.
+    #[test]
+    fn one_video_two_notifications() {
+        let resp = json!({ "actions": [{ "appendContinuationItemsAction": { "continuationItems": [
+            { "notificationRenderer": {
+                "shortMessage": { "simpleText": "Some Channel uploaded: Cats" },
+                "sentTimeText": { "simpleText": "2 days ago" },
+                "navigationEndpoint": { "watchEndpoint": { "videoId": "vid00000004" } }
+            } },
+            { "notificationRenderer": {
+                "shortMessage": { "simpleText": "@someone replied: Nice" },
+                "sentTimeText": { "simpleText": "1 day ago" },
+                "navigationEndpoint": { "watchEndpoint": { "videoId": "vid00000004", "params": "cGFyYW1z" } }
+            } }
+        ] } }] });
+        let items = &page(&resp).shelves[0].items;
+        assert_eq!(items.len(), 2);
+        assert_ne!(items[0].id, items[1].id);
+        for it in items {
+            assert!(matches!(&it.endpoint, Some(Endpoint::Watch { video_id, .. }) if video_id == "vid00000004"));
+        }
     }
 
     #[test]

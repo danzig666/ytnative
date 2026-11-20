@@ -174,7 +174,7 @@ fn nav_items(cx: &Cx<'_, YtHost>) -> Vec<NavItem> {
         .sections
         .iter()
         .filter_map(|k| Section::from_key(k))
-        .filter(|sec| signed_in || !sec.needs_account())
+        .filter(|sec| sec.allowed(signed_in, s.child_mode))
         .map(NavItem::Section)
         .collect();
     if v.is_empty() {
@@ -192,7 +192,8 @@ fn nav_items(cx: &Cx<'_, YtHost>) -> Vec<NavItem> {
 
 impl BrowseScreen {
     pub fn new(entry: EntryId, cx: &Cx<'_, YtHost>) -> Self {
-        let section = Section::from_key(&cx.views.store.settings.boot_section).unwrap_or(Section::Home);
+        let store = &cx.views.store;
+        let section = Section::boot(&store.settings.boot_section, &store.settings, store.signed_in);
         BrowseScreen {
             entry,
             nav: VList { entry, group: G_NAV, base: NAV_BASE, rect: Rect::new(24.0, 150.0, 340.0, 860.0), row_h: 68.0, text_size: 30 },
@@ -240,6 +241,17 @@ impl BrowseScreen {
             fx.push(Fx::App(YtFx::Load(self.key())));
         }
         fx.invalidate(plx_machine::present::Provenance::Input);
+    }
+
+    /// The section on screen left the sidebar (signed out, child mode turned on, the inbox
+    /// turned off): Home takes its place, as at start, instead of a grid that stays empty
+    /// under a sidebar that cannot select it again.
+    fn leave_missing_section(&mut self, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
+        let store = &cx.views.store;
+        let to = Section::boot(self.section.key(), &store.settings, store.signed_in);
+        if to != self.section {
+            self.switch(to, cx, fx);
+        }
     }
 
     fn activate_nav(&mut self, item: &NavItem, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
@@ -357,6 +369,7 @@ impl Machine<YtHost> for BrowseScreen {
                 self.covered_gen = cx.views.store.feed(&self.key()).map_or(0, |f| f.gen);
             }
             ScreenEvent::Uncover => {
+                self.leave_missing_section(cx, fx);
                 // The rows changed while covered (a playlist on this TV made, renamed or copied
                 // from another screen): the scroll kept for the old rows would put the focused
                 // row's heading under the title band, so the focused row is revealed again, over the
@@ -378,6 +391,7 @@ impl Machine<YtHost> for BrowseScreen {
                 fx.invalidate(plx_machine::present::Provenance::Nav);
             }
             ScreenEvent::Async(_, YtMsg::Loaded(_) | YtMsg::Failed(..) | YtMsg::SignIn) => {
+                self.leave_missing_section(cx, fx);
                 fx.invalidate(plx_machine::present::Provenance::Lifecycle);
             }
             // Moving through the sidebar (keys or pointer) only moves the selection: a section is
