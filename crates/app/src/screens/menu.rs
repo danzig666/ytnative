@@ -313,6 +313,13 @@ impl MenuScreen {
         });
         let mut m = Self::of_card(entry, card.as_ref(), cx);
         m.over_player = true;
+        // A video of the playing playlist: its shuffle, and a new random order, before Close.
+        let in_queue = queue.is_some_and(|q| q.items.iter().any(|v| v == video_id));
+        if in_queue && super::player::playlist_shuffle(cx).is_some() {
+            let at = m.acts.iter().rposition(|(_, a)| matches!(a, Act::Close)).unwrap_or(m.acts.len());
+            m.acts.insert(at, (tr("Shuffle in a new order").to_string(), Act::Reshuffle));
+            m.acts.insert(at, (tr("Shuffle this playlist").to_string(), Act::ShufflePlaylist));
+        }
         m
     }
 
