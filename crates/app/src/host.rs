@@ -67,6 +67,8 @@ pub enum YtArg {
     SearchFilters(String),
     /// The automatic check found a newer version.
     UpdatePrompt,
+    /// The logs on screen and as a download for a phone.
+    ProblemReport,
 }
 
 impl ScreenArg for YtArg {
@@ -95,6 +97,7 @@ impl ScreenArg for YtArg {
             YtArg::NameEntry(_) => 18,
             YtArg::SuggestionMenu(_) => 19,
             YtArg::UpdatePrompt => 20,
+            YtArg::ProblemReport => 33,
         })
     }
     fn title(&self) -> Option<&str> {
@@ -307,6 +310,7 @@ impl Mounter<YtHost> for Mount {
             YtArg::PlaylistPicker(v) => Box::new(screens::menu::MenuScreen::playlists(entry, v.clone(), cx)),
             YtArg::NameEntry(p) => Box::new(screens::search::SearchScreen::name(entry, p.clone())),
             YtArg::SearchFilters(q) => Box::new(screens::menu::MenuScreen::filters(entry, q.clone())),
+            YtArg::ProblemReport => Box::new(screens::report::ReportScreen::new(entry)),
         }
     }
 }

@@ -136,6 +136,8 @@ fn start_dial(screen: &LoungeScreen, device_name: &str, tx: Sender<Command>) -> 
     use yt_core::lounge::dial;
     let mut cfg = dial::DialConfig::new(device_name, &screen.device_id());
     cfg.screen_id = Some(screen.screen_id());
+    // The problem report is served on this port while its screen is open.
+    cfg.pages = Some(crate::problem_report::pages());
     let screen = screen.clone();
     let tx = Mutex::new(tx);
     let r = dial::start(cfg.clone(), move |req| {
@@ -151,6 +153,7 @@ fn start_dial(screen: &LoungeScreen, device_name: &str, tx: Sender<Command>) -> 
     match r {
         Ok(s) => {
             crate::log(&format!("dial: listening on :{}", s.http_port()));
+            crate::problem_report::dial_listening(s.http_port());
             Some(s)
         }
         Err(e) => {

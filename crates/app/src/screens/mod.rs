@@ -8,6 +8,7 @@ pub mod info;
 pub mod menu;
 pub mod pin;
 pub mod player;
+pub mod report;
 pub mod search;
 pub mod settings;
 pub mod signin;

@@ -37,11 +37,25 @@ pub struct DialConfig {
     pub http_port: u16,
     /// SSDP port (1900). `None` disables the SSDP responder (HTTP only, useful for tests).
     pub ssdp_port: Option<u16>,
+    /// Plain-text pages the app serves on the same port (a problem report for a phone to
+    /// download), asked before the DIAL paths.
+    pub pages: Option<TextPages>,
+}
+
+/// Answers a `GET` path with a plain-text page, or `None` (not one of the app's pages: the DIAL
+/// paths or 404 decide). Runs on the HTTP thread.
+#[derive(Clone)]
+pub struct TextPages(pub Arc<dyn Fn(&str) -> Option<String> + Send + Sync>);
+
+impl std::fmt::Debug for TextPages {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TextPages")
+    }
 }
 
 impl DialConfig {
     pub fn new(friendly_name: &str, udn: &str) -> Self {
-        DialConfig { friendly_name: friendly_name.into(), udn: udn.into(), screen_id: None, http_port: 8090, ssdp_port: Some(1900) }
+        DialConfig { friendly_name: friendly_name.into(), udn: udn.into(), screen_id: None, http_port: 8090, ssdp_port: Some(1900), pages: None }
     }
 }
 
@@ -84,6 +98,17 @@ impl Drop for DialServer {
 /// Starts the HTTP server and (if configured) the SSDP responder, each on its own thread.
 /// `on_launch` runs on the HTTP thread after the `201 Created` answer was sent.
 pub fn start(cfg: DialConfig, on_launch: impl Fn(LaunchRequest) + Send + Sync + 'static) -> Result<DialServer> {
+    start_server(cfg, true, on_launch)
+}
+
+/// An HTTP server for `pages` alone on `port` (0: any free port): no DIAL paths and no SSDP, for
+/// when the app wants to offer a page while the DIAL server is off.
+pub fn serve_pages(port: u16, pages: TextPages) -> Result<DialServer> {
+    let cfg = DialConfig { http_port: port, ssdp_port: None, pages: Some(pages), ..DialConfig::new("", "") };
+    start_server(cfg, false, |_| {})
+}
+
+fn start_server(cfg: DialConfig, dial: bool, on_launch: impl Fn(LaunchRequest) + Send + Sync + 'static) -> Result<DialServer> {
     let stop = Arc::new(AtomicBool::new(false));
     let listener = TcpListener::bind(("0.0.0.0", cfg.http_port)).with_context(|| format!("DIAL: bind TCP {}", cfg.http_port))?;
     listener.set_nonblocking(true)?;
@@ -99,7 +124,7 @@ pub fn start(cfg: DialConfig, on_launch: impl Fn(LaunchRequest) + Send + Sync + 
         None => None,
     };
 
-    let state = Arc::new(Shared { cfg, http_port, app_running: AtomicBool::new(false) });
+    let state = Arc::new(Shared { cfg, dial, http_port, app_running: AtomicBool::new(false) });
     {
         let (stop, state) = (stop.clone(), state.clone());
         let on_launch = Arc::new(on_launch);
@@ -156,6 +181,8 @@ pub fn start(cfg: DialConfig, on_launch: impl Fn(LaunchRequest) + Send + Sync + 
 
 struct Shared {
     cfg: DialConfig,
+    /// Whether the DIAL paths are served (else only [`DialConfig::pages`]).
+    dial: bool,
     http_port: u16,
     app_running: AtomicBool,
 }
@@ -271,6 +298,15 @@ fn route(method: &str, path: &str, body: &str, base: &str, state: &Shared) -> (R
     let p = path.split('?').next().unwrap_or("").trim_end_matches('/');
     let app_path = format!("/apps/{APP_NAME}");
     let resp = |status, content_type, headers, body| Response { status, content_type, headers, body };
+    if method == "GET" {
+        if let Some(text) = state.cfg.pages.as_ref().and_then(|pages| (pages.0)(p)) {
+            let headers = vec![("Cache-Control", "no-store".to_string()), ("Content-Disposition", "attachment; filename=\"ytnative-problem-report.txt\"".to_string())];
+            return (resp("200 OK", Some("text/plain; charset=utf-8"), headers, text), None);
+        }
+    }
+    if !state.dial {
+        return (resp("404 Not Found", None, vec![], String::new()), None);
+    }
     match method {
         "GET" if p == "/dd.xml" => (
             resp("200 OK", Some("text/xml; charset=utf-8"), vec![("Application-URL", format!("{base}/apps/"))], device_description(&state.cfg)),
@@ -427,6 +463,22 @@ mod tests {
         assert!(st.contains("<screenId>screen123</screenId>"));
 
         assert!(request(port, "GET /nope HTTP/1.1\r\n\r\n").starts_with("HTTP/1.1 404"));
+        server.stop();
+    }
+
+    #[test]
+    fn text_pages_alone() {
+        let pages = TextPages(Arc::new(|p: &str| (p == "/report/abc").then(|| "hello".to_string())));
+        let server = serve_pages(0, pages).unwrap();
+        let port = server.http_port();
+        let ok = request(port, "GET /report/abc HTTP/1.1\r\n\r\n");
+        assert!(ok.starts_with("HTTP/1.1 200 OK"));
+        assert!(ok.contains("Content-Type: text/plain; charset=utf-8"));
+        assert!(ok.ends_with("\r\n\r\nhello"));
+        // Only the pages: no DIAL paths, and no other path.
+        assert!(request(port, "GET /dd.xml HTTP/1.1\r\n\r\n").starts_with("HTTP/1.1 404"));
+        assert!(request(port, "GET /report/abd HTTP/1.1\r\n\r\n").starts_with("HTTP/1.1 404"));
+        assert!(request(port, "POST /report/abc HTTP/1.1\r\n\r\n").starts_with("HTTP/1.1 404"));
         server.stop();
     }
 }

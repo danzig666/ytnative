@@ -427,6 +427,7 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
             Info("Sign-in and settings", |_| {
                 crate::i18n::tr(if crate::DATA_TEMPORARY.load(std::sync::atomic::Ordering::Relaxed) { "Lost at every restart (no writable folder)" } else { "Kept across restarts" }).into()
             }),
+            Action("Problem report", |fx| fx.push(Fx::Nav(NavOp::Push(YtArg::ProblemReport)))),
             Info("Version", |_| app_version().into()),
             Info("Update", |_| update_text()),
             Action("Check for updates", |_| crate::update::check_now()),

@@ -21,6 +21,7 @@ mod voice;
 mod lounge;
 mod next_up;
 mod playback_rules;
+mod problem_report;
 // The Windows desktop simulator swaps the TV-only modules (LS2 bus, Wayland surface, FIFO remote)
 // for stand-ins under `sim/`; see `sim/mod.rs`.
 #[cfg_attr(windows, path = "sim/ls2.rs")]

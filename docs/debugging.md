@@ -115,3 +115,14 @@ version in the Homebrew Channel listing.
 GL/EGL lists take the `gl*`/`egl*` exports of the Mali driver). Do it when linking a new library
 (add it to `STUBS` in `xtask/src/checks.rs` and to `link_tv_stubs` in `crates/app/build.rs`);
 `cargo xtask stubs` regenerates `target/stubs/` by hand (the build does it automatically).
+
+## Problem report on the TV
+
+Settings > Account & about > Problem report shows the app version, the TV model and webOS version
+and the end of every log above (plus plx's `plxnative-events.log`, `plxnative-crash.log` and
+`plxnative-stderr.log` in the runtime folder), with a QR code: a phone on the same network
+downloads the same text from `http://<tv>:8090/problem-report/<token>`. The token is new each
+time the screen opens and the file is served only while it is open (by the DIAL server, or by a
+listener of the screen's own when "Show in the phone's cast menu" is off). Stream addresses,
+authorization values, OAuth tokens, cookies and e-mail addresses are removed
+(`crates/app/src/problem_report.rs`).
