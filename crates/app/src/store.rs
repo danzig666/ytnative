@@ -21,6 +21,8 @@ pub enum Section {
     Movies,
     Sports,
     Trending,
+    /// The account's notifications inbox (signed in only; `yt_core::notifications`).
+    Notifications,
 }
 
 impl Section {
@@ -38,6 +40,7 @@ impl Section {
         Section::Movies,
         Section::Sports,
         Section::Trending,
+        Section::Notifications,
     ];
 
     pub fn key(self) -> &'static str {
@@ -55,6 +58,7 @@ impl Section {
             Section::Movies => "movies",
             Section::Sports => "sports",
             Section::Trending => "trending",
+            Section::Notifications => "notifications",
         }
     }
 
@@ -77,7 +81,13 @@ impl Section {
             Section::Movies => "Movies",
             Section::Sports => "Sports",
             Section::Trending => "Trending",
+            Section::Notifications => "Notifications",
         }
+    }
+
+    /// Shown only to a signed-in viewer (the section has nothing without an account).
+    pub fn needs_account(self) -> bool {
+        self == Section::Notifications
     }
 
     pub fn browse_id(self) -> &'static str {
@@ -94,6 +104,8 @@ impl Section {
             Section::Movies => "FEtopics_movies",
             Section::Sports => "FEtopics_sports",
             Section::Trending => "FEtrending",
+            // Not a browse page: loaded from `notification/get_notification_menu` instead.
+            Section::Notifications => "FEnotifications",
         }
     }
 }

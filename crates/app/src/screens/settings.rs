@@ -455,6 +455,7 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
                 section_toggle!("Sidebar: Movies", Section::Movies),
                 section_toggle!("Sidebar: Sports", Section::Sports),
                 section_toggle!("Sidebar: Trending", Section::Trending),
+                section_toggle!("Sidebar: Notifications", Section::Notifications),
             ]);
             macro_rules! card_item {
                 ($i:expr) => {

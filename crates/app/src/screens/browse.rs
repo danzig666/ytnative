@@ -110,6 +110,7 @@ fn section_icon(s: Section) -> ui::icon::Kind {
         Section::Movies => K::Film,
         Section::Sports => K::Trophy,
         Section::Trending => K::Flame,
+        Section::Notifications => K::Bell,
     }
 }
 
@@ -168,7 +169,14 @@ pub struct BrowseScreen {
 
 fn nav_items(cx: &Cx<'_, YtHost>) -> Vec<NavItem> {
     let s = &cx.views.store.settings;
-    let mut v: Vec<NavItem> = s.sections.iter().filter_map(|k| Section::from_key(k)).map(NavItem::Section).collect();
+    let signed_in = cx.views.store.signed_in;
+    let mut v: Vec<NavItem> = s
+        .sections
+        .iter()
+        .filter_map(|k| Section::from_key(k))
+        .filter(|sec| signed_in || !sec.needs_account())
+        .map(NavItem::Section)
+        .collect();
     if v.is_empty() {
         v.push(NavItem::Section(Section::Home));
     }
