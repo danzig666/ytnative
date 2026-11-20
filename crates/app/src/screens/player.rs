@@ -1147,27 +1147,52 @@ impl Screen<YtHost> for PlayerScreen {
         // A gradient from the picture into the controls (SmartTube's player background).
         p.rect(Rect::new(0.0, 520.0, 1920.0, 260.0), 0.0, [0.0, 0.0, 0.0, 0.0], ui::dimmed([0.0, 0.0, 0.0, 0.82]), 0.0);
         ui::fill(p, Rect::new(0.0, 780.0, 1920.0, 300.0), 0.0, [0.0, 0.0, 0.0, 0.82]);
+        // The playlist being played, on a line of its own above the title.
+        if let Some(q) = playing_list(cx, &self.video_id) {
+            list_eyebrow(p, f.measure, &list_line(q, &self.video_id), 96.0, 592.0, 1728.0, 28);
+        }
         // Title and the line under it: channel, views, age, likes, dislikes, subscribers.
         ui::glide(p, f.measure, &st.title, 96.0, 640.0, 1728.0, 50, ui::WHITE, true, ui::GLIDE_PLAYER_TITLE);
-        let mut byline = match playing_list(cx, &self.video_id) {
-            Some(q) => format!("{}  \u{2022}  {}", list_line(q, &self.video_id), st.author),
-            None => st.author.clone(),
-        };
-        if let Some(w) = &ex.watch {
-            if let Some(v) = &w.short_view_count_text {
-                byline.push_str(&format!("  \u{2022}  {v}"));
-            }
-            if let Some(d) = common::video_age(w) {
-                byline.push_str(&format!("  \u{2022}  {d}"));
-            }
-        }
         let votes: Option<(String, Option<String>)> = match (&ex.votes, ex.watch.as_ref().and_then(|w| w.like_count_text.clone())) {
             (Some(v), _) => Some((ui::full_count(v.likes), Some(ui::full_count(v.dislikes)))),
             (None, Some(l)) => Some((l, None)),
             _ => None,
         };
+        let sep = "  \u{2022}  ";
+        let views = ex.watch.as_ref().and_then(|w| w.short_view_count_text.clone());
+        let age = ex.watch.as_ref().and_then(common::video_age);
+        let subs = ex.watch.as_ref().and_then(|w| w.subscriber_count_text.clone());
+        // The width the votes take (icons, counts and their separators).
+        let sep_w = ui::text_width(f.measure, crate::i18n::tr(sep), 28, false);
+        let votes_w = votes.as_ref().map_or(0.0, |(l, d)| {
+            sep_w + 34.0 + ui::text_width(f.measure, l, 28, false) + d.as_ref().map_or(0.0, |d| sep_w + 34.0 + ui::text_width(f.measure, d, 28, false))
+        });
+        // Too long for the line: the subscribers go first, then the age, then the views.
+        let (views, age, subs) = fit_byline(
+            |v: Option<&str>, a: Option<&str>, sb: Option<&str>| {
+                let mut t = st.author.clone();
+                for x in [v, a].into_iter().flatten() {
+                    t.push_str(sep);
+                    t.push_str(x);
+                }
+                let mut w = ui::text_width(f.measure, &t, 28, false) + votes_w;
+                if let Some(x) = sb {
+                    w += ui::text_width(f.measure, &format!("{sep}{x}"), 28, false);
+                }
+                w
+            },
+            1728.0,
+            views,
+            age,
+            subs,
+        );
+        let mut byline = st.author.clone();
+        for x in [&views, &age].into_iter().flatten() {
+            byline.push_str(sep);
+            byline.push_str(x);
+        }
         let my = 712.0;
-        let mut bx = 96.0 + ui::text_raw(p, &byline, 96.0, my, 28, ui::DIM, ui::ALIGN_LEFT, false);
+        let mut bx = 96.0 + ui::text_cut(p, f.measure, &byline, 96.0, my, 1728.0 - votes_w, 28, ui::DIM, ui::ALIGN_LEFT, false);
         if let Some((likes, dislikes)) = votes {
             bx += ui::text(p, "  \u{2022}  ", bx, my, 28, ui::DIM, ui::ALIGN_LEFT, false);
             ui::icon::draw(p, ui::icon::Kind::ThumbUp, Rect::new(bx, my + 3.0, 26.0, 26.0), ui::DIM, false);
@@ -1180,8 +1205,8 @@ impl Screen<YtHost> for PlayerScreen {
                 bx += ui::text_raw(p, &d, bx, my, 28, ui::DIM, ui::ALIGN_LEFT, false);
             }
         }
-        if let Some(subs) = ex.watch.as_ref().and_then(|w| w.subscriber_count_text.as_ref()) {
-            bx += ui::text_raw(p, &format!("  \u{2022}  {subs}"), bx, my, 28, ui::DIM, ui::ALIGN_LEFT, false);
+        if let Some(subs) = &subs {
+            bx += ui::text_raw(p, &format!("{sep}{subs}"), bx, my, 28, ui::DIM, ui::ALIGN_LEFT, false);
         }
         // The chapter being played, at the right end of that line, in the room the line leaves.
         if let Some(w) = &ex.watch {
@@ -1466,19 +1491,33 @@ impl PlayerScreen {
             ui::glide(p, m, &line, 96.0, y, 1300.0, 46, ui::WHITE, true, ui::GLIDE_PLAYER_TITLE);
             y += 58.0;
         }
-        let mut byline = match playing_list(cx, &self.video_id) {
-            Some(q) => format!("{} \u{2022} {}", list_line(q, &self.video_id), st.author),
-            None => st.author.clone(),
-        };
-        if let Some(w) = w {
-            if let Some(v) = &w.short_view_count_text {
-                byline.push_str(&format!(" \u{2022} {v}"));
-            }
-            if let Some(d) = common::video_age(w) {
-                byline.push_str(&format!(" \u{2022} {d}"));
-            }
+        // Channel, views and age; too long for the room beside the clock: the age goes first,
+        // then the views.
+        let sep = " \u{2022} ";
+        let (views, age, _) = fit_byline(
+            |v: Option<&str>, a: Option<&str>, _| {
+                let mut t = st.author.clone();
+                for x in [v, a].into_iter().flatten() {
+                    t.push_str(sep);
+                    t.push_str(x);
+                }
+                ui::text_width(m, &t, 26, false)
+            },
+            1300.0,
+            w.and_then(|w| w.short_view_count_text.clone()),
+            w.and_then(common::video_age),
+            None,
+        );
+        let mut byline = st.author.clone();
+        for x in [&views, &age].into_iter().flatten() {
+            byline.push_str(sep);
+            byline.push_str(x);
         }
-        ui::text_raw(p, &byline, 96.0, y + 8.0, 26, ui::DIM, ui::ALIGN_LEFT, false);
+        ui::text_cut(p, m, &byline, 96.0, y + 8.0, 1300.0, 26, ui::DIM, ui::ALIGN_LEFT, false);
+        // The playlist being played, on a line of its own under that.
+        if let Some(q) = playing_list(cx, &self.video_id) {
+            list_eyebrow(p, m, &list_line(q, &self.video_id), 96.0, y + 48.0, 1300.0, 26);
+        }
         if s.show_clock {
             ui::text(p, &common::clock(&cx.views), 1824.0, 64.0, 40, ui::WHITE, ui::ALIGN_RIGHT, true);
         }
@@ -1745,6 +1784,55 @@ fn playing_list<'a>(cx: &Cx<'a, YtHost>, current: &str) -> Option<&'a PlayQueue>
 /// A "Play next" video plays in the middle of a playlist, which goes on after it.
 fn resuming(cx: &Cx<'_, YtHost>, current: &str) -> bool {
     cx.views.store.play_queue.as_ref().is_some_and(|q| q.playlist && !q.contains(current) && q.resume_after.as_ref().is_some_and(|v| q.contains(v)))
+}
+
+/// The playlist line ([`list_line`]) with a list icon before it, cut to `w` px.
+fn list_eyebrow(p: plx_ui::Painter, m: &dyn plx_machine::machine::Measure, line: &str, x: f32, y: f32, w: f32, size: i32) {
+    let s = size as f32;
+    ui::icon::draw(p, ui::icon::Kind::List, Rect::new(x, y + s * 0.12, s, s), ui::WHITE, false);
+    ui::text_cut(p, m, line, x + s + 12.0, y, w - s - 12.0, size, ui::WHITE, ui::ALIGN_LEFT, true);
+}
+
+/// The line under the title, made to fit `room`: `width` measures it with the given parts
+/// (views, age, subscribers); the least needed go first (subscribers, then the age, then the
+/// views) until it fits.
+fn fit_byline(
+    width: impl Fn(Option<&str>, Option<&str>, Option<&str>) -> f32,
+    room: f32,
+    views: Option<String>,
+    age: Option<String>,
+    subs: Option<String>,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let (mut v, mut a, mut sb) = (views, age, subs);
+    let fits = |v: &Option<String>, a: &Option<String>, sb: &Option<String>| width(v.as_deref(), a.as_deref(), sb.as_deref()) <= room;
+    if !fits(&v, &a, &sb) {
+        sb = None;
+    }
+    if !fits(&v, &a, &sb) {
+        a = None;
+    }
+    if !fits(&v, &a, &sb) {
+        v = None;
+    }
+    (v, a, sb)
+}
+
+#[cfg(test)]
+mod byline_tests {
+    #[test]
+    fn the_least_needed_parts_go_first() {
+        // Each part 100 px, the channel 100 px.
+        let width = |v: Option<&str>, a: Option<&str>, s: Option<&str>| 100.0 + [v, a, s].iter().flatten().count() as f32 * 100.0;
+        let parts = || (Some("views".to_string()), Some("age".to_string()), Some("subs".to_string()));
+        let (v, a, s) = parts();
+        assert_eq!(super::fit_byline(width, 400.0, v, a, s), parts(), "it all fits");
+        let (v, a, s) = parts();
+        assert_eq!(super::fit_byline(width, 300.0, v, a, s), (Some("views".into()), Some("age".into()), None));
+        let (v, a, s) = parts();
+        assert_eq!(super::fit_byline(width, 200.0, v, a, s), (Some("views".into()), None, None));
+        let (v, a, s) = parts();
+        assert_eq!(super::fit_byline(width, 50.0, v, a, s), (None, None, None));
+    }
 }
 
 /// Where the player is in the playlist: "Playlist title · 3 of 15", or "3 of more than 40" while
