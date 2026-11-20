@@ -1671,8 +1671,14 @@ impl Rig<YtHost> for AppRig {
             }
             YtFx::EditSettings(f) => {
                 let kept = self.store.settings.keep_play_next;
+                let searches = self.store.settings.search_history;
                 f(&mut self.store.settings);
                 self.save_settings();
+                // "Search history" switched off forgets the searches made so far. (Done here, not
+                // in the option's change: the settings screen runs that on copies.)
+                if searches && !self.store.settings.search_history {
+                    let _ = yt_core::search_history::clear();
+                }
                 // "Keep Play next after closing": switched on keeps the queue now, off forgets it.
                 if self.store.settings.keep_play_next != kept {
                     save_queue(if self.store.settings.keep_play_next { self.store.play_next.clone() } else { Vec::new() });

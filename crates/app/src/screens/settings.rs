@@ -1,20 +1,59 @@
-//! Settings: a root page of categories and one page per category. Each option row shows its
-//! value; OK or Right steps forward, Left steps back. Changes are saved immediately.
+//! Settings in two panes: the categories down the left, the focused category's options on the
+//! right. Up / Down on a category shows its options at once; Right or OK goes into them, and
+//! Left or BACK comes back out. Each option row shows its value: an on / off switch, which OK (or
+//! a click) flips, or the value, where OK opens the list of values to pick from.
+//! A row that opens a page (blocked channels, segment markers) opens it in the right pane, the
+//! category staying selected on the left. Changes are saved immediately.
 
 use crate::host::{SettingsPage, YtArg, YtFx, YtHost};
 use crate::settings::{secs_label, Codec, ControlsTime, OkAction, PlaybackMode, PlayerStyle, RememberSpeed, SbAction, Settings, SLEEP_MINS, SPEEDS};
 use crate::store::Section;
-use crate::ui::{self, Row, VList};
+use crate::ui::{self, VList};
 use plx_machine::machine::{
     Canon, Cx, Edge, Effects, EntryId, FocusKey, Fx, GroupId, Handled, InputEvent, InputKind, Key, LogicalState, Machine, NavOp, ScreenEvent,
 };
 use plx_ui::frame::Budget;
-use plx_ui::screen::{At, Dir, DrawFrame, Focusable, GroupSpec, Placed, RenderStrategy, Screen, Step};
-use plx_ui::Rect;
+use plx_ui::screen::{Activate, At, Hover, Stop, Dir, DrawFrame, Focusable, GroupSpec, Placed, RenderStrategy, Screen, Step};
+use plx_machine::machine::Measure;
+use plx_ui::{Painter, Rect};
 use std::borrow::Cow;
 
-const G: GroupId = GroupId(1);
-const BASE: u32 = 0x3000_0000;
+const G_LEFT: GroupId = GroupId(1);
+const G_RIGHT: GroupId = GroupId(2);
+const LEFT_BASE: u32 = 0x3000_0000;
+const RIGHT_BASE: u32 = 0x3100_0000;
+
+/// The categories down the left pane, with their icons.
+const CATS: [(SettingsPage, ui::icon::Kind); 7] = [
+    (SettingsPage::Playback, ui::icon::Kind::CirclePlay),
+    (SettingsPage::Subtitles, ui::icon::Kind::Captions),
+    (SettingsPage::SponsorBlock, ui::icon::Kind::Shield),
+    (SettingsPage::Content, ui::icon::Kind::Filter),
+    (SettingsPage::Interface, ui::icon::Kind::Monitor),
+    (SettingsPage::Remote, ui::icon::Kind::Cast),
+    (SettingsPage::About, ui::icon::Kind::User),
+];
+
+/// The category a page is shown under (a sub-page under the category that opens it).
+fn category_of(page: SettingsPage) -> usize {
+    let p = match page {
+        SettingsPage::Blocked => SettingsPage::Content,
+        SettingsPage::Markers => SettingsPage::SponsorBlock,
+        p => p,
+    };
+    CATS.iter().position(|c| c.0 == p).unwrap_or(0)
+}
+
+// Layout (the 1920 x 1080 frame).
+const LEFT_W: f32 = 600.0;
+const RIGHT_X: f32 = 676.0;
+const RIGHT_W: f32 = 1168.0;
+const LIST_Y: f32 = 176.0;
+const RIGHT_ROW_H: f32 = 64.0;
+const RIGHT_ROWS: f32 = 13.0;
+const TEXT: i32 = 28;
+const SWITCH_W: f32 = 66.0;
+const SWITCH_H: f32 = 36.0;
 
 type Get = fn(&Settings) -> String;
 type Change = fn(&mut Settings, i32);
@@ -263,12 +302,10 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
             Opt("Watch history", |s| match s.watch_history.as_str() { "on" => "On".into(), "off" => "Off".into(), _ => "Automatic".into() }, |s, d| {
                 cycle_str(&["auto", "on", "off"], &mut s.watch_history, d)
             }),
-            Opt("Search history", |s| on_off(s.search_history), |s, _| {
-                s.search_history = !s.search_history;
-                if !s.search_history {
-                    let _ = yt_core::search_history::clear();
-                }
-            }),
+            // Switched off, the searches made so far are forgotten (in the host, where the change
+            // is applied: an option's `change` must not do anything but change the settings, as
+            // this screen also runs it on copies to list the option's values).
+            Opt("Search history", |s| on_off(s.search_history), |s, _| s.search_history = !s.search_history),
             Action("Clear search history", |fx| fx.push(Fx::App(YtFx::Act(crate::host::UserAction::ClearSearchHistory)))),
             Action("Import channel groups from USB", |fx| fx.push(Fx::App(YtFx::Act(crate::host::UserAction::ImportGroups)))),
             Opt("Child mode (no search, no comments)", |s| on_off(s.child_mode), |s, _| s.child_mode = !s.child_mode),
@@ -468,8 +505,23 @@ impl LogicalState for State {
 }
 
 pub struct SettingsScreen {
+    /// `Root`: the two panes with the categories focusable; a sub-page (blocked channels, segment
+    /// markers): its rows on the right, its category shown selected on the left.
     page: SettingsPage,
+    /// The categories (left pane).
+    left: VList,
+    /// The options of the category shown (right pane).
     list: VList,
+    /// The category shown on the right: the focused one while the focus is on the left.
+    cat: std::cell::Cell<usize>,
+    /// The option row last focused in each category (Right returns to it).
+    right_last: std::cell::Cell<[usize; CATS.len()]>,
+    /// The first option row shown, per category ([`Self::top`]).
+    tops: std::cell::Cell<[usize; CATS.len()]>,
+    /// Which option rows are on / off switches, by page and row (worked out once: it never changes).
+    switches: std::cell::RefCell<std::collections::HashMap<(u8, usize), bool>>,
+    /// A focus the screen moved itself (into a category's options, BACK out of them).
+    focus_req: std::cell::Cell<Option<u32>>,
     /// An option's drop-down list, while open.
     choice: Option<ui::ChoiceBox>,
     /// The row a closed drop-down belonged to (focus returns there).
@@ -483,43 +535,77 @@ impl SettingsScreen {
             page,
             choice: None,
             closed_row: std::cell::Cell::new(0),
-            list: VList { entry, group: G, base: BASE, rect: Rect::new(360.0, 150.0, 1200.0, 880.0), row_h: 58.0, text_size: 28 },
+            left: VList {
+                entry,
+                group: G_LEFT,
+                base: LEFT_BASE,
+                rect: Rect::new(36.0, LIST_Y, LEFT_W - 72.0, 84.0 * CATS.len() as f32),
+                row_h: 84.0,
+                text_size: 30,
+            },
+            list: VList {
+                entry,
+                group: G_RIGHT,
+                base: RIGHT_BASE,
+                rect: Rect::new(RIGHT_X, LIST_Y, RIGHT_W, RIGHT_ROW_H * RIGHT_ROWS),
+                row_h: RIGHT_ROW_H,
+                text_size: TEXT,
+            },
+            cat: std::cell::Cell::new(category_of(page)),
+            right_last: std::cell::Cell::new([0; CATS.len()]),
+            tops: std::cell::Cell::new([0; CATS.len()]),
+            switches: Default::default(),
+            focus_req: std::cell::Cell::new(None),
             state: State(format!("{page:?}")),
         }
     }
 
-    /// The values option `i` can take, from its own `change` (applied to a copy until it comes
-    /// back round), and the current one's index.
+    fn root(&self) -> bool {
+        self.page == SettingsPage::Root
+    }
+
+    /// The category shown: follows the focus while it is on the left pane.
+    fn category(&self, cx: &Cx<'_, YtHost>) -> usize {
+        if self.root() {
+            if let Some(i) = self.left.focused(cx, CATS.len()) {
+                self.cat.set(i);
+            }
+        }
+        self.cat.get()
+    }
+
+    /// The page whose rows the right pane shows.
+    fn shown(&self, cx: &Cx<'_, YtHost>) -> SettingsPage {
+        if self.root() {
+            CATS[self.category(cx)].0
+        } else {
+            self.page
+        }
+    }
+
+    fn rows(&self, cx: &Cx<'_, YtHost>) -> Vec<Item> {
+        items(self.shown(cx), &cx.views.store.settings)
+    }
+
+    /// The option row Right lands on in category `c`: the one last focused there.
+    fn right_key(&self, c: usize, cx: &Cx<'_, YtHost>) -> FocusKey<u32> {
+        let n = items(CATS[c].0, &cx.views.store.settings).len();
+        self.list.key(self.right_last.get()[c].min(n.saturating_sub(1)))
+    }
+
+    /// The focus is on an option row (not a category, not an open drop-down).
+    fn on_right(&self, cx: &Cx<'_, YtHost>) -> bool {
+        cx.focus.current.is_some_and(|k| k.entry == self.list.entry && (RIGHT_BASE..ui::CHOICE_BASE).contains(&k.elem))
+    }
+
+    /// The values option `i` can take and the current one's index.
     fn values(&self, i: usize, cx: &Cx<'_, YtHost>) -> Option<(Vec<String>, usize)> {
-        let Some(Item::Opt(_, get, change)) = items(self.page, &cx.views.store.settings).into_iter().nth(i) else { return None };
-        let mut s = cx.views.store.settings.clone();
-        let first = get(&s);
-        let mut v = vec![first.clone()];
-        for _ in 0..300 {
-            change(&mut s, 1);
-            let x = get(&s);
-            if x == first || v.contains(&x) {
-                break;
-            }
-            v.push(x);
-        }
-        // Numbers (qualities, speeds, sizes, minutes) in ascending order; others in cycle order.
-        let num = |x: &str| {
-            let lead: String = x.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
-            if lead.is_empty() || lead.starts_with('.') {
-                return None;
-            }
-            lead.parse::<f64>().ok()
-        };
-        if v.len() > 2 && v.iter().all(|x| num(x).is_some()) {
-            v.sort_by(|a, b| num(a).partial_cmp(&num(b)).unwrap_or(std::cmp::Ordering::Equal));
-        }
-        let cur = v.iter().position(|x| *x == first).unwrap_or(0);
-        Some((v, cur))
+        let Some(Item::Opt(_, get, change)) = self.rows(cx).into_iter().nth(i) else { return None };
+        Some(option_values(&cx.views.store.settings, get, change))
     }
 
     fn change(&self, i: usize, dir: i32, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
-        let list = items(self.page, &cx.views.store.settings);
+        let list = self.rows(cx);
         match list.get(i) {
             Some(Item::Blocked(b)) if dir >= 0 => {
                 if let Some(name) = cx.views.store.settings.blocked_channels.get(*b).cloned() {
@@ -538,6 +624,82 @@ impl SettingsScreen {
             _ => {}
         }
     }
+
+    /// The option row the right pane scrolls to: the focused one, the one an open drop-down
+    /// belongs to, or (while a category has the focus) the one last focused in it, so the pane
+    /// does not jump to its top and back.
+    fn anchor(&self, cx: &Cx<'_, YtHost>, n: usize) -> Option<usize> {
+        if let Some(c) = &self.choice {
+            return Some(c.row);
+        }
+        self.list.focused(cx, n).or_else(|| self.root().then(|| self.right_last.get()[self.category(cx)].min(n.saturating_sub(1))))
+    }
+
+    /// The first option row shown: it stays where it is and only moves to keep the anchor row
+    /// in view, so a pointer moving over the rows after the pane scrolled (the pointer resting at
+    /// the screen's edge steps it) does not scroll it back.
+    fn top(&self, cx: &Cx<'_, YtHost>, n: usize) -> usize {
+        let vis = self.list.rows_visible();
+        let mut t = self.tops.get()[self.category(cx)];
+        if let Some(a) = self.anchor(cx, n) {
+            if a < t {
+                t = a;
+            } else if a >= t + vis {
+                t = a + 1 - vis;
+            }
+        }
+        t.min(n.saturating_sub(vis))
+    }
+
+    /// Moves the focus to `elem` (applied in `reconcile`).
+    fn focus(&self, elem: u32, fx: &mut Effects<'_, YtHost>) {
+        self.focus_req.set(Some(elem));
+        fx.invalidate(plx_machine::present::Provenance::Input);
+    }
+}
+
+/// The values an option can take (its `change` applied to a copy of the settings until it comes
+/// back round), and the current one's index. Numbers (qualities, speeds, sizes, minutes) are put
+/// in ascending order; others keep their cycle order.
+fn option_values(settings: &Settings, get: Get, change: Change) -> (Vec<String>, usize) {
+    let mut s = settings.clone();
+    let first = get(&s);
+    let mut v = vec![first.clone()];
+    for _ in 0..300 {
+        change(&mut s, 1);
+        let x = get(&s);
+        if x == first || v.contains(&x) {
+            break;
+        }
+        v.push(x);
+    }
+    let num = |x: &str| {
+        let lead: String = x.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+        if lead.is_empty() || lead.starts_with('.') {
+            return None;
+        }
+        lead.parse::<f64>().ok()
+    };
+    if v.len() > 2 && v.iter().all(|x| num(x).is_some()) {
+        v.sort_by(|a, b| num(a).partial_cmp(&num(b)).unwrap_or(std::cmp::Ordering::Equal));
+    }
+    let cur = v.iter().position(|x| *x == first).unwrap_or(0);
+    (v, cur)
+}
+
+/// An on / off option, drawn as a switch: it reads "On" or "Off", and changing it flips between
+/// the two (a SponsorBlock category reads "Off" too, but has more values; "Settings PIN" can only
+/// be turned off).
+fn is_switch(s: &Settings, get: Get, change: Change) -> bool {
+    let v = get(s);
+    if v != "On" && v != "Off" {
+        return false;
+    }
+    let mut t = s.clone();
+    change(&mut t, 1);
+    let flipped = get(&t);
+    change(&mut t, 1);
+    flipped != v && (flipped == "On" || flipped == "Off") && get(&t) == v
 }
 
 impl Machine<YtHost> for SettingsScreen {
@@ -546,13 +708,13 @@ impl Machine<YtHost> for SettingsScreen {
         if let Some(a) = super::common::press_commit_as_activate(ev, cx, |_| true) {
             return self.step(&a, cx, fx);
         }
-        let n = items(self.page, &cx.views.store.settings).len();
+        let n = self.rows(cx).len();
         match ev {
             ScreenEvent::Activate(e) if self.choice.as_ref().is_some_and(|c| c.owns(*e)) => {
                 let c = self.choice.take().unwrap();
                 self.closed_row.set(c.row);
                 let k = c.list.index(*e, c.options.len()).unwrap_or(0);
-                if let Some(Item::Opt(_, get, change)) = items(self.page, &cx.views.store.settings).into_iter().nth(c.row) {
+                if let Some(Item::Opt(_, get, change)) = self.rows(cx).into_iter().nth(c.row) {
                     let target = c.options[k].clone();
                     fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| {
                         for _ in 0..300 {
@@ -564,6 +726,13 @@ impl Machine<YtHost> for SettingsScreen {
                     }))));
                 }
                 fx.invalidate(plx_machine::present::Provenance::Input);
+                Handled::Yes
+            }
+            // OK (or a click) on a category: into its options.
+            ScreenEvent::Activate(e) if self.root() && self.left.index(*e, CATS.len()).is_some() => {
+                let c = self.left.index(*e, CATS.len()).unwrap_or(0);
+                self.cat.set(c);
+                self.focus(self.right_key(c, cx).elem, fx);
                 Handled::Yes
             }
             ScreenEvent::Activate(e) => {
@@ -588,16 +757,14 @@ impl Machine<YtHost> for SettingsScreen {
                 Handled::Yes
             }
             ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: Key::Back, .. }, .. }) if self.choice.is_some() => Handled::Yes,
-            ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: Key::Left | Key::Right, .. }, .. }) if self.choice.is_some() => Handled::Yes,
-            ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: key @ (Key::Left | Key::Right), edge: Edge::Down | Edge::Repeat, .. }, .. }) => {
-                if let Some(i) = self.list.focused(cx, n) {
-                    if matches!(items(self.page, &cx.views.store.settings).get(i), Some(Item::Opt(..))) {
-                        self.change(i, if *key == Key::Left { -1 } else { 1 }, cx, fx);
-                        return Handled::Yes;
-                    }
+            // BACK in the options: back to their category (BACK there closes the settings).
+            ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: Key::Back, edge, .. }, .. }) if self.root() && self.on_right(cx) => {
+                if *edge == Edge::Down {
+                    self.focus(self.left.elem(self.cat.get()), fx);
                 }
-                Handled::No
+                Handled::Yes
             }
+            ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: Key::Left | Key::Right, .. }, .. }) if self.choice.is_some() => Handled::Yes,
             ScreenEvent::Uncover => {
                 fx.invalidate(plx_machine::present::Provenance::Nav);
                 Handled::Yes
@@ -614,39 +781,81 @@ impl Focusable<YtHost> for SettingsScreen {
             out.push(c.list.spec(c.options.len()));
             return;
         }
-        out.push(self.list.spec(items(self.page, &cx.views.store.settings).len()));
+        if self.root() {
+            out.push(self.left.spec(CATS.len()));
+        }
+        out.push(self.list.spec(self.rows(cx).len()));
     }
     fn group_of(&self, key: &u32, _cx: &Cx<'_, YtHost>) -> Option<GroupId> {
-        Some(if self.choice.as_ref().is_some_and(|c| c.owns(*key)) { ui::CHOICE_GROUP } else { G })
+        Some(if self.choice.as_ref().is_some_and(|c| c.owns(*key)) {
+            ui::CHOICE_GROUP
+        } else if *key < RIGHT_BASE {
+            G_LEFT
+        } else {
+            G_RIGHT
+        })
     }
     fn neighbour(&self, key: FocusKey<u32>, dir: Dir, cx: &Cx<'_, YtHost>) -> Step<u32> {
         if let Some(c) = &self.choice {
             return c.list.neighbour(key, dir, c.options.len());
         }
-        self.list.neighbour(key, dir, items(self.page, &cx.views.store.settings).len())
+        if let Some(c) = self.left.index(key.elem, CATS.len()).filter(|_| self.root()) {
+            return match dir {
+                Dir::Right => Step::Move(self.right_key(c, cx)),
+                _ => self.left.neighbour(key, dir, CATS.len()),
+            };
+        }
+        match self.list.neighbour(key, dir, self.rows(cx).len()) {
+            Step::Edge if dir == Dir::Left && self.root() => Step::Move(self.left.key(self.cat.get())),
+            s => s,
+        }
     }
     fn place(&self, key: &u32, cx: &Cx<'_, YtHost>, _at: At) -> Option<Placed> {
         if let Some(c) = self.choice.as_ref().filter(|c| c.owns(*key)) {
             let n = c.options.len();
             return c.list.place(*key, n, c.list.focused(cx, n));
         }
-        let n = items(self.page, &cx.views.store.settings).len();
-        self.list.place(*key, n, self.list.focused(cx, n))
+        if self.root() && self.left.index(*key, CATS.len()).is_some() {
+            return self.left.place(*key, CATS.len(), None);
+        }
+        let n = self.rows(cx).len();
+        self.list.place_top(*key, n, self.top(cx, n))
     }
     fn reconcile(&self, want: FocusKey<u32>, cx: &Cx<'_, YtHost>) -> FocusKey<u32> {
+        let want = match self.focus_req.take() {
+            Some(e) => FocusKey { entry: self.list.entry, elem: e },
+            None => want,
+        };
         if let Some(c) = &self.choice {
             return if c.owns(want.elem) { want } else { c.list.key(c.current) };
         }
         if want.elem >= ui::CHOICE_BASE {
             return self.list.key(self.closed_row.get());
         }
-        if self.list.index(want.elem, items(self.page, &cx.views.store.settings).len()).is_some() { want } else { self.list.key(0) }
+        if self.root() && self.left.index(want.elem, CATS.len()).is_some() {
+            return want;
+        }
+        if self.list.index(want.elem, self.rows(cx).len()).is_some() {
+            return want;
+        }
+        if self.root() {
+            self.left.key(self.cat.get())
+        } else {
+            self.list.key(0)
+        }
     }
-    fn seat(&self, g: GroupId, _from: Placed, _cx: &Cx<'_, YtHost>) -> FocusKey<u32> {
+    fn seat(&self, g: GroupId, _from: Placed, cx: &Cx<'_, YtHost>) -> FocusKey<u32> {
         if let (Some(c), true) = (&self.choice, g == ui::CHOICE_GROUP) {
             return c.list.key(c.current);
         }
-        self.list.key(0)
+        if g == G_LEFT {
+            return self.left.key(self.cat.get());
+        }
+        if self.root() {
+            self.right_key(self.cat.get(), cx)
+        } else {
+            self.list.key(0)
+        }
     }
 }
 
@@ -664,30 +873,172 @@ impl Screen<YtHost> for SettingsScreen {
     fn draw(&mut self, f: &mut DrawFrame<'_, '_, YtHost>) {
         let p = f.painter;
         let cx = f.cx;
-        ui::text(p, title(self.page), 360.0, 70.0, 48, ui::WHITE, ui::ALIGN_LEFT, true);
-        let s = &cx.views.store.settings;
-        let rows: Vec<Row> = items(self.page, s)
-            .iter()
-            .map(|it| match it {
-                Item::Blocked(i) => Row::new(s.blocked_channels.get(*i).cloned().unwrap_or_default()).value(crate::i18n::tr("Unblock")).raw(),
-                Item::Page(l, _) => Row::new(*l).value("\u{203A}"),
-                Item::Opt(l, get, _) => Row::new(*l).value(format!("{}  \u{203A}", crate::i18n::tr(&get(s)))),
-                Item::Action(l, _) => Row::new(*l),
-                // The value is content (a code, an address, a version) or translated where made.
-                Item::Info(l, get) => Row::new(crate::i18n::tr(l)).value(get(cx)).raw(),
-            })
-            .collect();
-        self.list.draw(p, f.measure, &rows, self.list.focused(cx, rows.len()));
+        let cat = self.category(cx);
+        let rows = self.rows(cx);
+        let rf = self.list.focused(cx, rows.len());
+        if let Some(i) = rf.filter(|_| self.root() && self.choice.is_none()) {
+            let mut last = self.right_last.get();
+            last[cat] = i;
+            self.right_last.set(last);
+        }
+        let lf = if self.root() { self.left.focused(cx, CATS.len()) } else { None };
+        self.draw_left(p, f.measure, cat, lf);
+        // The row an open drop-down belongs to stays lit.
+        let lit = self.choice.as_ref().map(|c| c.row).or(rf);
+        let top = self.top(cx, rows.len());
+        let mut tops = self.tops.get();
+        tops[cat] = top;
+        self.tops.set(tops);
+        self.draw_right(p, f.measure, cx, cat, &rows, lit, top);
         if let Some(c) = &self.choice {
             c.draw(f);
         } else {
-            self.list.stops(f, rows.len());
+            if self.root() {
+                // While the options have the focus, the pointer passing over a category does not
+                // take it (a click still does): the options stay put under a resting pointer.
+                let hover = if self.on_right(cx) { Hover::OnlyIfFocused } else { Hover::Focus };
+                for i in 0..CATS.len() {
+                    let r = self.left.row_rect(i, 0);
+                    f.stop(p, Stop { key: self.left.key(i), rect: r, rest_rect: r, clip: self.left.rect, hover, activate: Activate::Press });
+                }
+            }
+            for i in (top..rows.len()).take(self.list.rows_visible()) {
+                ui::stop(f, self.list.key(i), self.list.row_rect(i, top), self.list.rect);
+            }
         }
         super::common::toast(p, cx);
     }
     fn render(&self) -> RenderStrategy {
         RenderStrategy::Page
     }
+}
+
+impl SettingsScreen {
+    /// The left pane: the title, the categories, the version at the bottom.
+    fn draw_left(&self, p: Painter, m: &dyn Measure, cat: usize, focus: Option<usize>) {
+        ui::fill(p, Rect::new(0.0, 0.0, LEFT_W, 1080.0), 0.0, [1.0, 1.0, 1.0, 0.035]);
+        ui::icon::draw(p, ui::icon::Kind::Gear, Rect::new(64.0, 70.0, 46.0, 46.0), ui::WHITE, false);
+        ui::text(p, "Settings", 130.0, 64.0, 46, ui::WHITE, ui::ALIGN_LEFT, true);
+        for (i, (page, icon)) in CATS.iter().enumerate() {
+            let r = self.left.row_rect(i, 0);
+            let focused = focus == Some(i);
+            let selected = i == cat;
+            if focused {
+                ui::fill(p, r, 14.0, ui::ROW_FOCUS);
+            } else if selected {
+                ui::fill(p, r, 14.0, [1.0, 1.0, 1.0, 0.06]);
+            }
+            if selected {
+                ui::fill(p, Rect::new(r.x, r.y + 18.0, 6.0, r.h - 36.0), 3.0, ui::accent());
+            }
+            let ink = if focused || selected { ui::WHITE } else { ui::DIM };
+            let s = 36.0;
+            ui::icon::draw(p, *icon, Rect::new(r.x + 30.0, r.y + (r.h - s) / 2.0, s, s), if selected { ui::accent() } else { ink }, false);
+            let ty = r.y + (r.h - 30.0 * 1.3) / 2.0;
+            ui::text_cut(p, m, crate::i18n::tr(title(*page)), r.x + 92.0, ty, r.w - 116.0, 30, ink, ui::ALIGN_LEFT, focused || selected);
+        }
+        ui::text_raw(p, &format!("ytnative {}", app_version()), 64.0, 1008.0, 22, ui::FAINT, ui::ALIGN_LEFT, false);
+    }
+
+    /// The right pane: the category's (or sub-page's) title and its rows.
+    fn draw_right(&self, p: Painter, m: &dyn Measure, cx: &Cx<'_, YtHost>, cat: usize, rows: &[Item], focus: Option<usize>, top: usize) {
+        let s = &cx.views.store.settings;
+        let (top_page, icon) = CATS[cat];
+        if self.root() {
+            ui::text(p, title(top_page), RIGHT_X + 28.0, 64.0, 46, ui::WHITE, ui::ALIGN_LEFT, true);
+        } else {
+            // A sub-page: its category above its title.
+            ui::icon::draw(p, icon, Rect::new(RIGHT_X + 28.0, 40.0, 26.0, 26.0), ui::DIM, false);
+            ui::text(p, title(top_page), RIGHT_X + 66.0, 38.0, 24, ui::DIM, ui::ALIGN_LEFT, false);
+            ui::text(p, title(self.page), RIGHT_X + 28.0, 82.0, 46, ui::WHITE, ui::ALIGN_LEFT, true);
+        }
+        let n = rows.len();
+        let vis = self.list.rows_visible();
+        for (i, item) in rows.iter().enumerate().skip(top).take(vis) {
+            let r = self.list.row_rect(i, top);
+            let focused = focus == Some(i);
+            if focused {
+                ui::fill(p, r, 12.0, ui::ROW_FOCUS);
+            }
+            let ty = r.y + (r.h - TEXT as f32 * 1.3) / 2.0;
+            let ink = if focused { ui::WHITE } else { ui::DIM };
+            let right = r.x + r.w - 28.0;
+            // What the row shows at its right end, and the room that takes.
+            let used = match item {
+                Item::Opt(_, get, change) => {
+                    let v = get(s);
+                    let on_off = *self.switches.borrow_mut().entry((self.shown(cx) as u8, i)).or_insert_with(|| is_switch(s, *get, *change));
+                    if on_off {
+                        switch(p, right - SWITCH_W, r.y + (r.h - SWITCH_H) / 2.0, v == "On", focused);
+                        SWITCH_W
+                    } else {
+                        let c = chevron(p, right, r, ink);
+                        c + value(p, m, crate::i18n::tr(&v), right - c, ty, r.w, ink)
+                    }
+                }
+                Item::Page(..) => chevron(p, right, r, ink),
+                // The value is content (a code, an address, a version) or translated where made.
+                Item::Info(_, get) => value(p, m, &get(cx), right, ty, r.w, if focused { ui::WHITE } else { [1.0, 1.0, 1.0, 0.8] }),
+                Item::Blocked(_) => value(p, m, crate::i18n::tr("Unblock"), right, ty, r.w, if focused { ui::WHITE } else { ui::FAINT }),
+                Item::Action(..) => 0.0,
+            };
+            let lx = r.x + 28.0;
+            let room = (right - lx - if used > 0.0 { used + 28.0 } else { 0.0 }).max(40.0);
+            let label = match item {
+                // A channel's name: shown as it is.
+                Item::Blocked(b) => s.blocked_channels.get(*b).cloned().unwrap_or_default(),
+                Item::Opt(l, ..) | Item::Page(l, _) | Item::Action(l, _) | Item::Info(l, _) => crate::i18n::tr(l).to_string(),
+            };
+            let label_ink = match item {
+                _ if focused => ui::WHITE,
+                Item::Info(..) => ui::DIM,
+                _ => [1.0, 1.0, 1.0, 0.84],
+            };
+            ui::text_cut(p, m, &label, lx, ty, room, TEXT, label_ink, ui::ALIGN_LEFT, focused);
+        }
+        // A scroll bar when the rows do not all fit.
+        if n > vis {
+            let track = self.list.rect;
+            let (x, h) = (track.x + track.w + 22.0, track.h - 6.0);
+            ui::fill(p, Rect::new(x, track.y, 6.0, h), 3.0, [1.0, 1.0, 1.0, 0.08]);
+            let th = (h * vis as f32 / n as f32).max(40.0);
+            let ty = track.y + (h - th) * top as f32 / (n - vis) as f32;
+            ui::fill(p, Rect::new(x, ty, 6.0, th), 3.0, [1.0, 1.0, 1.0, 0.4]);
+        }
+    }
+}
+
+/// An on / off switch with its top-left at x, y.
+fn switch(p: Painter, x: f32, y: f32, on: bool, focused: bool) {
+    let track = if on {
+        ui::accent()
+    } else if focused {
+        [1.0, 1.0, 1.0, 0.32]
+    } else {
+        [1.0, 1.0, 1.0, 0.18]
+    };
+    ui::fill(p, Rect::new(x, y, SWITCH_W, SWITCH_H), SWITCH_H / 2.0, track);
+    let k = SWITCH_H - 8.0;
+    let kx = if on { x + SWITCH_W - k - 4.0 } else { x + 4.0 };
+    ui::fill(p, Rect::new(kx, y + 4.0, k, k), k / 2.0, if on || focused { ui::WHITE } else { [0.85, 0.85, 0.88, 1.0] });
+}
+
+/// The chevron of a row that opens a page or a list, at the row's right end; returns its room.
+fn chevron(p: Painter, right: f32, r: Rect, ink: [f32; 4]) -> f32 {
+    let s = 26.0;
+    // The glyph's stroke ends 15/24 of the box across: line it up with the switches' right edge.
+    ui::icon::draw(p, ui::icon::Kind::Chevron, Rect::new(right - s * 16.2 / 24.0, r.y + (r.h - s) / 2.0, s, s), ink, false);
+    30.0
+}
+
+/// A value right-aligned at `right`, at most half the row wide; returns the room it takes.
+fn value(p: Painter, m: &dyn Measure, v: &str, right: f32, y: f32, row_w: f32, ink: [f32; 4]) -> f32 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    let w = ui::text_width(m, v, TEXT, false).min((row_w - 56.0) / 2.0);
+    ui::text_cut(p, m, v, right, y, w, TEXT, ink, ui::ALIGN_RIGHT, false);
+    w
 }
 
 /// The version the package is released as (`pkg/appinfo.json`, the one place it is bumped).

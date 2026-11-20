@@ -10,7 +10,7 @@ use crate::ui::{self, Row, VList};
 use plx_machine::machine::{Canon, Cx, Effects, EntryId, FocusKey, Fx, GroupId, Handled, LogicalState, Machine, NavOp, ScreenEvent};
 use plx_ui::frame::Budget;
 use plx_ui::screen::{
-    AxisMask, At, Dir, DrawFrame, EdgeRule, ElemKind, Focusable, GroupKind, GroupSpec, Placed, RenderStrategy, Screen, Seat, Step,
+    Activate, AxisMask, At, Hover, Stop, Dir, DrawFrame, EdgeRule, ElemKind, Focusable, GroupKind, GroupSpec, Placed, RenderStrategy, Screen, Seat, Step,
 };
 use plx_ui::Rect;
 use std::borrow::Cow;
@@ -324,13 +324,15 @@ impl Screen<YtHost> for SearchScreen {
         let p = f.painter;
         let cx = f.cx;
         // Each key answers the pointer over half the gap around it too, so the keys tile the
-        // keyboard with no gaps: the Magic Remote's pointer jiggles as OK is pressed, and a press
-        // whose pointer slipped into a gap before OK came up was cancelled (the key never typed).
+        // keyboard with no gaps. A click types the key at once, as the button goes down: the Magic
+        // Remote's pointer jiggles as it is pressed, and a press held until the button came up was
+        // cancelled whenever the pointer slipped onto another key meanwhile (the key never typed).
         for i in 0..self.keys().len() {
             let r = Self::key_rect(i);
             let half = KEY_GAP / 2.0;
             let hit = Rect::new(r.x - half, r.y - half, r.w + KEY_GAP, r.h + KEY_GAP);
-            ui::stop(f, self.kkey(i), hit, Rect::new(0.0, 0.0, 1920.0, 1080.0));
+            let p = f.painter;
+            f.stop(p, Stop { key: self.kkey(i), rect: hit, rest_rect: hit, clip: Rect::new(0.0, 0.0, 1920.0, 1080.0), hover: Hover::Focus, activate: Activate::Direct });
         }
         let heading = match &self.naming {
             None => "Search",

@@ -1,5 +1,6 @@
 //! The root screen: a sidebar of sections (SmartTube style) and a grid of the selected section's
-//! cards. Moving through the sidebar switches the section; OK on a card opens it; holding OK
+//! cards. OK (or a click) on a sidebar section switches to it: moving through the sidebar with
+//! the keys or the pointer only moves the selection. OK on a card opens it; holding OK
 //! opens the card's menu; the grid pages in more cards as you scroll.
 
 use super::common;
@@ -29,7 +30,6 @@ fn spec() -> GridSpec {
 const G_NAV: GroupId = GroupId(1);
 const G_GRID: GroupId = GroupId(2);
 const NAV_BASE: u32 = 0x4000_0000;
-const T_SWITCH: plx_machine::machine::TimerId = plx_machine::machine::TimerId(31);
 const T_BACK: plx_machine::machine::TimerId = plx_machine::machine::TimerId(32);
 /// Two BACK presses this close together on the sidebar exit the app.
 const BACK_TWICE_MS: u32 = 700;
@@ -156,8 +156,6 @@ pub struct BrowseScreen {
     nav_last: std::cell::Cell<u32>,
     /// The card focus was last on (where a closed sidebar returns it).
     content_last: std::cell::Cell<u32>,
-    /// Section the sidebar focus rests on, switched to when `T_SWITCH` fires.
-    pending: Option<Section>,
     state: State,
     /// Cards per row the grid / rows were built for.
     cols: usize,
@@ -195,7 +193,6 @@ impl BrowseScreen {
             stack: Stack::new(entry).clipped(Rect::new(0.0, 0.0, 1920.0, 1080.0)),
             rows: Rows { key: FeedKey::Section(section) },
             section,
-            pending: None,
             nav_t: 0.0,
             back_at: 0,
             exit_armed: false,
@@ -375,17 +372,9 @@ impl Machine<YtHost> for BrowseScreen {
             ScreenEvent::Async(_, YtMsg::Loaded(_) | YtMsg::Failed(..) | YtMsg::SignIn) => {
                 fx.invalidate(plx_machine::present::Provenance::Lifecycle);
             }
-            // Keys: switch once the selection rests (stepping through the sidebar must not rebuild
-            // the page and start a load for every section passed). Pointer hover: never; a click
-            // switches (`Activate`).
-            ScreenEvent::FocusMoved { to, by, .. } if to.elem >= NAV_BASE => {
-                if *by != plx_machine::machine::By::Pointer {
-                    if let Some(NavItem::Section(s)) = self.nav.index(to.elem, items.len()).map(|i| items[i].clone()) {
-                        self.pending = Some(s);
-                        fx.push(Fx::CancelTimer(T_SWITCH));
-                        fx.push(Fx::Timer { id: T_SWITCH, after_ms: 280 });
-                    }
-                }
+            // Moving through the sidebar (keys or pointer) only moves the selection: a section is
+            // switched to by OK or a click (`Activate`).
+            ScreenEvent::FocusMoved { to, .. } if to.elem >= NAV_BASE => {
                 fx.invalidate(plx_machine::present::Provenance::Input);
             }
             ScreenEvent::Timer(T_BACK) => {
@@ -396,16 +385,6 @@ impl Machine<YtHost> for BrowseScreen {
                     fx.invalidate(plx_machine::present::Provenance::Input);
                 }
                 self.back_at = 0;
-                return Handled::Yes;
-            }
-            ScreenEvent::Timer(T_SWITCH) => {
-                // Only if focus is still on that sidebar row.
-                let still = cx.focus.current.and_then(|k| self.nav.index(k.elem, items.len())).map(|i| items[i].clone());
-                if let (Some(s), Some(NavItem::Section(f))) = (self.pending.take(), still) {
-                    if s == f {
-                        self.switch(s, cx, fx);
-                    }
-                }
                 return Handled::Yes;
             }
             ScreenEvent::Activate(e) if *e >= NAV_BASE => {

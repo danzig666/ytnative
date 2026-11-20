@@ -990,15 +990,22 @@ pub const CHOICE_BASE: u32 = 0x7f00_0000;
 pub const CHOICE_GROUP: GroupId = GroupId(77);
 
 impl ChoiceBox {
-    /// `anchor`: the option row's rect; the box opens to its right edge, below it when there is
-    /// room, else above.
+    /// `anchor`: the option row's rect; the box opens to its right edge, below it when it fits
+    /// there, else on the side with more room, made shorter (it scrolls) rather than covering the
+    /// row.
     pub fn new(entry: EntryId, row: usize, options: Vec<String>, current: usize, anchor: Rect) -> ChoiceBox {
         const ROW_H: f32 = 52.0;
-        let n = options.len().min(12);
-        let h = n as f32 * ROW_H + 16.0;
+        const GAP: f32 = 8.0;
         let w = 440.0;
         let x = (anchor.x + anchor.w - w).clamp(20.0, 1900.0 - w);
-        let y = if anchor.y + anchor.h + h <= 1060.0 { anchor.y + anchor.h } else { (anchor.y - h).max(20.0) };
+        let below = 1060.0 - (anchor.y + anchor.h + GAP);
+        let above = anchor.y - GAP - 20.0;
+        let want = options.len().min(12);
+        let fits = |room: f32| (((room - 16.0) / ROW_H).floor().max(0.0) as usize).min(want);
+        let down = fits(below) == want || below >= above;
+        let n = fits(if down { below } else { above }).max(want.min(3));
+        let h = n as f32 * ROW_H + 16.0;
+        let y = if down { (anchor.y + anchor.h + GAP).min(1060.0 - h) } else { (anchor.y - GAP - h).max(20.0) };
         ChoiceBox {
             row,
             options,
@@ -1081,6 +1088,12 @@ pub mod icon {
     const USER: &str = r##"<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>"##;
     const STAR: &str = r##"<path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>"##;
     const FOLDER: &str = r##"<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>"##;
+    const CIRCLE_PLAY: &str = r##"<circle cx="12" cy="12" r="10"/><path d="M10 8l6 4-6 4z"/>"##;
+    const CAPTIONS: &str = r##"<path d="M5 5h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z"/><path d="M7 15h4"/><path d="M15 15h2"/><path d="M7 11h2"/><path d="M13 11h4"/>"##;
+    const FILTER: &str = r##"<path d="M10 20a1 1 0 0 0 .55.9l2 1A1 1 0 0 0 14 21v-7a2 2 0 0 1 .52-1.34L21.74 4.67A1 1 0 0 0 21 3H3a1 1 0 0 0-.74 1.67l7.22 7.99A2 2 0 0 1 10 14z"/>"##;
+    const MONITOR: &str = r##"<path d="M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M8 21h8"/><path d="M12 17v4"/>"##;
+    const CAST: &str = r##"<path d="M2 8V6a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-6"/><path d="M2 12a9 9 0 0 1 8 8"/><path d="M2 16a5 5 0 0 1 4 4"/><path d="M2 20h.01"/>"##;
+    const CHEVRON: &str = r##"<path d="m9 18 6-6-6-6"/>"##;
 
     #[derive(Clone, Copy, PartialEq, Debug)]
     pub enum Kind {
@@ -1131,6 +1144,14 @@ pub mod icon {
         ListReverse,
         /// Playback mode "leave the player": an arrow out of a door.
         Leave,
+        /// Settings categories: playback, subtitles, content filters, interface, remote control.
+        CirclePlay,
+        Captions,
+        Filter,
+        Monitor,
+        Cast,
+        /// A row that opens a page.
+        Chevron,
     }
 
     fn svg(k: Kind, filled: bool) -> &'static str {
@@ -1141,7 +1162,8 @@ pub mod icon {
             for body in [
                 THUMB_UP, THUMB_DOWN, CHAT, GEAR, PLAY, PAUSE, PREV, NEXT, LIST, HOME, FLAME, SUBS, USERS, HISTORY, LIBRARY, MUSIC, GAMEPAD,
                 NEWS, MIC, LIVE, FILM, TROPHY, TRENDING, SEARCH, USER, STAR, FOLDER, REPEAT, REPEAT1, AUTOPLAY, PAUSE_END, GAUGE,
-                LIST_PLUS, BELL, INFO, SHIELD, SCREEN_OFF, CLOCK, LIST_END, SHUFFLE, LIST_REVERSE, LEAVE,
+                LIST_PLUS, BELL, INFO, SHIELD, SCREEN_OFF, CLOCK, LIST_END, SHUFFLE, LIST_REVERSE, LEAVE, CIRCLE_PLAY, CAPTIONS, FILTER,
+                MONITOR, CAST, CHEVRON,
             ] {
                 v.push(format!("{HEAD}{body}</svg>"));
                 v.push(format!("{}{body}</svg>", HEAD.replace(r##"fill="none""##, r##"fill="#ffffff""##)));
@@ -1191,6 +1213,12 @@ pub mod icon {
             Kind::Shuffle => 78,
             Kind::ListReverse => 80,
             Kind::Leave => 82,
+            Kind::CirclePlay => 84,
+            Kind::Captions => 86,
+            Kind::Filter => 88,
+            Kind::Monitor => 90,
+            Kind::Cast => 92,
+            Kind::Chevron => 94,
         };
         &all[i + filled as usize]
     }
