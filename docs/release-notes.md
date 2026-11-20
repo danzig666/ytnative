@@ -1,1 +1,5 @@
-- Fixed: Choosing All videos, Personalized or None on the subscribe button's bell (or turning on notifications for a channel in the player's options) failed with "That didn't work, try again"
+- Fixed: Mixes and YouTube's playlists played one video and then YouTube's recommendations; they now play on in their own order (a whole playlist is loaded, a Mix keeps growing)
+- New: While a playlist or a Mix plays, the row under the video shows it, the playing video marked; OK on another plays it within the playlist
+- New: Shuffle for playlists: a button at the start of that row, and Play all / Shuffle on a playlist's page; every video plays once, in a random order
+- New: The player shows where it is in the playlist ("3 of 15"); Next and Previous follow the playlist's order
+- Changed: A video added with Play next cuts into a playlist, which then goes on; leaving the player ends the playlist
