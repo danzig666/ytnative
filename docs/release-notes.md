@@ -1,2 +1,1 @@
-- Changed: The sleep timer is a one-time countdown set in the player's options: it keeps running across the next videos, shows the minutes left, warns a minute before (a key starts it over) and ends when it pauses playback, is set to Off, or the player is left for the lists. It is no longer a saved setting
-- Fixed: Over HDR videos the shade behind the player's controls turned solid black; it now stays see-through, as over SDR videos
+- Fixed: Choosing All videos, Personalized or None on the subscribe button's bell (or turning on notifications for a channel in the player's options) failed with "That didn't work, try again"
