@@ -1,33 +1,69 @@
 //! Pieces several screens share.
 
 use crate::host::{YtArg, YtFx, YtHost, Views};
+use crate::play_queue::PlayQueue;
 use crate::store::{Card, Feed, FeedKey};
 use crate::ui;
 use plx_machine::machine::{Cx, Effects, Fx, NavOp};
 use plx_ui::{Painter, Rect};
 use yt_core::model::{Endpoint, ItemKind};
 
-/// Opens a card that sits in `list`: remembers the list as the play queue first.
+/// Opens a card that sits in `list`: remembers the list as the play queue first. A card that
+/// plays inside a playlist of its own (a mix, a playlist card that starts its first video) starts
+/// that playlist instead.
 pub fn open_card_in(card: &Card, list: &[Card], fx: &mut Effects<'_, YtHost>) {
-    if card.video_id().is_some() {
-        let shorts = card.item.kind == ItemKind::Short;
-        let q: Vec<String> = list
-            .iter()
-            .filter(|c| !shorts || c.item.kind == ItemKind::Short)
-            .filter_map(|c| c.video_id().map(str::to_string))
-            .collect();
-        fx.push(Fx::App(YtFx::SetQueue(q, shorts)));
+    if let Some(v) = card.video_id() {
+        let q = match &card.item.endpoint {
+            Some(Endpoint::Watch { playlist_id: Some(pl), .. }) if !pl.is_empty() => {
+                let mut q = PlayQueue::playlist(Some(pl.clone()), card_playlist_title(card), vec![v.to_string()]);
+                if card.item.kind == ItemKind::Video {
+                    q.add_items(vec![card.item.clone()], None, 0);
+                }
+                q
+            }
+            _ => {
+                let shorts = card.item.kind == ItemKind::Short;
+                let q: Vec<&Card> = list.iter().filter(|c| !shorts || c.item.kind == ItemKind::Short).collect();
+                let mut queue = PlayQueue::list(Vec::new(), shorts);
+                queue.add_items(q.iter().filter_map(|c| card_video(c)).collect(), None, 0);
+                queue
+            }
+        };
+        fx.push(Fx::App(YtFx::SetQueue(q)));
     }
     open_card(card, fx);
 }
 
-/// Opens a card of a playlist on this TV: the list's order becomes the play queue, and Next /
-/// Previous follow it.
-pub fn open_card_in_local(card: &Card, list: &[Card], fx: &mut Effects<'_, YtHost>) {
+/// The title a mix / playlist card names its list by (a mix's "Mix – <artist>"); a video card in
+/// a playlist has none (the watch page's playlist panel tells it).
+fn card_playlist_title(card: &Card) -> String {
+    match card.item.kind {
+        ItemKind::Mix | ItemKind::Playlist => card.item.title.clone(),
+        _ => String::new(),
+    }
+}
+
+/// A card's video as an item for the play queue (its id the video's, whatever the card's own id).
+fn card_video(c: &Card) -> Option<yt_core::model::Item> {
+    let v = c.video_id()?;
+    Some(yt_core::model::Item { id: v.to_string(), title: c.title.clone(), ..c.item.clone() })
+}
+
+/// Opens a card of a playlist: the YouTube playlist `playlist_id` ("VL" taken off; None for a
+/// playlist on this TV) titled `title`, its videos those of `list` so far (the rest of a YouTube
+/// playlist is loaded in the background). Next / Previous and every playback mode follow it.
+pub fn open_card_in_playlist(card: &Card, list: &[Card], playlist_id: Option<&str>, title: &str, fx: &mut Effects<'_, YtHost>) {
     if card.video_id().is_some() {
-        fx.push(Fx::App(YtFx::SetLocalQueue(list.iter().filter_map(|c| c.video_id().map(str::to_string)).collect())));
+        fx.push(Fx::App(YtFx::SetQueue(playlist_queue(list, playlist_id, title))));
     }
     open_card(card, fx);
+}
+
+/// The play queue of a playlist's page ([`open_card_in_playlist`]).
+pub fn playlist_queue(list: &[Card], playlist_id: Option<&str>, title: &str) -> PlayQueue {
+    let mut q = PlayQueue::playlist(playlist_id.map(str::to_string), title.to_string(), Vec::new());
+    q.add_items(list.iter().filter_map(card_video).collect(), None, 0);
+    q
 }
 
 /// OK on a `Control` element (the sidebar, `VList` rows, the search keyboard) arms a press in the

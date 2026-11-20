@@ -267,12 +267,9 @@ pub struct Store {
     pub sb_offered: bool,
     /// Playlists for the "Save to playlist" picker: video id -> options.
     pub playlist_options: HashMap<String, Vec<yt_core::actions::PlaylistOption>>,
-    /// Videos of the list the current video was opened from (for next/previous), and whether
-    /// they are Shorts (Up/Down then switch videos, like YouTube's Shorts player).
-    pub queue: Vec<String>,
-    pub queue_shorts: bool,
-    /// The opened list is a playlist on this TV: Next and Previous follow its order.
-    pub queue_local: bool,
+    /// The list the playing video was started from ([`crate::play_queue::PlayQueue`]): what plays
+    /// next, Previous / Next, the player's playlist row. It ends when the viewer leaves the player.
+    pub play_queue: Option<crate::play_queue::PlayQueue>,
     /// "Play next": videos the viewer queued, played in order before YouTube's up next. For
     /// this run only, unless "Keep Play next after closing" is on.
     pub play_next: Vec<yt_core::local_playlists::Video>,

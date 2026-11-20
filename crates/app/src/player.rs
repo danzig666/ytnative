@@ -91,6 +91,9 @@ pub struct ExtrasPrefs {
     /// Report the playback to YouTube's watch history.
     #[cfg_attr(windows, allow(dead_code))]
     pub history: bool,
+    /// The playlist the video plays in: the watch page then has its playlist panel and an up-next
+    /// pick inside the playlist (without it, the pick is a recommendation).
+    pub playlist: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -819,7 +822,7 @@ pub(crate) fn load_extras(video_id: &str, session: &Mutex<Option<yt_core::sessio
         }
     }
     publish(&ex);
-    match crate::host::with_session(session, |s| Ok((s.watch(video_id, None)?, s.signed_in()))) {
+    match crate::host::with_session(session, |s| Ok((s.watch(video_id, prefs.playlist.as_deref())?, s.signed_in()))) {
         Ok((w, signed_in)) => {
             // The channel's bell as YouTube has it decides whether the Notifications section
             // shows its new videos ("All": yes; other choices, or not subscribed: no).

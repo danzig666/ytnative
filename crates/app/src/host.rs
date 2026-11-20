@@ -210,9 +210,13 @@ pub enum YtFx {
     Act(UserAction),
     LoadChannelInfo(String),
     LoadPlaylists(String),
-    SetQueue(Vec<String>, bool),
-    /// The opened list is a playlist on this TV: its videos in order.
-    SetLocalQueue(Vec<String>),
+    /// The list a video is being started from becomes the play queue (`play_queue`).
+    SetQueue(crate::play_queue::PlayQueue),
+    /// Shuffle the playing playlist (the playing video stays; every other plays once), or back to
+    /// its own order from the playing video.
+    ShuffleQueue(bool),
+    /// The play queue's order as `next_up` worked it out (a shuffle started or went round again).
+    SetQueueOrder(Vec<usize>),
     Local(LocalOp),
     EditFilters(Box<dyn FnOnce(&mut yt_core::search_filters::Filters) + Send>),
     /// `key` names the list in the store: a video id (top-level comments) or a replies token.
@@ -360,9 +364,21 @@ enum Work {
     SignIn(u32, SignIn),
     /// A YouTube playlist's videos, read for "Copy to this TV": (title, videos or the error).
     CopiedToTv(String, Result<Vec<yt_core::local_playlists::Video>, String>),
+    /// A window of the play queue's YouTube playlist (`start`: its first), or the error, for the
+    /// queue `gen` (`AppRig::queue_gen`) it was asked for.
+    Queue { gen: u64, playlist_id: String, start: bool, result: Result<QueueWindow, String> },
     /// A live chat request's answer, for the polling generation that asked.
     /// `Ok(None)`: the video has no live chat.
     LiveChat { gen: u64, page: Result<Option<yt_core::live_chat::LiveChatPage>, String> },
+}
+
+/// A window of a YouTube playlist for the play queue: its title (the first window only), videos,
+/// the token of the next window, and whether the list is endless (the first window only).
+struct QueueWindow {
+    title: String,
+    items: Vec<yt_core::model::Item>,
+    next: Option<String>,
+    infinite: Option<bool>,
 }
 
 pub struct AppRig {
@@ -459,6 +475,13 @@ pub struct AppRig {
     pub screen_shown: bool,
     /// The live chat panel that started the polling (its answers go to it).
     live_chat_from: Option<MachineId>,
+    /// The screen that last set the play queue or started a video (the queue's loads answer it).
+    queue_from: Option<MachineId>,
+    /// The video whose watch page was last looked at for the play queue (once per video).
+    queue_panel_for: String,
+    /// Bumped for every new play queue: windows loaded for an earlier one (the same playlist
+    /// opened again) are dropped, so one walk loads it.
+    queue_gen: u64,
 }
 
 impl AppRig {
@@ -519,6 +542,9 @@ impl AppRig {
             audio_only_video: None,
             screen_shown: true,
             live_chat_from: None,
+            queue_from: None,
+            queue_panel_for: String::new(),
+            queue_gen: 0,
         };
         rig.store.local = yt_core::local_playlists::Store::load();
         rig.local_feeds();
@@ -675,6 +701,136 @@ impl AppRig {
         }
     }
 
+    /// Loads a window of the play queue's YouTube playlist in the background: its first (`token`
+    /// None; the playlist's own page has only its first 15 videos) or the one `token` names.
+    fn load_queue(&mut self, playlist_id: String, token: Option<String>) {
+        let Some(from) = self.queue_from else { return };
+        if let Some(q) = &mut self.store.play_queue {
+            q.loading = true;
+        }
+        let gen = self.queue_gen;
+        self.spawn(from, "play queue", move |s| {
+            let start = token.is_none();
+            let result = with_session(s, |s| match &token {
+                None => s.playlist_start(&playlist_id).map(|p| QueueWindow { title: p.title, items: p.items, next: p.continuation, infinite: Some(p.infinite) }),
+                Some(t) => s.playlist_more(t).map(|(items, next)| QueueWindow { title: String::new(), items, next, infinite: None }),
+            });
+            Work::Queue { gen, playlist_id, start, result: result.map_err(|e| format!("{e:#}")) }
+        });
+    }
+
+    /// A window of the play queue's playlist arrived: its videos join the queue, and the next
+    /// window is asked for at once (an endless mix: once playback nears the end, see
+    /// [`AppRig::follow_queue`]).
+    fn queue_window(&mut self, gen: u64, playlist_id: String, start: bool, result: Result<QueueWindow, String>) {
+        if gen != self.queue_gen {
+            return;
+        }
+        let current = self.player_view.video_id.clone();
+        let seed = crate::play_queue::seed(self.now_ms);
+        let Some(q) = self.store.play_queue.as_mut().filter(|q| q.playlist_id.as_deref() == Some(playlist_id.as_str())) else { return };
+        q.loading = false;
+        let w = match result {
+            Ok(w) => w,
+            Err(e) => {
+                crate::log(&format!("play queue {playlist_id}: {e}"));
+                q.more = None;
+                return;
+            }
+        };
+        if !w.title.is_empty() {
+            q.title = w.title;
+        }
+        if let Some(endless) = w.infinite {
+            q.infinite = endless;
+            if endless {
+                q.unshuffle();
+            }
+        }
+        let added = q.add_items(w.items, Some(&current), seed);
+        // A window with nothing new ends the walk (YouTube's last window points at itself).
+        q.more = w.next.filter(|_| start || added > 0);
+        match q.more.clone() {
+            Some(t) if !q.infinite => self.load_queue(playlist_id, Some(t)),
+            _ => {}
+        }
+    }
+
+    /// Once per frame: the play queue follows the player. It ends once the viewer left the player
+    /// for the lists (stopped, and no next video started within a moment), takes the playlist of
+    /// a video started with one from elsewhere (YouTube's pick, a phone), takes a mix's videos
+    /// from its watch page, and loads more of a mix as playback nears the end of what is known.
+    fn follow_queue(&mut self) {
+        if self.stopped_ms.is_some_and(|s| self.now_ms.wrapping_sub(s) > 2_000) {
+            self.store.play_queue = None;
+            return;
+        }
+        let current = self.player_view.video_id.clone();
+        if current.is_empty() {
+            return;
+        }
+        if self.queue_panel_for != current {
+            let panel = self.player_view.extras.watch.as_ref().and_then(|w| w.playlist.clone());
+            if let Some(panel) = panel {
+                self.queue_panel_for = current.clone();
+                if self.current_playlist.as_deref() == Some(panel.id.as_str()) {
+                    self.queue_from_panel(panel, &current);
+                }
+            }
+        }
+        let more = self.store.play_queue.as_ref().and_then(|q| {
+            let near_end = q.index(&current).is_some_and(|k| k + 3 >= q.len());
+            q.more.clone().filter(|_| q.infinite && !q.loading && near_end).zip(q.playlist_id.clone())
+        });
+        if let Some((token, id)) = more {
+            self.load_queue(id, Some(token));
+        }
+    }
+
+    /// The watch page's playlist panel of a video started with that playlist.
+    fn queue_from_panel(&mut self, panel: yt_core::watch::PlaylistPanel, current: &str) {
+        let seed = crate::play_queue::seed(self.now_ms);
+        match &mut self.store.play_queue {
+            Some(q) if q.playlist_id.as_deref() == Some(panel.id.as_str()) => {
+                if !panel.title.is_empty() {
+                    q.title = panel.title;
+                }
+                if panel.infinite {
+                    // A mix: its window of videos joins the queue, and its token loads more later.
+                    q.infinite = true;
+                    q.unshuffle();
+                    q.add_items(panel.items, Some(current), seed);
+                    if q.more.is_none() && !q.loading {
+                        q.more = panel.continuation;
+                    }
+                } else {
+                    for i in panel.items {
+                        q.info.entry(i.id.clone()).or_insert(i);
+                    }
+                }
+            }
+            _ => {
+                // Started with this playlist from elsewhere: it becomes the queue. A finite list
+                // loads from its first video (the panel is only a window around this one).
+                let mut q = crate::play_queue::PlayQueue::playlist(Some(panel.id.clone()), panel.title, Vec::new());
+                q.infinite = panel.infinite;
+                if panel.infinite {
+                    q.add_items(panel.items, None, 0);
+                    q.more = panel.continuation;
+                } else {
+                    for i in panel.items {
+                        q.info.entry(i.id.clone()).or_insert(i);
+                    }
+                }
+                self.store.play_queue = Some(q);
+                self.queue_gen += 1;
+                if !panel.infinite {
+                    self.load_queue(panel.id, None);
+                }
+            }
+        }
+    }
+
     fn next_addr(&mut self, to: MachineId) -> Addr {
         self.next_req += 1;
         Addr { to, req: RequestId(self.next_req) }
@@ -828,6 +984,7 @@ impl AppRig {
                 self.store.toast = None;
             }
         }
+        self.follow_queue();
         // Sleep timer (`store::SleepTimer`): ends when the viewer left the player for the lists
         // (stopped, and no next video started within a moment), else warns, restarts or pauses.
         if let Some(t) = self.store.sleep {
@@ -997,6 +1154,7 @@ impl AppRig {
                     }
                     out.push((addr, YtMsg::Acted));
                 }
+                Work::Queue { gen, playlist_id, start, result } => self.queue_window(gen, playlist_id, start, result),
                 Work::Suggestions(s) => {
                     self.store.suggestions = s;
                     out.push((addr, YtMsg::Suggestions));
@@ -1648,6 +1806,7 @@ impl Rig<YtHost> for AppRig {
             }
             YtFx::Play { video_id, playlist } => {
                 crate::log(&format!("play {video_id} (playlist {playlist:?})"));
+                self.queue_from = Some(from);
                 self.stopped_ms = None;
                 // One pipeline at a time: a card's preview is unloaded before the player loads.
                 crate::preview::stop();
@@ -1697,6 +1856,7 @@ impl Rig<YtHost> for AppRig {
                     dislikes: s.return_dislikes,
                     channel_subtitles: s.subtitles_per_channel,
                     history: self.history_for(&video_id),
+                    playlist: playlist.clone(),
                 };
                 self.sb = yt_core::ext::sponsorblock::SkipTracker::new(!s.sb_skip_once);
                 self.sb.min_duration_ms = s.sb_min_segment_ms as u64;
@@ -1982,15 +2142,33 @@ impl Rig<YtHost> for AppRig {
                 self.store.toast(msg, self.now_ms);
                 self.play_next_changed();
             }
-            YtFx::SetQueue(q, shorts) => {
-                self.store.queue = q;
-                self.store.queue_shorts = shorts;
-                self.store.queue_local = false;
+            YtFx::SetQueue(q) => {
+                self.queue_from = Some(from);
+                // A YouTube playlist loads in full in the background (a mix as it plays).
+                let load = q.playlist_id.clone().filter(|_| !q.infinite);
+                self.store.play_queue = Some(q);
+                self.queue_gen += 1;
+                if let Some(id) = load {
+                    self.load_queue(id, None);
+                }
             }
-            YtFx::SetLocalQueue(q) => {
-                self.store.queue = q;
-                self.store.queue_shorts = false;
-                self.store.queue_local = true;
+            YtFx::ShuffleQueue(on) => {
+                let (v, seed) = (self.player_view.video_id.clone(), crate::play_queue::seed(self.now_ms));
+                if let Some(q) = &mut self.store.play_queue {
+                    if on {
+                        q.shuffle(Some(&v), seed);
+                    } else {
+                        q.unshuffle();
+                    }
+                }
+                let label = format!("{}: {}", crate::i18n::tr("Shuffle"), crate::i18n::tr(if on { "On" } else { "Off" }));
+                self.store.toast(label, self.now_ms);
+            }
+            YtFx::SetQueueOrder(order) => {
+                let (v, seed) = (self.player_view.video_id.clone(), crate::play_queue::seed(self.now_ms));
+                if let Some(q) = &mut self.store.play_queue {
+                    q.set_order(order, &v, seed);
+                }
             }
             YtFx::Local(op) => {
                 if let Some(m) = self.local_op(op) {

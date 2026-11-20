@@ -26,6 +26,7 @@ pub mod net;
 pub mod notifications;
 pub mod parse;
 pub mod paths;
+pub mod playlist;
 pub mod sabr;
 pub mod search_filters;
 pub mod search_history;

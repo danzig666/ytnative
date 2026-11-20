@@ -14,10 +14,20 @@ use plx_ui::Rect;
 use std::borrow::Cow;
 
 const STYLE: RowStyle = RowStyle { w: 380.0, h: 214.0, gap: 44.0, ..RowStyle::HOME };
-/// Where the grid starts: lower on a channel page, whose Subscribe button has a line of its own
-/// under the title.
+/// Where the grid starts: lower on a channel page and a playlist's page, whose buttons (Subscribe;
+/// Play all and Shuffle) have a line of their own under the title.
 fn grid_top(key: &FeedKey) -> f32 {
-    if is_channel(key) { 212.0 } else { 170.0 }
+    if is_channel(key) || playlist_of(key).is_some() { 212.0 } else { 170.0 }
+}
+
+/// A playlist's page: the YouTube playlist's id ("VL" taken off), or None for a playlist on this
+/// TV. Its videos play as a playlist (`play_queue`), and the page offers Play all and Shuffle.
+fn playlist_of(key: &FeedKey) -> Option<Option<&str>> {
+    match key {
+        FeedKey::Browse { id, .. } if id.len() > 2 && id.starts_with("VL") => Some(Some(&id[2..])),
+        FeedKey::Local(_) => Some(None),
+        _ => None,
+    }
 }
 
 fn is_channel(key: &FeedKey) -> bool {
@@ -31,6 +41,11 @@ const G: GroupId = GroupId(1);
 const G_BTN: GroupId = GroupId(2);
 const SUB_BTN: u32 = 0x7900_0000;
 const SUB_RECT: Rect = Rect::new(112.0, 112.0, 300.0, 50.0);
+/// A playlist's Play all and Shuffle, on the line where a channel has Subscribe.
+const PLAY_BTN: u32 = 0x7900_0001;
+const SHUFFLE_BTN: u32 = 0x7900_0002;
+const PLAY_RECT: Rect = Rect::new(112.0, 112.0, 300.0, 50.0);
+const SHUFFLE_RECT: Rect = Rect::new(436.0, 112.0, 300.0, 50.0);
 
 struct State(String);
 impl LogicalState for State {
@@ -64,6 +79,31 @@ impl FeedScreen {
             FeedKey::Browse { id, .. } if id.starts_with("UC") => Some(id),
             _ => None,
         }
+    }
+
+    /// The buttons under the title, left to right: Subscribe on a channel's page, Play all and
+    /// Shuffle on a playlist's (once it has videos).
+    fn buttons(&self, cx: &Cx<'_, YtHost>) -> Vec<(u32, Rect)> {
+        if self.channel().is_some() {
+            return vec![(SUB_BTN, SUB_RECT)];
+        }
+        if playlist_of(&self.key).is_some() && self.src(cx).cards.iter().any(|c| c.video_id().is_some()) {
+            return vec![(PLAY_BTN, PLAY_RECT), (SHUFFLE_BTN, SHUFFLE_RECT)];
+        }
+        Vec::new()
+    }
+
+    /// Play all / Shuffle: the playlist from its first video, or in a random order (each video
+    /// once; the rest of a YouTube playlist joins the order as it loads).
+    fn play_all(&self, shuffle: bool, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
+        let Some(pl) = playlist_of(&self.key) else { return };
+        let mut q = common::playlist_queue(self.src(cx).cards, pl, &self.title(cx));
+        if shuffle {
+            q.shuffle(None, crate::play_queue::seed(cx.views.now_ms));
+        }
+        let Some(first) = q.at(0).cloned() else { return };
+        fx.push(Fx::App(YtFx::SetQueue(q)));
+        fx.push(Fx::Nav(NavOp::Push(YtArg::Player { video_id: first, playlist: pl.map(str::to_string) })));
     }
 
     /// The page title, ready to draw: the app's own words translated, a channel's name and the
@@ -143,7 +183,7 @@ impl FeedScreen {
 impl Machine<YtHost> for FeedScreen {
     type Ev = ScreenEvent<YtHost>;
     fn step(&mut self, ev: &Self::Ev, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) -> Handled {
-        if let Some(a) = super::common::press_commit_as_activate(ev, cx, |e| e == SUB_BTN) {
+        if let Some(a) = super::common::press_commit_as_activate(ev, cx, |e| [SUB_BTN, PLAY_BTN, SHUFFLE_BTN].contains(&e)) {
             return self.step(&a, cx, fx);
         }
         match ev {
@@ -159,6 +199,10 @@ impl Machine<YtHost> for FeedScreen {
                     fx.push(Fx::App(YtFx::Act(crate::host::UserAction::Subscribe { channel_id: ch.to_string(), subscribe: !now })));
                     fx.invalidate(plx_machine::present::Provenance::Input);
                 }
+                return Handled::Yes;
+            }
+            ScreenEvent::Activate(e @ (PLAY_BTN | SHUFFLE_BTN)) => {
+                self.play_all(*e == SHUFFLE_BTN, cx, fx);
                 return Handled::Yes;
             }
             ScreenEvent::Async(..) => fx.invalidate(plx_machine::present::Provenance::Lifecycle),
@@ -181,8 +225,8 @@ impl Machine<YtHost> for FeedScreen {
         match self.grid.on(ev, cx, &src, fx) {
             Some(CardEvent::Activate(e)) => {
                 if let Some(card) = cx.views.store.card(e) {
-                    if matches!(self.key, FeedKey::Local(_)) {
-                        common::open_card_in_local(card, src.cards, fx);
+                    if let Some(pl) = playlist_of(&self.key) {
+                        common::open_card_in_playlist(card, src.cards, pl, &self.title(cx), fx);
                     } else {
                         common::open_card_in(card, src.cards, fx);
                     }
@@ -205,46 +249,51 @@ impl Machine<YtHost> for FeedScreen {
 
 impl Focusable<YtHost> for FeedScreen {
     fn groups(&self, cx: &Cx<'_, YtHost>, out: &mut Vec<GroupSpec>) {
-        if self.channel().is_some() {
+        let buttons = self.buttons(cx);
+        if let (Some(first), Some(last)) = (buttons.first(), buttons.last()) {
             out.push(GroupSpec {
                 id: G_BTN,
                 kind: plx_ui::screen::GroupKind::Row { wrap: false },
                 seat: plx_ui::screen::Seat::First,
                 reachable: plx_ui::screen::AxisMask::BOTH,
                 edge: [plx_ui::screen::EdgeRule::Geometric; 4],
-                extent: SUB_RECT,
-                len: 1,
+                extent: Rect::new(first.1.x, first.1.y, last.1.x + last.1.w - first.1.x, first.1.h),
+                len: buttons.len(),
                 elem: plx_ui::screen::ElemKind::Control,
             });
         }
         out.push(self.grid.group_spec(G, self.src(cx).cards.len()));
     }
     fn group_of(&self, key: &u32, _cx: &Cx<'_, YtHost>) -> Option<GroupId> {
-        Some(if *key == SUB_BTN { G_BTN } else { G })
+        Some(if [SUB_BTN, PLAY_BTN, SHUFFLE_BTN].contains(key) { G_BTN } else { G })
     }
     fn neighbour(&self, key: FocusKey<u32>, dir: Dir, cx: &Cx<'_, YtHost>) -> Step<u32> {
-        if key.elem == SUB_BTN {
+        let buttons = self.buttons(cx);
+        if let Some(i) = buttons.iter().position(|b| b.0 == key.elem) {
+            let to = |e: u32| Step::Move(FocusKey { entry: self.entry, elem: e });
             return match (dir, self.src(cx).cards.first()) {
-                (Dir::Down, Some(c)) => Step::Move(FocusKey { entry: self.entry, elem: c.elem }),
+                (Dir::Down, Some(c)) => to(c.elem),
+                (Dir::Left, _) if i > 0 => to(buttons[i - 1].0),
+                (Dir::Right, _) if i + 1 < buttons.len() => to(buttons[i + 1].0),
                 _ => Step::Edge,
             };
         }
         let src = self.src(cx);
         match self.grid.neighbour(&src, key, dir) {
-            Step::Edge if dir == Dir::Up && self.channel().is_some() => Step::Move(FocusKey { entry: self.entry, elem: SUB_BTN }),
+            Step::Edge if dir == Dir::Up && !buttons.is_empty() => Step::Move(FocusKey { entry: self.entry, elem: buttons[0].0 }),
             Step::Edge if dir == Dir::Right => common::next_row_start(src.cards, key).map_or(Step::Edge, Step::Move),
             s => s,
         }
     }
     fn place(&self, key: &u32, cx: &Cx<'_, YtHost>, at: At) -> Option<Placed> {
-        if *key == SUB_BTN {
-            return Some(Placed { rect: SUB_RECT, rest_rect: SUB_RECT, clip: Rect::new(0.0, 0.0, 1920.0, 1080.0), index: Some(0) });
+        if let Some((i, (_, r))) = self.buttons(cx).iter().enumerate().find(|(_, b)| b.0 == *key) {
+            return Some(Placed { rect: *r, rest_rect: *r, clip: Rect::new(0.0, 0.0, 1920.0, 1080.0), index: Some(i as u32) });
         }
         self.grid.place(cx, &self.src(cx), key, at)
     }
     fn reconcile(&self, want: FocusKey<u32>, cx: &Cx<'_, YtHost>) -> FocusKey<u32> {
         let src = self.src(cx);
-        if src.cards.iter().any(|c| c.elem == want.elem) || (want.elem == SUB_BTN && self.channel().is_some()) {
+        if src.cards.iter().any(|c| c.elem == want.elem) || self.buttons(cx).iter().any(|b| b.0 == want.elem) {
             return want;
         }
         src.cards.first().map_or(want, |c| FocusKey { entry: self.entry, elem: c.elem })
@@ -293,8 +342,19 @@ impl Screen<YtHost> for FeedScreen {
         if let Some(h) = &hint {
             ui::text_raw(p, h, right, 74.0, 26, ui::FAINT, ui::ALIGN_RIGHT, false);
         }
-        if self.channel().is_some() {
-            ui::stop(f, FocusKey { entry: self.entry, elem: SUB_BTN }, SUB_RECT, Rect::new(0.0, 0.0, 1920.0, 1080.0));
+        for (e, r) in self.buttons(cx) {
+            ui::stop(f, FocusKey { entry: self.entry, elem: e }, r, Rect::new(0.0, 0.0, 1920.0, 1080.0));
+        }
+        // A playlist's Play all and Shuffle, drawn as the channel's Subscribe is, with an icon.
+        for (e, r) in self.buttons(cx).into_iter().filter(|b| b.0 != SUB_BTN) {
+            let focused = cx.focus.current.is_some_and(|k| k.elem == e);
+            ui::fill(p, r, 25.0, if focused { ui::WHITE } else { [1.0, 1.0, 1.0, 0.16] });
+            let ink = if focused { [0.0, 0.0, 0.0, 1.0] } else { ui::WHITE };
+            let (icon, label) = if e == PLAY_BTN { (ui::icon::Kind::Play, "Play all") } else { (ui::icon::Kind::Shuffle, "Shuffle") };
+            let tw = f.measure.width_str(crate::i18n::tr(label), 26, true);
+            let x = r.x + (r.w - tw - 38.0) / 2.0;
+            ui::icon::draw(p, icon, Rect::new(x, r.y + 12.0, 26.0, 26.0), ink, icon == ui::icon::Kind::Play);
+            ui::text(p, label, x + 38.0, r.y + 10.0, 26, ink, ui::ALIGN_LEFT, true);
         }
         if let Some(ch) = self.channel() {
             let sub = cx.views.store.subscribed.get(ch).copied();

@@ -879,13 +879,15 @@ impl MenuScreen {
                 fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
             }
             Act::PlayList(list_id, shuffle) => {
-                let mut ids = cx.views.store.local.get(list_id).map(|l| l.video_ids()).unwrap_or_default();
+                let list = cx.views.store.local.get(list_id);
+                let mut q = crate::play_queue::PlayQueue::playlist(None, list.map(|l| l.title.clone()).unwrap_or_default(), Vec::new());
+                q.add_items(list.map(|l| l.items.iter().map(yt_core::local_playlists::Video::to_item).collect()).unwrap_or_default(), None, 0);
                 if *shuffle {
-                    shuffle_ids(&mut ids, cx.views.now_ms);
+                    q.shuffle(None, crate::play_queue::seed(cx.views.now_ms));
                 }
                 fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
-                if let Some(first) = ids.first().cloned() {
-                    fx.push(Fx::App(YtFx::SetLocalQueue(ids)));
+                if let Some(first) = q.at(0).cloned() {
+                    fx.push(Fx::App(YtFx::SetQueue(q)));
                     fx.push(Fx::Nav(NavOp::Push(YtArg::Player { video_id: first, playlist: None })));
                 }
             }
@@ -996,18 +998,6 @@ fn youtube_playlist(card: &crate::store::Card) -> Option<String> {
         Some(Endpoint::Watch { playlist_id: Some(pl), .. }) if card.item.kind == ItemKind::Playlist && !pl.starts_with("RD") => Some(format!("VL{pl}")),
         None if card.item.kind == ItemKind::Playlist && !card.item.id.is_empty() => Some(format!("VL{}", card.item.id)),
         _ => None,
-    }
-}
-
-/// Shuffles `ids` in place (Fisher and Yates, seeded from the clock).
-fn shuffle_ids(ids: &mut [String], now_ms: u32) {
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
-    let mut seed = (nanos as u64 ^ ((now_ms as u64) << 32)) | 1;
-    for i in (1..ids.len()).rev() {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        ids.swap(i, (seed % (i as u64 + 1)) as usize);
     }
 }
 

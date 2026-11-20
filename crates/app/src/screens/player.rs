@@ -6,6 +6,7 @@
 
 use super::common;
 use crate::host::{YtArg, YtFx, YtHost};
+use crate::play_queue::PlayQueue;
 use crate::player::Phase;
 use crate::settings::{OkAction, PlaybackMode, PlayerStyle};
 use crate::ui;
@@ -55,8 +56,12 @@ pub struct PlayerScreen {
     pointer: Option<(f32, f32)>,
     /// Keyboard selection on the OSD buttons (see [`osd_button`] for the order).
     osd_sel: Option<usize>,
-    /// Keyboard selection in the suggestions row under the controls (Down from the lower row).
+    /// Keyboard selection in the rows under the controls (Down from the lower row): the column,
+    /// and the row ([`rows`]: the playing playlist first, then the suggestions).
     sugg_sel: Option<usize>,
+    sugg_row: usize,
+    /// Where the rows' cards were drawn last frame (pointer clicks): ((row, column), rect).
+    row_rects: Vec<((usize, usize), Rect)>,
     /// OK went down on this suggestion: it plays on release, or its menu opens when held. `true`
     /// once the menu opened (the release then does nothing).
     sugg_press: Option<(usize, bool)>,
@@ -89,6 +94,8 @@ impl PlayerScreen {
             pointer: None,
             osd_sel: None,
             sugg_sel: None,
+            sugg_row: 0,
+            row_rects: Vec::new(),
             sugg_press: None,
             dimmed: false,
             last_key_ms: 0,
@@ -122,19 +129,16 @@ impl PlayerScreen {
         fx.invalidate(plx_machine::present::Provenance::Input);
     }
 
-    /// Previous / next video of the list this one was opened from.
+    /// Previous / next video of the list this one was started from, in play order.
     fn step_queue(&mut self, dir: i32, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
-        let q = &cx.views.store.queue;
-        let Some(i) = q.iter().position(|v| *v == self.video_id) else {
+        let Some(q) = cx.views.store.play_queue.as_ref().filter(|q| q.contains(&self.video_id)) else {
             fx.push(Fx::App(YtFx::Toast("No other videos in this list".into())));
             return;
         };
-        let j = i as i32 + dir;
-        if j < 0 || j as usize >= q.len() {
-            fx.push(Fx::App(YtFx::Toast(if dir < 0 { "This is the first video".into() } else { "This is the last video".into() })));
-            return;
+        match q.step(&self.video_id, dir, false) {
+            Some(v) => go_to(v.clone(), q.playlist_id.clone(), fx),
+            None => fx.push(Fx::App(YtFx::Toast(if dir < 0 { "This is the first video".into() } else { "This is the last video".into() }))),
         }
-        go_to(q[j as usize].clone(), self.playlist.clone(), fx);
     }
 
     fn seek(&mut self, dir: i64, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
@@ -232,28 +236,42 @@ fn go_to(video_id: String, playlist: Option<String>, fx: &mut Effects<'_, YtHost
 }
 
 impl PlayerScreen {
-    /// Next: the playlist's / YouTube's up-next video, else the next one in the opened list.
+    /// Next: in a playlist, its next video as the playback mode orders it; else YouTube's up-next
+    /// video, else the next one in the opened list.
     fn next(&mut self, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
         if let Some(v) = queued_next(cx, &self.video_id) {
             go_to(v, None, fx);
             return;
         }
-        // A playlist on this TV: its next video, in the list's order.
-        if in_local_list(cx, &self.video_id) {
-            self.step_queue(1, cx, fx);
+        if playing_list(cx, &self.video_id).is_some() {
+            // The modes that stop or repeat after a video still move on with Next.
+            let mode = match cx.views.store.settings.playback_mode {
+                PlaybackMode::RepeatOne | PlaybackMode::PauseEach | PlaybackMode::CloseEach => PlaybackMode::PlayNext,
+                m => m,
+            };
+            match self.decide(cx, mode, false) {
+                crate::next_up::EndAction::Stay => fx.push(Fx::App(YtFx::Toast("This is the last video".into()))),
+                a => self.carry_out(a, fx),
+            }
             return;
         }
         match next_video(cx, &self.video_id, false) {
-            Some((v, pl)) => go_to(v, pl.or(self.playlist.clone()), fx),
+            Some((v, pl)) => go_to(v, pl, fx),
             None => self.step_queue(1, cx, fx),
         }
     }
 
-    /// Previous: the playlist's previous video, else the one played before this, else the
-    /// previous one in the opened list.
+    /// Previous: in a playlist, the video before this one in play order (shuffled, the shuffled
+    /// order; Reverse, the next one in the list); else the watch page's playlist's previous video,
+    /// else the one played before this, else the previous one in the opened list.
     fn prev(&mut self, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
-        if in_local_list(cx, &self.video_id) {
-            self.step_queue(-1, cx, fx);
+        if let Some(q) = playing_list(cx, &self.video_id) {
+            let mode = cx.views.store.settings.playback_mode;
+            let dir = if mode == PlaybackMode::Reverse { 1 } else { -1 };
+            match q.step(&self.video_id, dir, mode == PlaybackMode::ListRepeat && q.complete()) {
+                Some(v) => go_to(v.clone(), q.playlist_id.clone(), fx),
+                None => fx.push(Fx::App(YtFx::Toast("This is the first video".into()))),
+            }
             return;
         }
         if let Some(pl) = cx.views.player.extras.watch.as_ref().and_then(|w| w.playlist.as_ref()) {
@@ -284,34 +302,94 @@ impl PlayerScreen {
         }
     }
 
+    /// What follows this video in playback mode `mode` (`next_up`).
+    fn decide(&self, cx: &Cx<'_, YtHost>, mode: PlaybackMode, loop_short: bool) -> crate::next_up::EndAction {
+        let store = cx.views.store;
+        let play_next: Vec<String> = store.play_next.iter().map(|v| v.video_id.clone()).collect();
+        let w = cx.views.player.extras.watch.as_ref();
+        let yt_items: Option<(String, Vec<String>)> = w.and_then(|w| w.playlist.as_ref()).map(|pl| (pl.id.clone(), pl.items.iter().map(|i| i.id.clone()).collect()));
+        let c = crate::next_up::EndContext {
+            current: &self.video_id,
+            mode,
+            loop_short,
+            play_next: &play_next,
+            queue: store.play_queue.as_ref(),
+            yt_playlist: yt_items.as_ref().map(|(id, v)| (id.as_str(), v.as_slice())),
+            autoplay: w.and_then(autoplay_pick),
+        };
+        crate::next_up::on_ended(&c, crate::play_queue::seed(cx.views.now_ms))
+    }
+
+    /// Carries out a decision of [`PlayerScreen::decide`] other than staying.
+    fn carry_out(&mut self, a: crate::next_up::EndAction, fx: &mut Effects<'_, YtHost>) {
+        use crate::next_up::EndAction;
+        match a {
+            EndAction::Replay => fx.push(Fx::App(YtFx::Replay { video_id: self.video_id.clone(), playlist: self.playlist.clone() })),
+            EndAction::Queued(v) => go_to(v, None, fx),
+            EndAction::Go(v, pl) => go_to(v, pl, fx),
+            EndAction::Shuffled(order, v, pl) => {
+                fx.push(Fx::App(YtFx::SetQueueOrder(order)));
+                go_to(v, pl, fx);
+            }
+            EndAction::Close => fx.push(Fx::Nav(NavOp::Pop)),
+            EndAction::Stay => {}
+        }
+    }
+
     /// The video ended: what comes next, per the playback mode.
     fn on_ended(&mut self, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
         let store = cx.views.store;
         let s = &store.settings;
-        let replay = YtFx::Replay { video_id: self.video_id.clone(), playlist: self.playlist.clone() };
-        let play_next: Vec<String> = store.play_next.iter().map(|v| v.video_id.clone()).collect();
-        let list = current_list(cx, &self.video_id);
-        let ex = cx.views.player.extras.clone();
-        let w = ex.watch.as_ref();
-        let yt_items: Option<(String, Vec<String>)> = w.and_then(|w| w.playlist.as_ref()).map(|pl| (pl.id.clone(), pl.items.iter().map(|i| i.id.clone()).collect()));
-        let c = crate::next_up::EndContext {
-            current: &self.video_id,
-            mode: s.playback_mode,
-            loop_short: store.queue_shorts && s.loop_shorts && store.queue.contains(&self.video_id),
-            play_next: &play_next,
-            in_local: in_local_list(cx, &self.video_id),
-            list: list.as_ref().map(|(ids, pl)| (ids.as_slice(), pl.as_deref())),
-            yt_playlist: yt_items.as_ref().map(|(id, v)| (id.as_str(), v.as_slice())),
-            autoplay: w.and_then(autoplay_pick),
-        };
-        use crate::next_up::EndAction;
-        match crate::next_up::on_ended(&c, random_seed(cx)) {
-            EndAction::Replay => fx.push(Fx::App(replay)),
-            EndAction::Queued(v) => go_to(v, None, fx),
-            EndAction::Go(v, pl) => go_to(v, pl.or(self.playlist.clone()), fx),
-            EndAction::Close => fx.push(Fx::Nav(NavOp::Pop)),
-            EndAction::Stay => self.show_hud(cx, fx),
+        let loop_short = s.loop_shorts && store.play_queue.as_ref().is_some_and(|q| q.shorts && q.contains(&self.video_id));
+        match self.decide(cx, s.playback_mode, loop_short) {
+            crate::next_up::EndAction::Stay => self.show_hud(cx, fx),
+            a => self.carry_out(a, fx),
         }
+    }
+
+    /// OK on the card in column `col` of row `row` ([`rows`]): the playlist's Shuffle switches;
+    /// one of its videos plays within it (the playlist goes on from there); a suggestion plays,
+    /// a mix or playlist suggestion as that playlist.
+    fn open_tile(&mut self, row: usize, col: usize, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
+        let kind = rows(cx, &self.video_id).get(row).copied();
+        match (kind, kind.and_then(|k| tile(k, cx, &self.video_id, col))) {
+            (_, Some(Tile::Shuffle(on))) => fx.push(Fx::App(YtFx::ShuffleQueue(!on))),
+            (Some(RowKind::Playlist), Some(Tile::Video(it))) => {
+                let pl = playing_list(cx, &self.video_id).and_then(|q| q.playlist_id.clone());
+                if it.id != self.video_id {
+                    fx.push(Fx::Nav(NavOp::Replace(YtArg::Player { video_id: it.id, playlist: pl })));
+                }
+            }
+            (_, Some(Tile::Video(it))) => match &it.endpoint {
+                Some(yt_core::model::Endpoint::Watch { video_id, playlist_id: Some(pl), .. }) if !video_id.is_empty() => {
+                    let title = if matches!(it.kind, yt_core::model::ItemKind::Mix | yt_core::model::ItemKind::Playlist) { it.title.clone() } else { String::new() };
+                    fx.push(Fx::App(YtFx::SetQueue(PlayQueue::playlist(Some(pl.clone()), title, vec![video_id.clone()]))));
+                    fx.push(Fx::Nav(NavOp::Replace(YtArg::Player { video_id: video_id.clone(), playlist: Some(pl.clone()) })));
+                }
+                Some(yt_core::model::Endpoint::Watch { video_id, .. }) if !video_id.is_empty() => {
+                    fx.push(Fx::Nav(NavOp::Replace(YtArg::Player { video_id: video_id.clone(), playlist: None })));
+                }
+                _ => fx.push(Fx::Nav(NavOp::Replace(YtArg::Player { video_id: it.id, playlist: None }))),
+            },
+            _ => {}
+        }
+    }
+
+    /// The column a row is entered at: the playing video in the playlist, else the first card.
+    fn entry_col(&self, kind: RowKind, cx: &Cx<'_, YtHost>) -> usize {
+        match kind {
+            RowKind::Playlist => playing_col(cx, &self.video_id).unwrap_or(0),
+            RowKind::Suggestions => 0,
+        }
+    }
+
+    /// Down from the controls: into the first row.
+    fn enter_rows(&mut self, cx: &Cx<'_, YtHost>) -> bool {
+        let Some(&first) = rows(cx, &self.video_id).first() else { return false };
+        self.osd_sel = None;
+        self.sugg_row = 0;
+        self.sugg_sel = Some(self.entry_col(first, cx));
+        true
     }
 
     /// OSD button `i` pressed (pointer or OK); see [`osd_button`] for the order.
@@ -490,7 +568,8 @@ impl Machine<YtHost> for PlayerScreen {
             ScreenEvent::Timer(T_SUGG_HOLD) => {
                 if let Some((s, false)) = self.sugg_press {
                     self.sugg_press = Some((s, true));
-                    if let Some(it) = suggestions(cx).get(s) {
+                    let kind = rows(cx, &self.video_id).get(self.sugg_row).copied();
+                    if let Some(Tile::Video(it)) = kind.and_then(|k| tile(k, cx, &self.video_id, s)) {
                         fx.push(Fx::Nav(NavOp::Present(YtArg::SuggestionMenu(it.id.clone()))));
                     }
                 }
@@ -588,6 +667,16 @@ impl Machine<YtHost> for PlayerScreen {
                 } else {
                     (0..OSD_N).find(|i| osd_button(*i).contains(x, y))
                 };
+                // A card of the rows being browsed: it plays (the playlist's Shuffle switches).
+                if self.sugg_sel.is_some() {
+                    if let Some(&((row, col), _)) = self.row_rects.iter().find(|(_, r)| r.contains(x, y)) {
+                        self.sugg_row = row;
+                        self.sugg_sel = Some(col);
+                        self.open_tile(row, col, cx, fx);
+                        self.show_hud(cx, fx);
+                        return Handled::Yes;
+                    }
+                }
                 let bar = if yt { self.yt_bar } else { Rect::new(96.0, 900.0, 1728.0, 8.0) };
                 let on_bar = (bar.y - 24.0..=bar.y + 40.0).contains(&y) && (bar.x..=bar.x + bar.w).contains(&x);
                 if let Some(i) = hit.filter(|_| self.hud) {
@@ -635,9 +724,7 @@ impl Machine<YtHost> for PlayerScreen {
                             self.sugg_press = None;
                             fx.push(Fx::CancelTimer(T_SUGG_HOLD));
                             if !opened {
-                                if let Some(it) = suggestions(cx).get(s) {
-                                    fx.push(Fx::Nav(NavOp::Replace(YtArg::Player { video_id: it.id.clone(), playlist: None })));
-                                }
+                                self.open_tile(self.sugg_row, s, cx, fx);
                             }
                         }
                         return Handled::Yes;
@@ -656,12 +743,24 @@ impl Machine<YtHost> for PlayerScreen {
                 // opens Options, Up / BACK leave the buttons.
                 let transport = [WCODE_PLAY, WCODE_PAUSE, WCODE_PLAYPAUSE, WCODE_RW, WCODE_FF, WCODE_CH_UP, WCODE_CH_DOWN].contains(wcode)
                     || WCODE_STOP.contains(wcode);
-                // The suggestions row: Left / Right through it, OK plays, Up / BACK go back.
+                // The rows (the playlist, the suggestions): Left / Right through one, Up / Down
+                // between them, OK plays, Up from the first / BACK go back.
                 if let Some(s) = self.sugg_sel.filter(|_| !transport) {
-                    let n = suggestions(cx).len();
+                    let all = rows(cx, &self.video_id);
+                    let r = self.sugg_row.min(all.len().saturating_sub(1));
+                    self.sugg_row = r;
+                    let n = all.get(r).map_or(0, |k| row_len(*k, cx, &self.video_id));
                     match key {
                         Key::Left => self.sugg_sel = Some(s.saturating_sub(1)),
                         Key::Right => self.sugg_sel = Some((s + 1).min(n.saturating_sub(1))),
+                        Key::Down if *edge == Edge::Down && r + 1 < all.len() => {
+                            self.sugg_row = r + 1;
+                            self.sugg_sel = Some(self.entry_col(all[r + 1], cx));
+                        }
+                        Key::Up if *edge == Edge::Down && r > 0 => {
+                            self.sugg_row = r - 1;
+                            self.sugg_sel = Some(self.entry_col(all[r - 1], cx));
+                        }
                         // Plays on release; held, opens the suggestion's menu instead.
                         Key::Ok if *edge == Edge::Down => {
                             if s < n {
@@ -687,10 +786,7 @@ impl Machine<YtHost> for PlayerScreen {
                         Key::Right => self.osd_sel = Some(order[(at + 1).min(order.len() - 1)]),
                         Key::Up => self.osd_sel = None,
                         Key::Down => {
-                            if !suggestions(cx).is_empty() {
-                                self.osd_sel = None;
-                                self.sugg_sel = Some(0);
-                            }
+                            self.enter_rows(cx);
                         }
                         Key::Ok => self.press_osd(sel, cx, fx),
                         Key::Back => {
@@ -712,11 +808,8 @@ impl Machine<YtHost> for PlayerScreen {
                         Key::Right => self.osd_sel = Some((sel + 1).min(row.end - 1)),
                         Key::Down if sel < OSD_ROW_B => self.osd_sel = Some(osd_other_row(sel)),
                         Key::Down => {
-                            // Below the lower row: the suggestions.
-                            if !suggestions(cx).is_empty() {
-                                self.osd_sel = None;
-                                self.sugg_sel = Some(0);
-                            }
+                            // Below the lower row: the playlist, the suggestions.
+                            self.enter_rows(cx);
                         }
                         Key::Ok => self.press_osd(sel, cx, fx),
                         Key::Up if sel >= OSD_ROW_B => self.osd_sel = Some(osd_other_row(sel)),
@@ -821,7 +914,7 @@ impl Machine<YtHost> for PlayerScreen {
                         self.step_queue(1, cx, fx);
                         Handled::Yes
                     }
-                    (Key::Up, _) | (Key::Down, _) if cx.views.store.queue_shorts => {
+                    (Key::Up, _) | (Key::Down, _) if cx.views.store.play_queue.as_ref().is_some_and(|q| q.shorts) => {
                         self.step_queue(if *key == Key::Up { -1 } else { 1 }, cx, fx);
                         Handled::Yes
                     }
@@ -1021,12 +1114,8 @@ impl Screen<YtHost> for PlayerScreen {
         let mut preview: Option<(Rect, f32)> = None;
         // Browsing the suggestions: they take the screen (SmartTube scrolls them up under a dark
         // veil), the title stays on top.
-        if let Some(sel) = self.sugg_sel {
-            ui::fill(p, Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, [0.0, 0.0, 0.0, 0.82]);
-            ui::glide(p, f.measure, &st.title, 96.0, 90.0, 1728.0, 48, ui::WHITE, true, ui::GLIDE_PLAYER_TITLE);
-            ui::text_raw(p, &st.author, 96.0, 160.0, 28, ui::DIM, ui::ALIGN_LEFT, false);
-            draw_suggestions(p, f.measure, &suggestions(cx), sel, 560.0);
-            common::toast(p, cx);
+        if self.sugg_sel.is_some() {
+            self.draw_rows_full(p, f.measure, cx);
             return;
         }
         // A gradient from the picture into the controls (SmartTube's player background).
@@ -1034,7 +1123,10 @@ impl Screen<YtHost> for PlayerScreen {
         ui::fill(p, Rect::new(0.0, 780.0, 1920.0, 300.0), 0.0, [0.0, 0.0, 0.0, 0.82]);
         // Title and the line under it: channel, views, age, likes, dislikes, subscribers.
         ui::glide(p, f.measure, &st.title, 96.0, 640.0, 1728.0, 50, ui::WHITE, true, ui::GLIDE_PLAYER_TITLE);
-        let mut byline = st.author.clone();
+        let mut byline = match playing_list(cx, &self.video_id) {
+            Some(q) => format!("{}  \u{2022}  {}", list_line(q, &self.video_id), st.author),
+            None => st.author.clone(),
+        };
         if let Some(w) = &ex.watch {
             if let Some(v) = &w.short_view_count_text {
                 byline.push_str(&format!("  \u{2022}  {v}"));
@@ -1249,8 +1341,12 @@ impl Screen<YtHost> for PlayerScreen {
             }
         }
         // There is more below: the suggestions.
-        if !suggestions(cx).is_empty() && self.osd_sel.is_some_and(|i| i >= OSD_ROW_B) {
-            ui::text(p, &format!("\u{25BC}  {}", crate::i18n::tr("Suggestions")), 960.0, 1030.0, 24, ui::DIM, ui::ALIGN_CENTER, false);
+        if let Some(&first) = rows(cx, &self.video_id).first().filter(|_| self.osd_sel.is_some_and(|i| i >= OSD_ROW_B)) {
+            let below = match (first, playing_list(cx, &self.video_id)) {
+                (RowKind::Playlist, Some(q)) => list_line(q, &self.video_id),
+                _ => crate::i18n::tr("Suggestions").to_string(),
+            };
+            ui::text_raw(p, &format!("\u{25BC}  {below}"), 960.0, 1030.0, 24, ui::DIM, ui::ALIGN_CENTER, false);
         }
         if let Some((bar, frac)) = preview {
             storyboard_preview(p, st, bar, frac);
@@ -1317,8 +1413,14 @@ impl PlayerScreen {
         let mut preview: Option<(Rect, f32)> = None;
         let ex = &st.extras;
         let w = ex.watch.as_ref();
-        let items = suggestions(cx);
-        // Browsing the suggestions lifts the controls; the shelf comes up under them.
+        // Browsing a row below the first: the rows take the screen.
+        if self.sugg_sel.is_some() && self.sugg_row > 0 {
+            self.yt_rects.clear();
+            self.draw_rows_full(p, m, cx);
+            return;
+        }
+        let all_rows = rows(cx, &self.video_id);
+        // Browsing the first row lifts the controls; the row comes up under them.
         let dy = if self.sugg_sel.is_some() { -330.0 } else { 0.0 };
         self.yt_rects.clear();
 
@@ -1338,7 +1440,10 @@ impl PlayerScreen {
             ui::glide(p, m, &line, 96.0, y, 1300.0, 46, ui::WHITE, true, ui::GLIDE_PLAYER_TITLE);
             y += 58.0;
         }
-        let mut byline = st.author.clone();
+        let mut byline = match playing_list(cx, &self.video_id) {
+            Some(q) => format!("{} \u{2022} {}", list_line(q, &self.video_id), st.author),
+            None => st.author.clone(),
+        };
         if let Some(w) = w {
             if let Some(v) = &w.short_view_count_text {
                 byline.push_str(&format!(" \u{2022} {v}"));
@@ -1517,13 +1622,32 @@ impl PlayerScreen {
             ui::text(p, crate::i18n::tr(osd_name(i)), r.x + r.w / 2.0, cy + B / 2.0 + 12.0, 22, ui::WHITE, ui::ALIGN_CENTER, false);
         }
 
-        // The suggestions: peeking in at the bottom, or brought up to browse.
-        if !items.is_empty() {
+        // The first row (the playlist, else the suggestions): peeking in at the bottom, or brought
+        // up to browse.
+        self.row_rects.clear();
+        if let Some(&first) = all_rows.first() {
+            let heading = (first == RowKind::Playlist).then(|| playing_list(cx, &self.video_id).map(|q| list_line(q, &self.video_id))).flatten();
             if let Some(sel) = self.sugg_sel {
-                draw_suggestions_at(p, m, &items, sel, 1000.0 + dy, false);
+                let at = 1000.0 + dy;
+                if let Some(h) = &heading {
+                    ui::text_raw(p, h, 96.0, at - 52.0, 28, ui::WHITE, ui::ALIGN_LEFT, true);
+                }
+                self.draw_row(p, m, cx, 0, Some(sel), at);
             } else {
                 const TW: f32 = 400.0;
-                for (k, it) in items.iter().take(5).enumerate() {
+                // From the playing video on in the playlist (its Shuffle button left out).
+                let skip = match first {
+                    RowKind::Playlist => playing_col(cx, &self.video_id).unwrap_or(0),
+                    RowKind::Suggestions => 0,
+                };
+                let n = row_len(first, cx, &self.video_id);
+                let peek: Vec<yt_core::model::Item> = (skip..n.min(skip + 5))
+                    .filter_map(|c| match tile(first, cx, &self.video_id, c) {
+                        Some(Tile::Video(it)) => Some(it),
+                        _ => None,
+                    })
+                    .collect();
+                for (k, it) in peek.iter().enumerate() {
                     let r = Rect::new(96.0 + k as f32 * (TW + 32.0), 1000.0, TW, TW * 9.0 / 16.0);
                     let url = it.thumbnail.clone().unwrap_or_default();
                     let (tex, _, _) = plx_ui::tex::resolve_wh_on(0, &url, 0, 0, false);
@@ -1587,21 +1711,95 @@ fn local_offset_secs() -> i64 {
     }
 }
 
-/// The list the current video is in: the playlist's items, else the list it was opened from.
-fn current_list(cx: &Cx<'_, YtHost>, current: &str) -> Option<(Vec<String>, Option<String>)> {
-    if let Some(pl) = cx.views.player.extras.watch.as_ref().and_then(|w| w.playlist.as_ref()) {
-        if pl.items.iter().any(|i| i.id == current) {
-            return Some((pl.items.iter().map(|i| i.id.clone()).collect(), Some(pl.id.clone())));
-        }
-    }
-    let q = &cx.views.store.queue;
-    q.iter().any(|v| v == current).then(|| (q.clone(), None))
+/// The playlist playing: the play queue when it is a playlist and holds the playing video.
+fn playing_list<'a>(cx: &Cx<'a, YtHost>, current: &str) -> Option<&'a PlayQueue> {
+    cx.views.store.play_queue.as_ref().filter(|q| q.playlist && q.contains(current))
 }
 
-/// A seed for the shuffle.
-fn random_seed(cx: &Cx<'_, YtHost>) -> u64 {
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
-    nanos as u64 ^ cx.views.now_ms as u64
+/// Where the player is in the playlist: "Playlist title · 3 of 15" (a mix: its title alone, it
+/// has no end).
+fn list_line(q: &PlayQueue, current: &str) -> String {
+    use crate::i18n::tr;
+    // A long title (some run to a hundred characters) would push the position off the line.
+    let title = match q.title.chars().count() {
+        0 => tr("Playlist").to_string(),
+        n if n > 48 => format!("{}\u{2026}", q.title.chars().take(47).collect::<String>().trim_end()),
+        _ => q.title.clone(),
+    };
+    match q.position(current).filter(|_| !q.infinite) {
+        Some((k, n)) => format!("{title} \u{00B7} {}", tr("{} of {}").replacen("{}", &k.to_string(), 1).replacen("{}", &n.to_string(), 1)),
+        None => title,
+    }
+}
+
+/// The rows under the controls.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RowKind {
+    /// The playing playlist in play order, after its Shuffle button (not for a mix).
+    Playlist,
+    Suggestions,
+}
+
+/// A card of those rows.
+enum Tile {
+    /// The playlist's Shuffle button, and whether shuffle is on.
+    Shuffle(bool),
+    Video(yt_core::model::Item),
+}
+
+/// The rows under the controls: the playlist first while one plays (as YouTube shows it), then
+/// the suggestions.
+fn rows(cx: &Cx<'_, YtHost>, current: &str) -> Vec<RowKind> {
+    let mut out = Vec::new();
+    if playing_list(cx, current).is_some() {
+        out.push(RowKind::Playlist);
+    }
+    if !suggestions(cx).is_empty() {
+        out.push(RowKind::Suggestions);
+    }
+    out
+}
+
+/// The playlist row starts with its Shuffle button (a finite list of more than one video).
+fn shuffle_offset(q: &PlayQueue) -> usize {
+    q.can_shuffle() as usize
+}
+
+/// The number of cards in a row.
+fn row_len(kind: RowKind, cx: &Cx<'_, YtHost>, current: &str) -> usize {
+    match kind {
+        RowKind::Playlist => playing_list(cx, current).map_or(0, |q| q.len() + shuffle_offset(q)),
+        RowKind::Suggestions => suggestions(cx).len(),
+    }
+}
+
+/// The card in column `col` of a row.
+fn tile(kind: RowKind, cx: &Cx<'_, YtHost>, current: &str, col: usize) -> Option<Tile> {
+    match kind {
+        RowKind::Playlist => {
+            let q = playing_list(cx, current)?;
+            let off = shuffle_offset(q);
+            if col < off {
+                return Some(Tile::Shuffle(q.shuffled()));
+            }
+            // The playing video's own tile in a mix's panel comes without its title: the
+            // player's.
+            q.item(col - off).map(|mut it| {
+                if it.title.is_empty() && it.id == current {
+                    it.title = cx.views.player.title.clone();
+                    it.lines = vec![cx.views.player.author.clone()];
+                }
+                Tile::Video(it)
+            })
+        }
+        RowKind::Suggestions => suggestions(cx).into_iter().nth(col).map(Tile::Video),
+    }
+}
+
+/// The playing video's column in the playlist row.
+fn playing_col(cx: &Cx<'_, YtHost>, current: &str) -> Option<usize> {
+    let q = playing_list(cx, current)?;
+    Some(q.index(current)? + shuffle_offset(q))
 }
 
 /// Next video when one ends: the next playlist item (or the first when repeating the list),
@@ -1631,15 +1829,52 @@ fn osd_name(i: usize) -> &'static str {
 }
 
 
-/// The suggestions as a row of cards at `y`, the selected one lifted and lit.
-fn draw_suggestions(p: plx_ui::Painter, m: &dyn plx_machine::machine::Measure, items: &[yt_core::model::Item], sel: usize, y: f32) {
-    draw_suggestions_at(p, m, items, sel, y, true);
+impl PlayerScreen {
+    /// The rows taking the screen (browsing them in the SmartTube style, or below the first row
+    /// in the YouTube style): the title on top, then the rows with their headings, the one being
+    /// browsed in front.
+    fn draw_rows_full(&mut self, p: plx_ui::Painter, m: &dyn plx_machine::machine::Measure, cx: &Cx<'_, YtHost>) {
+        let st = cx.views.player;
+        ui::fill(p, Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, [0.0, 0.0, 0.0, 0.82]);
+        ui::glide(p, m, &st.title, 96.0, 90.0, 1728.0, 48, ui::WHITE, true, ui::GLIDE_PLAYER_TITLE);
+        ui::text_raw(p, &st.author, 96.0, 160.0, 28, ui::DIM, ui::ALIGN_LEFT, false);
+        let all = rows(cx, &self.video_id);
+        self.row_rects.clear();
+        // One row: in the middle, as the suggestions always were; two: one above the other.
+        let tops: &[f32] = if all.len() > 1 { &[280.0, 735.0] } else { &[560.0] };
+        for (r, (kind, y)) in all.iter().zip(tops).enumerate() {
+            let heading = match (kind, playing_list(cx, &self.video_id)) {
+                (RowKind::Playlist, Some(q)) => list_line(q, &self.video_id),
+                _ => crate::i18n::tr("Suggestions").to_string(),
+            };
+            let on = r == self.sugg_row;
+            ui::text_raw(p, &heading, 96.0, y - 62.0, if on { 36 } else { 30 }, if on { ui::WHITE } else { ui::DIM }, ui::ALIGN_LEFT, true);
+            self.draw_row(p, m, cx, r, self.sugg_sel.filter(|_| on), *y);
+        }
+        common::toast(p, cx);
+    }
+
+    /// Row `r` of [`rows`] at `y`: `sel` is the selected column while it is browsed; otherwise a
+    /// playlist rests on its playing video.
+    fn draw_row(&mut self, p: plx_ui::Painter, m: &dyn plx_machine::machine::Measure, cx: &Cx<'_, YtHost>, r: usize, sel: Option<usize>, y: f32) {
+        let Some(&kind) = rows(cx, &self.video_id).get(r) else { return };
+        let n = row_len(kind, cx, &self.video_id);
+        let playing = match kind {
+            RowKind::Playlist => playing_col(cx, &self.video_id),
+            RowKind::Suggestions => None,
+        };
+        let focus = sel.or(playing).unwrap_or(0);
+        let current = self.video_id.clone();
+        let rects = draw_cards(p, m, n, &|c| tile(kind, cx, &current, c), sel, focus, playing, y, kind as usize);
+        self.row_rects.extend(rects.into_iter().map(|(c, rect)| ((r, c), rect)));
+    }
 }
 
-/// The suggestions row's motion, kept between frames: where the row is scrolled to (in cards)
-/// and how far each card is lifted (0..1), eased toward the selection as the lists' cards are.
+/// The rows' motion, kept between frames (one per row kind): where the row is scrolled to (in
+/// cards) and how far each card is lifted (0..1), eased toward the selection as the lists' cards
+/// are.
 struct SuggMotion {
-    /// The row it belongs to (first video, count): another row starts at rest.
+    /// The row it belongs to (first card, count): another row starts at rest.
     key: (String, usize),
     scroll: f32,
     pop: Vec<f32>,
@@ -1647,7 +1882,7 @@ struct SuggMotion {
 }
 
 thread_local! {
-    static SUGG_MOTION: std::cell::RefCell<Option<SuggMotion>> = const { std::cell::RefCell::new(None) };
+    static SUGG_MOTION: std::cell::RefCell<[Option<SuggMotion>; 2]> = const { std::cell::RefCell::new([None, None]) };
 }
 
 /// Moves `x` toward `to` for `dt` seconds (a critically damped ease without overshoot);
@@ -1671,50 +1906,71 @@ fn mix(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
     [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, a[3] + (b[3] - a[3]) * t]
 }
 
-/// The suggestions row at `y`, with its heading above it when `heading`. It glides to the
-/// selected card (one before it stays in view), the selected card lifts on an ease, and its
-/// title and detail glide when they do not fit, as a selected card in a list does.
-fn draw_suggestions_at(p: plx_ui::Painter, m: &dyn plx_machine::machine::Measure, items: &[yt_core::model::Item], sel: usize, y: f32, heading: bool) {
+/// A row of `n` cards at `y` (`tile` gives each), returning where each visible one was drawn. It
+/// glides to column `focus` (one before it stays in view); the selected card (`sel`) lifts on an
+/// ease and its title and detail glide when they do not fit, as a selected card in a list does.
+/// The `playing` card is marked. `slot` keeps this row's motion apart from the other row's.
+#[allow(clippy::too_many_arguments)]
+fn draw_cards(
+    p: plx_ui::Painter,
+    m: &dyn plx_machine::machine::Measure,
+    n: usize,
+    tile: &dyn Fn(usize) -> Option<Tile>,
+    sel: Option<usize>,
+    focus: usize,
+    playing: Option<usize>,
+    y: f32,
+    slot: usize,
+) -> Vec<(usize, Rect)> {
     const W: f32 = 400.0;
     const H: f32 = 225.0;
     const GAP: f32 = 32.0;
     const PITCH: f32 = W + GAP;
-    if heading {
-        ui::text(p, "Suggestions", 96.0, y - 70.0, 36, ui::WHITE, ui::ALIGN_LEFT, true);
+    let mut out = Vec::new();
+    if n == 0 {
+        return out;
     }
-    if items.is_empty() {
-        return;
-    }
-    let target = sel.saturating_sub(1) as f32;
-    let key = (items[0].id.clone(), items.len());
+    let target = focus.saturating_sub(1) as f32;
+    let first_id = match tile(0) {
+        Some(Tile::Video(it)) => it.id,
+        Some(Tile::Shuffle(_)) => match tile(1) {
+            Some(Tile::Video(it)) => it.id,
+            _ => String::new(),
+        },
+        None => String::new(),
+    };
+    let key = (first_id, n);
     let (scroll, pops) = SUGG_MOTION.with(|cell| {
         let mut cell = cell.borrow_mut();
         let now = std::time::Instant::now();
-        let fresh = |sel: usize| {
-            let mut pop = vec![0.0; items.len()];
-            if let Some(v) = pop.get_mut(sel) {
+        let fresh = || {
+            let mut pop = vec![0.0; n];
+            if let Some(v) = sel.and_then(|s| pop.get_mut(s)) {
                 *v = 1.0;
             }
             SuggMotion { key: key.clone(), scroll: target, pop, at: now }
         };
-        let st = cell.get_or_insert_with(|| fresh(sel));
+        let st = cell[slot.min(1)].get_or_insert_with(fresh);
         // Another row, or the row comes back after a while: it starts where it rests.
         if st.key != key || now.duration_since(st.at).as_secs_f32() > 0.5 {
-            *st = fresh(sel);
+            *st = fresh();
         }
         let dt = now.duration_since(st.at).as_secs_f32().min(0.1);
         st.at = now;
         let mut moving = ease_to(&mut st.scroll, target, dt);
-        for (k, v) in st.pop.iter_mut().enumerate() {
-            moving |= ease_to(v, if k == sel { 1.0 } else { 0.0 }, dt);
+        // Only the cards near the view are eased (a long playlist has thousands).
+        let lo = (st.scroll.floor().max(0.0) as usize).saturating_sub(2);
+        for (k, v) in st.pop.iter_mut().enumerate().skip(lo).take(10) {
+            moving |= ease_to(v, if Some(k) == sel { 1.0 } else { 0.0 }, dt);
         }
         if moving {
             ui::animating();
         }
-        (st.scroll, st.pop.clone())
+        let lo = st.scroll.floor().max(0.0) as usize;
+        (st.scroll, st.pop.iter().skip(lo).take(7).copied().collect::<Vec<f32>>())
     });
     let first = scroll.floor().max(0.0) as usize;
-    for (k, it) in items.iter().enumerate().skip(first).take(6) {
+    for k in first..n.min(first + 7) {
         let x = 96.0 + (k as f32 - scroll) * PITCH;
         if x > 1920.0 {
             break;
@@ -1724,9 +1980,31 @@ fn draw_suggestions_at(p: plx_ui::Painter, m: &dyn plx_machine::machine::Measure
         if alpha <= 0.0 {
             continue;
         }
-        let pop = pops.get(k).copied().unwrap_or(0.0);
+        let Some(t) = tile(k) else { continue };
+        let pop = pops.get(k - first).copied().unwrap_or(0.0);
         let grow = 12.0 * pop;
         let r = Rect::new(x - grow, y - grow, W + 2.0 * grow, H + 2.0 * grow);
+        out.push((k, r));
+        let panel = Rect::new(r.x, r.y + r.h + 6.0, r.w, 104.0);
+        let bg = mix([1.0, 1.0, 1.0, 0.08], [0.94, 0.94, 0.96, 1.0], pop);
+        let ink = with_alpha(mix([1.0, 1.0, 1.0, 0.92], [0.09, 0.09, 0.11, 1.0], pop), alpha);
+        let dim = with_alpha(mix(ui::DIM, [0.09, 0.09, 0.11, 0.66], pop), alpha);
+        let tw = panel.w - 32.0;
+        let it = match t {
+            Tile::Shuffle(on) => {
+                // The playlist's Shuffle: its icon on the card (in the accent colour while on),
+                // its name and state under it.
+                ui::fill(p, r, 14.0, with_alpha(mix([1.0, 1.0, 1.0, 0.08], [1.0, 1.0, 1.0, 0.2], pop), alpha));
+                let sz = 96.0;
+                let ink_icon = if on { ui::accent() } else { ui::WHITE };
+                ui::icon::draw(p, ui::icon::Kind::Shuffle, Rect::new(r.x + (r.w - sz) / 2.0, r.y + (r.h - sz) / 2.0, sz, sz), with_alpha(ink_icon, alpha), false);
+                ui::fill(p, panel, 14.0, with_alpha(bg, alpha));
+                ui::text(p, "Shuffle", panel.x + 16.0, panel.y + 12.0, 24, ink, ui::ALIGN_LEFT, true);
+                ui::text(p, if on { "On" } else { "Off" }, panel.x + 16.0, panel.y + 52.0, 20, dim, ui::ALIGN_LEFT, false);
+                continue;
+            }
+            Tile::Video(it) => it,
+        };
         let url = it.thumbnail.clone().unwrap_or_default();
         let (tex, _, _) = plx_ui::tex::resolve_wh_on(0, &url, 0, 0, false);
         if tex != 0 {
@@ -1740,15 +2018,17 @@ fn draw_suggestions_at(p: plx_ui::Painter, m: &dyn plx_machine::machine::Measure
             ui::fill(p, br, 6.0, [0.0, 0.0, 0.0, 0.78 * alpha]);
             ui::text(p, b, br.x + bw / 2.0, br.y + 4.0, 22, with_alpha(ui::WHITE, alpha), ui::ALIGN_CENTER, true);
         }
-        let panel = Rect::new(r.x, r.y + r.h + 6.0, r.w, 104.0);
-        let bg = mix([1.0, 1.0, 1.0, 0.08], [0.94, 0.94, 0.96, 1.0], pop);
-        let ink = mix([1.0, 1.0, 1.0, 0.92], [0.09, 0.09, 0.11, 1.0], pop);
-        let dim = mix(ui::DIM, [0.09, 0.09, 0.11, 0.66], pop);
+        // The playing video: a play mark in its corner and a bar along its foot in the accent
+        // colour.
+        if playing == Some(k) {
+            ui::fill(p, Rect::new(r.x, r.y + r.h - 8.0, r.w, 8.0), 4.0, with_alpha(ui::accent(), alpha));
+            let c = Rect::new(r.x + 12.0, r.y + 12.0, 52.0, 52.0);
+            ui::fill(p, c, 26.0, [0.0, 0.0, 0.0, 0.7 * alpha]);
+            ui::icon::draw(p, ui::icon::Kind::Play, Rect::new(c.x + 15.0, c.y + 13.0, 26.0, 26.0), with_alpha(ui::WHITE, alpha), true);
+        }
         ui::fill(p, panel, 14.0, with_alpha(bg, alpha));
-        let tw = panel.w - 32.0;
         let detail = it.lines.join(" \u{2022} ");
-        let (ink, dim) = (with_alpha(ink, alpha), with_alpha(dim, alpha));
-        if k == sel {
+        if Some(k) == sel {
             ui::glide(p, m, &it.title, panel.x + 16.0, panel.y + 12.0, tw, 24, ink, true, ui::GLIDE_CARD_TITLE);
             ui::glide(p, m, &detail, panel.x + 16.0, panel.y + 52.0, tw, 20, dim, false, ui::GLIDE_CARD_DETAIL);
         } else {
@@ -1756,6 +2036,7 @@ fn draw_suggestions_at(p: plx_ui::Painter, m: &dyn plx_machine::machine::Measure
             ui::text_cut(p, m, &detail, panel.x + 16.0, panel.y + 52.0, tw, 20, dim, ui::ALIGN_LEFT, false);
         }
     }
+    out
 }
 
 /// The playing video has chapters.
@@ -1792,12 +2073,6 @@ fn refusal_text(reason: &str) -> Option<&'static str> {
 /// The first video in "Play next" other than the one playing.
 fn queued_next(cx: &Cx<'_, YtHost>, current: &str) -> Option<String> {
     cx.views.store.play_next.iter().map(|v| &v.video_id).find(|v| v.as_str() != current).cloned()
-}
-
-/// The video plays from a playlist on this TV (the opened list is one, and holds it).
-fn in_local_list(cx: &Cx<'_, YtHost>, current: &str) -> bool {
-    let s = cx.views.store;
-    s.queue_local && s.queue.iter().any(|v| v == current)
 }
 
 /// The playing video as a record for a playlist on this TV.
