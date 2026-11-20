@@ -762,7 +762,11 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
         if pres != PRES_NONE {
             let content = pres + shift;
             ctl.playhead_ns.store(content, Relaxed);
+            // "Video details": the downloaded video (in the lane, or fed) past the playhead.
+            let buffered = crate::video_details::ahead_ms(content, &[video.stats().1, vf.fed_max.map_or(0, |m| m + shift)]);
             let mut st = sh.status.lock().unwrap();
+            st.details.buffered_ms = buffered;
+            st.details.speed_bps = ctl.speed();
             if live {
                 st.live_edge_ms = (edge.load(Relaxed) / 1_000_000) as u64;
             }

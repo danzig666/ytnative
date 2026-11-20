@@ -188,6 +188,7 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
                 l.extend(language_codes());
                 cycle_str(&l, &mut s.audio_language, d);
             }),
+            Opt("Video details", |s| on_off(s.video_details), |s, _| s.video_details = !s.video_details),
         ],
         SettingsPage::Subtitles => vec![
             Opt("Subtitles", |s| on_off(s.subtitles), |s, _| s.subtitles = !s.subtitles),

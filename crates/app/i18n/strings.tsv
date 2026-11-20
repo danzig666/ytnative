@@ -516,3 +516,21 @@ Update available	Frissítés érhető el	Aktualisierung verfügbar	Actualizació
 Version {} is available	Elérhető a(z) {} verzió	Version {} ist verfügbar	La versión {} está disponible	La version {} est disponible	Доступна версия {}
 Install now (closes the app)	Telepítés most (az alkalmazás bezárul)	Jetzt installieren (schließt die App)	Instalar ahora (cierra la aplicación)	Installer maintenant (ferme l'application)	Установить сейчас (приложение закроется)
 Later	Később	Später	Más tarde	Plus tard	Позже
+Video details	Videó részletei	Videodetails	Detalles del vídeo	Détails de la vidéo	Сведения о видео
+Engine B	B motor	Engine B	Motor B	Moteur B	Движок B
+Simulator, no video	Szimulátor, nincs videó	Simulator, kein Video	Simulador, sin vídeo	Simulateur, pas de vidéo	Симулятор, без видео
+Video codec	Videokodek	Videocodec	Códec de vídeo	Codec vidéo	Видеокодек
+Resolution	Felbontás	Auflösung	Resolución	Résolution	Разрешение
+Frame rate	Képkockasebesség	Bildrate	Velocidad de fotogramas	Fréquence d'images	Частота кадров
+Video bitrate	Videó bitsebessége	Video-Bitrate	Tasa de bits del vídeo	Débit vidéo	Битрейт видео
+Audio codec	Hangkodek	Audiocodec	Códec de audio	Codec audio	Аудиокодек
+Audio bitrate	Hang bitsebessége	Audio-Bitrate	Tasa de bits del audio	Débit audio	Битрейт звука
+Buffered ahead	Előre pufferelve	Vorausgepuffert	Búfer por delante	Mémoire tampon en avance	Буфер впереди
+Connection speed	Kapcsolat sebessége	Verbindungsgeschwindigkeit	Velocidad de conexión	Vitesse de connexion	Скорость соединения
+Video ID	Videóazonosító	Video-ID	ID del vídeo	Identifiant de la vidéo	Идентификатор видео
+None	Nincs	Keines	Ninguno	Aucun	Нет
+unknown	ismeretlen	unbekannt	desconocido	inconnu	неизвестно
+{} megabits per second	{} megabit másodpercenként	{} Megabit pro Sekunde	{} megabits por segundo	{} mégabits par seconde	{} мегабит в секунду
+{} kilobits per second	{} kilobit másodpercenként	{} Kilobit pro Sekunde	{} kilobits por segundo	{} kilobits par seconde	{} килобит в секунду
+{} frames per second	{} képkocka másodpercenként	{} Bilder pro Sekunde	{} fotogramas por segundo	{} images par seconde	{} кадров в секунду
+{} seconds	{} másodperc	{} Sekunden	{} segundos	{} secondes	{} секунды

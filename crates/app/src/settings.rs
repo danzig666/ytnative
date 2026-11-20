@@ -484,6 +484,8 @@ pub struct Settings {
     pub settings_pin: String,
     /// The TV's capabilities were read once (first start) and the playback settings set from them.
     pub device_checked: bool,
+    /// The "Video details" panel over the playing video (off by default).
+    pub video_details: bool,
 }
 
 impl Default for Settings {
@@ -596,6 +598,7 @@ impl Default for Settings {
             child_mode: false,
             settings_pin: String::new(),
             device_checked: false,
+            video_details: false,
         }
     }
 }
