@@ -10,4 +10,5 @@ pub mod pin;
 pub mod player;
 pub mod search;
 pub mod settings;
+pub mod settings_search;
 pub mod signin;

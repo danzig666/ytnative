@@ -134,6 +134,8 @@ pub enum NamePurpose {
     NewLocal(Vec<yt_core::local_playlists::Video>),
     /// Rename a playlist on this TV: (list id, current title).
     RenameLocal(String, String),
+    /// Words to look for among the settings (the search typed before, to change it).
+    SettingsSearch(String),
 }
 
 /// Changes to the playlists on this TV (made at once on the main thread, saved in the

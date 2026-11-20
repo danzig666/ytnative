@@ -516,3 +516,6 @@ Update available	Frissítés érhető el	Aktualisierung verfügbar	Actualizació
 Version {} is available	Elérhető a(z) {} verzió	Version {} ist verfügbar	La versión {} está disponible	La version {} est disponible	Доступна версия {}
 Install now (closes the app)	Telepítés most (az alkalmazás bezárul)	Jetzt installieren (schließt die App)	Instalar ahora (cierra la aplicación)	Installer maintenant (ferme l'application)	Установить сейчас (приложение закроется)
 Later	Később	Später	Más tarde	Plus tard	Позже
+Search settings	Keresés a beállításokban	Einstellungen durchsuchen	Buscar en los ajustes	Rechercher dans les paramètres	Поиск в настройках
+Press OK and type part of an option's name.	Nyomd meg az OK gombot, és írd be egy beállítás nevének egy részét.	Drücke OK und tippe einen Teil des Namens einer Option ein.	Pulsa OK y escribe parte del nombre de una opción.	Appuyez sur OK et saisissez une partie du nom d'une option.	Нажмите OK и введите часть названия параметра.
+No option matches “{}”.	Egy beállítás sem felel meg ennek: „{}”.	Keine Option passt zu „{}“.	Ninguna opción coincide con «{}».	Aucune option ne correspond à « {} ».	Нет параметров, подходящих под «{}».
