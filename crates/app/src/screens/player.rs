@@ -101,6 +101,16 @@ impl PlayerScreen {
         }
     }
 
+    /// How visible the "Video details" panel is now (0: not drawn). Never over the audio-only
+    /// black screen, and only for a while after a key press (`video_details::opacity`): a fixed
+    /// bright box must not stay on the OLED panel for a whole video.
+    fn details_opacity(&self, cx: &Cx<'_, YtHost>) -> f32 {
+        if !cx.views.store.settings.video_details || cx.views.player.audio_only {
+            return 0.0;
+        }
+        crate::video_details::opacity(cx.views.now_ms.wrapping_sub(self.last_key_ms))
+    }
+
     fn show_hud(&mut self, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
         self.hud = true;
         // 0 = never hide.
@@ -466,6 +476,9 @@ impl Machine<YtHost> for PlayerScreen {
                 Handled::Yes
             }
             ScreenEvent::Uncover => {
+                // Back from a menu (keys pressed there): the video details show again, the
+                // dimming timeout starts over.
+                self.last_key_ms = cx.views.now_ms;
                 self.show_hud(cx, fx);
                 Handled::Yes
             }
@@ -521,7 +534,7 @@ impl Machine<YtHost> for PlayerScreen {
                 // Always keep ticking: the end of the video must be noticed with the controls
                 // hidden too (it used to wait for a key press). Redraw only when something shows.
                 fx.push(Fx::Timer { id: T_TICK, after_ms: 500 });
-                if self.hud || p.phase != Phase::Playing || cx.views.store.settings.video_details {
+                if self.hud || p.phase != Phase::Playing || self.details_opacity(cx) > 0.0 {
                     fx.invalidate(plx_machine::present::Provenance::Timer(T_TICK));
                 }
                 Handled::Yes
@@ -921,7 +934,9 @@ impl Screen<YtHost> for PlayerScreen {
         // Everything below (captions, OSD, toasts) is dimmed over HDR video.
         let _dim = ui::HdrDim::begin(ui::hdr_playing(st));
         if !no_picture {
-            crate::ambient::draw(p, st, cx.views.store.settings.ambient_mode, cx.views.now_ms);
+            // Not around the audio-only black screen: off there, it lights no bars and fetches no
+            // storyboard sheets.
+            crate::ambient::draw(p, st, cx.views.store.settings.ambient_mode && !st.audio_only, cx.views.now_ms);
         }
         let ex = st.extras.clone();
         // Screen dimming: black over the picture (and its subtitles) at the chosen amount.
@@ -964,13 +979,18 @@ impl Screen<YtHost> for PlayerScreen {
                 }
             }
         }
-        if dim_alpha > 0.0 {
-            ui::fill(p, Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, [0.0, 0.0, 0.0, dim_alpha]);
-        }
-        if cx.views.store.settings.video_details && !ui::comments_open() {
+        // Under the screen dimming, like the captions; it fades out a while after the last key.
+        let details = self.details_opacity(cx);
+        if details > 0.0 && !ui::comments_open() {
             // Below the YouTube style's title while its controls are up.
             let top = if self.hud && yt_style(cx) && self.sugg_sel.is_none() { 240.0 } else { 40.0 };
-            crate::video_details::draw(p, f.measure, st, top);
+            crate::video_details::draw(p, f.measure, st, top, details);
+            if details < 1.0 {
+                ui::animating();
+            }
+        }
+        if dim_alpha > 0.0 {
+            ui::fill(p, Rect::new(0.0, 0.0, 1920.0, 1080.0), 0.0, [0.0, 0.0, 0.0, dim_alpha]);
         }
         if ui::comments_open() {
             return;

@@ -543,7 +543,10 @@ fn run(
         s.author = resolved.author.clone();
         s.duration_ms = resolved.length_secs * 1000;
         s.paid_promotion = resolved.raw.get("paidContentOverlay").is_some();
-        s.loudness_db = yt_core::loudness::loudness_db(&resolved.raw, None);
+        // The track engine A's manifest plays (a dubbed track has a loudness of its own); a live
+        // stream plays YouTube's HLS renditions, which the player response's figure describes.
+        let audio = if resolved.is_live { None } else { resolved.manifest_audio(&prefs) };
+        s.loudness_db = yt_core::loudness::loudness_db(&resolved.raw, audio);
         // Where it will start, so a BACK before the first position event saves this, not 0.
         s.position_ms = start_ms.unwrap_or(0);
     }
@@ -603,7 +606,20 @@ fn run(
     std::fs::create_dir_all("/tmp/ytnative")?;
     // Live: the HLS master reduced to H.264 renditions (DASH-from-formats only works for VOD).
     // Needs TV validation: LG's hlsdemux2 stalled on YouTube's VOD TS playlists in early tests.
+    // What the panel shows of engine A's choice, written only while this start is still the
+    // current one (a worker left behind must not write into the next video's status).
+    let set_formats = |f: crate::video_details::Formats| -> bool {
+        let mut s = status.lock().unwrap();
+        if !live() {
+            return false;
+        }
+        s.details.formats = Arc::new(f);
+        true
+    };
     let path = if let Some(mpd) = audio_mpd {
+        if !set_formats(crate::video_details::Formats::from_mpd(crate::video_details::Engine::System, &mpd)) {
+            return Ok(false);
+        }
         let path = "/tmp/ytnative/play.mpd";
         std::fs::write(path, mpd)?;
         crate::log("player: audio only (a manifest without video)");
@@ -620,11 +636,15 @@ fn run(
         let path = "/tmp/ytnative/live.m3u8";
         std::fs::write(path, master)?;
         crate::log("player: live stream via HLS");
-        status.lock().unwrap().details.formats = Arc::new(crate::video_details::Formats { engine: crate::video_details::Engine::System, ..Default::default() });
+        if !set_formats(crate::video_details::Formats { engine: crate::video_details::Engine::System, ..Default::default() }) {
+            return Ok(false);
+        }
         path
     } else {
         let mpd = resolved.mpd(prefs).ok_or_else(|| anyhow::anyhow!("no H.264 streams for this video"))?;
-        status.lock().unwrap().details.formats = Arc::new(crate::video_details::Formats::from_mpd(crate::video_details::Engine::System, &mpd));
+        if !set_formats(crate::video_details::Formats::from_mpd(crate::video_details::Engine::System, &mpd)) {
+            return Ok(false);
+        }
         let path = "/tmp/ytnative/play.mpd";
         std::fs::write(path, mpd)?;
         path

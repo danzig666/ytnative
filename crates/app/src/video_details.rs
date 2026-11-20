@@ -257,26 +257,45 @@ const ROW: f32 = 36.0;
 const SIZE: i32 = 24;
 const LABEL_W: f32 = 270.0;
 
-/// Draws the panel with its top at `top` (the caller keeps it clear of the controls). Under the
-/// player's [`crate::ui::HdrDim`], like the other player overlays.
-pub fn draw(p: plx_ui::Painter, m: &dyn plx_machine::machine::Measure, st: &Status, top: f32) {
+/// The panel shows for this long after the last key press (or the start of the video), then
+/// fades out until the next key: on an OLED panel its box and labels must not stay put for the
+/// whole video. Any key brings it back.
+pub const SHOW_MS: u32 = 15_000;
+/// How long the fade out takes.
+pub const FADE_MS: u32 = 1_000;
+
+/// The panel's opacity `quiet_ms` after the last key press: whole for [`SHOW_MS`], then down to
+/// nothing over [`FADE_MS`].
+pub fn opacity(quiet_ms: u32) -> f32 {
+    match quiet_ms.checked_sub(SHOW_MS) {
+        None => 1.0,
+        Some(t) if t >= FADE_MS => 0.0,
+        Some(t) => 1.0 - t as f32 / FADE_MS as f32,
+    }
+}
+
+/// Draws the panel with its top at `top` (the caller keeps it clear of the controls) at opacity
+/// `alpha` ([`opacity`]). Under the player's [`crate::ui::HdrDim`] and its screen dimming, like
+/// the other player overlays.
+pub fn draw(p: plx_ui::Painter, m: &dyn plx_machine::machine::Measure, st: &Status, top: f32, alpha: f32) {
     use crate::ui;
+    let fade = |c: [f32; 4]| [c[0], c[1], c[2], c[3] * alpha];
     let rows = rows(st);
     let h = PAD * 2.0 + 44.0 + rows.len() as f32 * ROW;
-    ui::fill(p, Rect::new(X, top, W, h), 12.0, [0.0, 0.0, 0.0, 0.6]);
-    ui::text(p, "Video details", X + PAD, top + PAD, 26, ui::WHITE, ui::ALIGN_LEFT, true);
+    ui::fill(p, Rect::new(X, top, W, h), 12.0, fade([0.0, 0.0, 0.0, 0.6]));
+    ui::text(p, "Video details", X + PAD, top + PAD, 26, fade(ui::WHITE), ui::ALIGN_LEFT, true);
     let vx = X + PAD + LABEL_W;
     let vw = W - PAD * 2.0 - LABEL_W;
     for (i, (label, val)) in rows.iter().enumerate() {
         let y = top + PAD + 44.0 + i as f32 * ROW;
-        ui::text_cut(p, m, crate::i18n::tr(label), X + PAD, y, LABEL_W - 12.0, SIZE, ui::DIM, ui::ALIGN_LEFT, false);
+        ui::text_cut(p, m, crate::i18n::tr(label), X + PAD, y, LABEL_W - 12.0, SIZE, fade(ui::DIM), ui::ALIGN_LEFT, false);
         let (s, ink) = match val {
             Val::Unknown => (crate::i18n::tr("unknown").to_string(), ui::FAINT),
             Val::Raw(s) => (s.clone(), ui::WHITE),
             Val::Phrase(s) => (crate::i18n::tr(s).to_string(), ui::WHITE),
             Val::Template(t, n) => (crate::i18n::tr(t).replace("{}", n), ui::WHITE),
         };
-        ui::text_cut(p, m, &s, vx, y, vw, SIZE, ink, ui::ALIGN_LEFT, false);
+        ui::text_cut(p, m, &s, vx, y, vw, SIZE, fade(ink), ui::ALIGN_LEFT, false);
     }
 }
 
@@ -376,6 +395,15 @@ mod tests {
         assert_eq!(ahead_ms(10_000_000_000, &[0]), None, "an empty lane reaches nowhere");
         assert_eq!(ahead_ms(10_000_000_000, &[15_000_000_000, 22_500_000_000]), Some(12_500));
         assert_eq!(ahead_ms(10_000_000_000, &[9_000_000_000]), Some(0));
+    }
+
+    #[test]
+    fn the_panel_fades_out_after_a_while_without_keys() {
+        assert_eq!(opacity(0), 1.0);
+        assert_eq!(opacity(SHOW_MS), 1.0);
+        assert!((opacity(SHOW_MS + FADE_MS / 2) - 0.5).abs() < 0.01);
+        assert_eq!(opacity(SHOW_MS + FADE_MS), 0.0);
+        assert_eq!(opacity(u32::MAX), 0.0);
     }
 
     #[test]

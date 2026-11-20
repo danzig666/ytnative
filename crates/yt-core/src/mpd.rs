@@ -72,6 +72,32 @@ pub fn build_audio_only(formats: &[Value], duration_ms: u64, audio_track: Option
     built.map(|(m, _, na)| (m, na))
 }
 
+/// The audio formats a manifest built with `audio_track` offers (the same choice as
+/// [`build_with_audio`] / [`build_audio_only`], falling back to the default track when the id
+/// matches nothing): what the player plays, so its loudness is the one to level by.
+pub fn audio_formats<'a>(formats: &'a [Value], audio_track: Option<&str>) -> Vec<&'a Value> {
+    let pick = |t: Option<&str>| formats.iter().filter(|f| usable(f) && audio_of_track(f, t)).collect::<Vec<_>>();
+    match pick(audio_track) {
+        v if v.is_empty() && audio_track.is_some() => pick(None),
+        v => v,
+    }
+}
+
+/// A format the manifest can use: a direct URL, both ranges and a codec.
+fn usable(f: &Value) -> bool {
+    f["url"].is_string() && range(f, "initRange").is_some() && range(f, "indexRange").is_some() && f["mimeType"].as_str().and_then(codecs).is_some()
+}
+
+/// An AAC (MP4) audio format of `audio_track` (`None`: the default track), not the DRC variant.
+fn audio_of_track(f: &Value, audio_track: Option<&str>) -> bool {
+    f["mimeType"].as_str().is_some_and(|m| m.starts_with("audio/mp4"))
+        && f["isDrc"].as_bool() != Some(true)
+        && match audio_track {
+            Some(id) => f["audioTrack"]["id"].as_str() == Some(id),
+            None => f["audioTrack"]["audioIsDefault"].as_bool() != Some(false),
+        }
+}
+
 /// A video format's quality rung: its short side (a vertical 1080p video is 1080x1920).
 pub fn rung(f: &Value) -> u64 {
     let h = f["height"].as_u64().unwrap_or(0);
@@ -127,13 +153,7 @@ fn build_inner(
                 f["width"].as_u64().unwrap_or(0), f["fps"].as_u64().unwrap_or(30)
             );
             nv += 1;
-        } else if mime.starts_with("audio/mp4")
-            && f["isDrc"].as_bool() != Some(true)
-            && match audio_track {
-                Some(id) => f["audioTrack"]["id"].as_str() == Some(id),
-                None => f["audioTrack"]["audioIsDefault"].as_bool() != Some(false),
-            }
-        {
+        } else if audio_of_track(f, audio_track) {
             audio += &format!(
                 "<Representation id=\"{itag}\" codecs=\"{c}\" bandwidth=\"{bw}\" audioSamplingRate=\"{}\"><AudioChannelConfiguration schemeIdUri=\"urn:mpeg:dash:23003:3:audio_channel_configuration:2011\" value=\"{}\"/>{seg}</Representation>\n",
                 f["audioSampleRate"].as_str().unwrap_or("44100"),
@@ -202,5 +222,22 @@ mod tests {
         // An unknown track falls back to the default one; no audio at all is no manifest.
         assert!(build_audio_only(&f, 60_000, Some("xx.9")).is_some());
         assert!(build_audio_only(&f[..2], 60_000, None).is_none());
+    }
+
+    #[test]
+    fn the_audio_formats_are_those_of_the_chosen_track() {
+        let a = |itag: u64, id: &str, default: bool, drc: bool| {
+            let mut f = fmt(itag, "audio/mp4; codecs=\"mp4a.40.2\"", 0, 0);
+            f["audioTrack"] = json!({"id": id, "audioIsDefault": default});
+            f["isDrc"] = json!(drc);
+            f
+        };
+        let f = [fmt(137, "video/mp4; codecs=\"avc1.640028\"", 1920, 1080), a(140, "en.4", true, false), a(141, "en.4", true, true), a(150, "de.3", false, false)];
+        let itags = |t: Option<&str>| audio_formats(&f, t).iter().map(|f| f["itag"].as_u64().unwrap()).collect::<Vec<_>>();
+        assert_eq!(itags(None), [140]);
+        assert_eq!(itags(Some("de.3")), [150]);
+        assert_eq!(itags(Some("xx.9")), [140], "an unknown track is the default one");
+        // The manifest offers the same.
+        assert!(build_audio_only(&f, 60_000, Some("de.3")).unwrap().0.contains("id=\"150\""));
     }
 }

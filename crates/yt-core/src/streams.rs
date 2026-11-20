@@ -201,7 +201,7 @@ impl Resolved {
             .iter()
             .find_map(|f| f["approxDurationMs"].as_str()?.parse::<u64>().ok())
             .unwrap_or(self.length_secs * 1000);
-        let track = prefs.audio_track.clone().or_else(|| prefs.audio_language.as_deref().and_then(|l| self.audio_track_for(l)));
+        let track = self.chosen_track(&prefs);
         mpd::build_with_audio(&self.adaptive, dur, prefs.codec, prefs.min_height, prefs.max_height, track.as_deref()).map(|m| m.0)
     }
 
@@ -213,8 +213,20 @@ impl Resolved {
             .iter()
             .find_map(|f| f["approxDurationMs"].as_str()?.parse::<u64>().ok())
             .unwrap_or(self.length_secs * 1000);
-        let track = prefs.audio_track.clone().or_else(|| prefs.audio_language.as_deref().and_then(|l| self.audio_track_for(l)));
+        let track = self.chosen_track(prefs);
         mpd::build_audio_only(&self.adaptive, dur, track.as_deref()).map(|m| m.0)
+    }
+
+    /// The audio track the manifests play: the one picked in the menu, else the preferred
+    /// language's, else (`None`) the default track.
+    fn chosen_track(&self, prefs: &Prefs) -> Option<String> {
+        prefs.audio_track.clone().or_else(|| prefs.audio_language.as_deref().and_then(|l| self.audio_track_for(l)))
+    }
+
+    /// An audio format of the track [`mpd`](Self::mpd) and [`audio_mpd`](Self::audio_mpd) play
+    /// (they offer that track's AAC formats; all share its loudness).
+    pub fn manifest_audio(&self, prefs: &Prefs) -> Option<&Value> {
+        mpd::audio_formats(&self.adaptive, self.chosen_track(prefs).as_deref()).into_iter().next()
     }
 
     /// The audio track id in language `lang` ("de" matches "de" and "de-DE"; ids look like

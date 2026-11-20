@@ -211,6 +211,12 @@ fn step_setting(act: &Act, s: &mut crate::settings::Settings, dir: i32) {
 }
 
 /// The speed `dir` steps from `current` in the speed list (stops at its ends).
+/// Whether a held Left / Right keeps stepping the row. A switch does not: held, it would flip on
+/// and off with every repeat, and "Audio only" restarts the stream at each flip.
+fn repeats(act: &Act) -> bool {
+    !matches!(act, Act::AudioOnly | Act::VideoDetails)
+}
+
 fn step_speed(current: f32, dir: i32) -> f32 {
     let i = crate::settings::speed_index(current) as i32;
     SPEEDS[(i + dir).clamp(0, SPEEDS.len() as i32 - 1) as usize]
@@ -1011,10 +1017,10 @@ impl Machine<YtHost> for MenuScreen {
                 Handled::Yes
             }
             ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: Key::Left | Key::Right, .. }, .. }) if self.choice.is_some() => Handled::Yes,
-            ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: key @ (Key::Left | Key::Right), edge: Edge::Down | Edge::Repeat, .. }, .. }) => {
+            ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: key @ (Key::Left | Key::Right), edge: edge @ (Edge::Down | Edge::Repeat), .. }, .. }) => {
                 if let Some(i) = self.list.focused(cx, n) {
                     let act = self.acts[i].1.clone();
-                    if self.value(&act, cx).is_some() {
+                    if self.value(&act, cx).is_some() && (*edge == Edge::Down || repeats(&act)) {
                         self.run(&act, if *key == Key::Left { -1 } else { 1 }, cx, fx);
                     }
                 }
@@ -1119,6 +1125,13 @@ impl Screen<YtHost> for MenuScreen {
 mod tests {
     use super::*;
     use crate::settings::Settings;
+
+    #[test]
+    fn a_held_key_does_not_flip_switches() {
+        assert!(!repeats(&Act::AudioOnly));
+        assert!(!repeats(&Act::VideoDetails));
+        assert!(repeats(&Act::SubSize));
+    }
 
     const VALUED: [Act; 7] = [Act::MaxQuality, Act::Sleep, Act::SubSize, Act::SubColor, Act::SubFont, Act::SubStyle, Act::RepeatMode];
 
