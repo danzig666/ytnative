@@ -16,6 +16,7 @@ pub mod gdrive;
 pub mod innertube;
 pub mod local_playlists;
 pub mod live_chat;
+pub mod loudness;
 pub mod lounge;
 pub mod memory;
 pub mod model;

@@ -492,6 +492,9 @@ pub struct Settings {
     /// A live stream's player offers its live chat (beside the video). Off by default: the chat
     /// is polled every few seconds while its panel is open.
     pub live_chat: bool,
+    /// "Same volume for every video": loud videos are turned down to YouTube's reference level
+    /// (`loudness.rs`), as YouTube's own players do.
+    pub same_volume: bool,
 }
 
 impl Default for Settings {
@@ -612,6 +615,7 @@ impl Default for Settings {
             audio_only: false,
             video_details: false,
             live_chat: false,
+            same_volume: true,
         }
     }
 }

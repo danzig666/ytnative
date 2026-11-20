@@ -172,6 +172,7 @@ impl FeedPlayer {
                 formats: Arc::new(crate::video_details::Formats::chosen(crate::video_details::Engine::Feed, &choice.video, choice.audio.as_ref())),
                 ..Default::default()
             },
+            loudness_db: yt_core::loudness::loudness_db(&resolved.raw, choice.audio.as_ref()),
             ..Default::default()
         };
         drop(st);

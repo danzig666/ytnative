@@ -144,6 +144,10 @@ pub struct Status {
     pub audio_only: bool,
     /// What the "Video details" panel shows: the formats played, the buffer, the connection speed.
     pub details: crate::video_details::Details,
+    /// How much louder than YouTube's reference level the played audio is, in decibels (`None`:
+    /// not reported); the "Same volume for every video" option turns the pipeline down by it.
+    #[cfg_attr(windows, allow(dead_code))] // the simulator has no pipeline to turn down
+    pub loudness_db: Option<f32>,
 }
 
 #[cfg(not(windows))]
@@ -165,6 +169,9 @@ pub struct Player {
     /// Bumped by every start / stop: a resolve worker whose number is no longer current belongs to
     /// a video that was left and must not touch the status, load a pipeline or hand off.
     gen: Arc<std::sync::atomic::AtomicU64>,
+    /// The "Same volume for every video" setting (applied in `tick`).
+    pub same_volume: bool,
+    leveller: crate::loudness::Leveller,
 }
 
 #[cfg(not(windows))]
@@ -205,6 +212,8 @@ impl Player {
             feed: crate::feed::FeedPlayer::new(),
             handoff: Default::default(),
             gen: Default::default(),
+            same_volume: true,
+            leveller: Default::default(),
         }
     }
 
@@ -340,7 +349,28 @@ impl Player {
         if self.feed.active() {
             self.feed.tick();
         }
+        self.level_volume();
         crate::vplane::tick();
+    }
+
+    /// Sets the playing pipeline's volume from the video's loudness (once per pipeline, and again
+    /// when the option changes).
+    fn level_volume(&mut self) {
+        let gen = self.gen.load(std::sync::atomic::Ordering::SeqCst);
+        let mid = self.media_id.lock().unwrap().clone();
+        let pipeline = if self.feed.active() { Some((gen, 'B')) } else { mid.as_ref().map(|_| (gen, 'A')) };
+        let loudness = self.status.lock().unwrap().loudness_db;
+        let Some(volume) = self.leveller.step(pipeline, self.same_volume, loudness) else { return };
+        crate::log(&format!("player: loudness {:.1} dB -> volume {volume}", loudness.unwrap_or(0.0)));
+        if self.feed.active() {
+            self.feed.set_volume(volume);
+        } else if let (Some(luna), Some(mid)) = (self.luna, mid) {
+            let payload = format!(r#"{{"mediaId":{},"volume":{volume}}}"#, json_str(&mid));
+            let _ = plx_base::task::spawn("media", move || {
+                let r = luna.call("luna://com.webos.media/setVolume", &payload);
+                crate::log(&format!("player: setVolume -> {r}"));
+            });
+        }
     }
 
     fn fail(&mut self, why: &str) {
@@ -513,6 +543,7 @@ fn run(
         s.author = resolved.author.clone();
         s.duration_ms = resolved.length_secs * 1000;
         s.paid_promotion = resolved.raw.get("paidContentOverlay").is_some();
+        s.loudness_db = yt_core::loudness::loudness_db(&resolved.raw, None);
         // Where it will start, so a BACK before the first position event saves this, not 0.
         s.position_ms = start_ms.unwrap_or(0);
     }

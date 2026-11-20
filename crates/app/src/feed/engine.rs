@@ -515,6 +515,9 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
     // SetPlayRate before the first frame stalls the picture on the C3; youtube-webos-cobalt-adfree
     // found the same), after every Play, seek and reload.
     let mut wanted: f32 = 1.0;
+    // The pipeline volume asked for (loudness levelling); a reload starts at full volume, so it
+    // is sent again after every Load.
+    let mut volume: Option<i32> = None;
     // Some TVs accept SetPlayRate and keep playing at normal speed: after a speed change the
     // reported position is timed against the clock, and a speed that did not take is refused.
     let mut probe_rate = false;
@@ -575,6 +578,7 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
                 }
                 Cmd::Seek(ms) => seek_to = Some(ms), // coalesce: the last one wins
                 Cmd::Volume(v) => {
+                    volume = Some(v);
                     sys::set_volume(v);
                 }
                 Cmd::Rate(r) => {
@@ -674,6 +678,9 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
                 }
                 pipe.close(sh);
                 pipe = Pipe::open(&payload, sh, load_wait)?;
+                if let Some(v) = volume {
+                    sys::set_volume(v);
+                }
                 shift = k.max(0);
                 base = 0;
             }

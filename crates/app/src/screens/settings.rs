@@ -299,6 +299,7 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
             }),
             Opt("Audio only", |s| on_off(s.audio_only), |s, _| s.audio_only = !s.audio_only),
             Opt("Video details", |s| on_off(s.video_details), |s, _| s.video_details = !s.video_details),
+            Opt("Same volume for every video", |s| on_off(s.same_volume), |s, _| s.same_volume = !s.same_volume),
         ],
         SettingsPage::Subtitles => vec![
             Opt("Subtitles", |s| on_off(s.subtitles), |s, _| s.subtitles = !s.subtitles),

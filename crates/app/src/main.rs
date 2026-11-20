@@ -21,6 +21,8 @@ mod relaunch;
 #[cfg(not(windows))]
 mod voice;
 mod lounge;
+#[cfg_attr(windows, allow(dead_code))] // applied by the TV player only
+mod loudness;
 mod next_up;
 mod playback_rules;
 mod problem_report;

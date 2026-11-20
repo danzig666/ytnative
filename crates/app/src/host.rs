@@ -1644,6 +1644,7 @@ impl Rig<YtHost> for AppRig {
                     self.player.feed_prefs = Some(fp);
                     // A speed other than 1x on a TV whose engine B refused one: the system player.
                     self.player.prefer_feed = s.engine == "auto" && !(self.feed_no_rate && (speed - 1.0).abs() > 0.01);
+                    self.player.same_volume = s.same_volume;
                 }
                 self.player.start(video_id, self.session.clone(), prefs, extras, start);
             }
@@ -1743,6 +1744,12 @@ impl Rig<YtHost> for AppRig {
                 // "Keep Play next after closing": switched on keeps the queue now, off forgets it.
                 if self.store.settings.keep_play_next != kept {
                     save_queue(if self.store.settings.keep_play_next { self.store.play_next.clone() } else { Vec::new() });
+                }
+                // "Same volume for every video" reaches the playing video too (the player sends
+                // the new volume on its next frame).
+                #[cfg(not(windows))]
+                {
+                    self.player.same_volume = self.store.settings.same_volume;
                 }
             }
             YtFx::SignInStart => {
