@@ -51,6 +51,9 @@ pub enum YtArg {
     PlayerMenu,
     /// The list of playback speeds (the player's speed button, as in SmartTube).
     SpeedMenu,
+    /// The subscribe button of a subscribed channel: its notification bell (all, personalized,
+    /// none) and Unsubscribe, as YouTube's button offers them.
+    BellMenu,
     Accounts,
     Comments(String),
     /// Replies to one comment: (replies continuation, parent author).
@@ -96,6 +99,7 @@ impl ScreenArg for YtArg {
             YtArg::Pin(_) => 15,
             YtArg::Chapters => 16,
             YtArg::SpeedMenu => 17,
+            YtArg::BellMenu => 34,
             YtArg::NameEntry(_) => 18,
             YtArg::SuggestionMenu(_) => 19,
             YtArg::UpdatePrompt => 20,
@@ -177,6 +181,9 @@ pub enum UserAction {
     /// local bell list (the Notifications section), and its bell on YouTube is set to match.
     /// `options`: the bell choices the watch page gave, used when the channel page has none.
     Bell { channel_id: String, name: String, on: bool, options: Vec<yt_core::actions::NotificationOption> },
+    /// One of the bell's choices (`SUBSCRIPTION_NOTIFICATION_STATE_*`, as `options` name them)
+    /// for a subscribed channel; "all" also keeps it on the Notifications list here.
+    BellChoice { channel_id: String, name: String, state: String, label: String, options: Vec<yt_core::actions::NotificationOption> },
     WatchLater(String),
     /// Add (true) or remove a video from a playlist.
     Playlist { playlist_id: String, video_id: String, add: bool },
@@ -315,6 +322,7 @@ impl Mounter<YtHost> for Mount {
             YtArg::SuggestionMenu(video_id) => Box::new(screens::menu::MenuScreen::suggestion(entry, video_id, cx)),
             YtArg::PlayerMenu => Box::new(screens::menu::MenuScreen::player(entry, cx)),
             YtArg::SpeedMenu => Box::new(screens::menu::MenuScreen::speeds(entry, cx)),
+            YtArg::BellMenu => Box::new(screens::menu::MenuScreen::bell(entry, cx)),
             YtArg::UpdatePrompt => Box::new(screens::menu::MenuScreen::update(entry)),
             YtArg::Accounts => Box::new(screens::accounts::AccountsScreen::new(entry)),
             YtArg::Comments(v) => Box::new(screens::comments::CommentsScreen::new(entry, v.clone(), None)),
@@ -1278,6 +1286,14 @@ fn run_action(session: &Mutex<Option<yt_core::session::Session>>, a: &UserAction
             let msg = if *on { "You will see new videos from {} in Notifications" } else { "New videos from {} will no longer be in Notifications" };
             Ok(crate::i18n::tr(msg).replace("{}", name))
         }
+        UserAction::BellChoice { channel_id, state, label, options, .. } => with_session(session, |s| {
+            // The channel page's options are the freshest; the video page's are the fallback.
+            let fresh = s.subscribe_info(channel_id).ok().flatten().map(|i| i.notifications).filter(|n| !n.is_empty());
+            let options = fresh.as_deref().unwrap_or(options);
+            let o = options.iter().find(|o| o.state == *state).ok_or_else(|| anyhow::anyhow!("no such notification choice"))?;
+            s.set_notifications(&o.params)?;
+            Ok(crate::i18n::tr("Notifications: {}").replace("{}", crate::i18n::tr(label)))
+        }),
         UserAction::WatchLater(v) => with_session(session, |s| s.watch_later_add(v)).map(|_| "Saved to Watch later".to_string()),
         UserAction::Playlist { playlist_id, video_id, add } => with_session(session, |s| {
             if *add {
@@ -1847,6 +1863,14 @@ impl Rig<YtHost> for AppRig {
                         if let Err(e) = yt_core::bell_channels::set(channel_id, name, *on) {
                             crate::log(&format!("bell channels: {e:#}"));
                         }
+                        self.store.bell.remove(channel_id);
+                    }
+                    UserAction::BellChoice { channel_id, name, state, .. } => {
+                        let all = state == yt_core::bell_channels::STATE_ALL;
+                        if let Err(e) = yt_core::bell_channels::set(channel_id, name, all) {
+                            crate::log(&format!("bell channels: {e:#}"));
+                        }
+                        self.store.bell.insert(channel_id.clone(), state.clone());
                     }
                     // Taken out of a playlist or the history: the card leaves the page at once.
                     UserAction::Menu(m)

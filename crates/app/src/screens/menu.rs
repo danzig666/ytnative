@@ -20,6 +20,13 @@ const G: GroupId = GroupId(1);
 const BASE: u32 = 0x5000_0000;
 const PANEL: Rect = Rect::new(1300.0, 0.0, 620.0, 1080.0);
 
+/// The bell's choices in YouTube's order, with the names they are shown by.
+const BELL_CHOICES: [(&str, &str); 3] = [
+    ("SUBSCRIPTION_NOTIFICATION_STATE_ALL", "All videos"),
+    ("SUBSCRIPTION_NOTIFICATION_STATE_OCCASIONAL", "Personalized"),
+    ("SUBSCRIPTION_NOTIFICATION_STATE_OFF", "None"),
+];
+
 #[derive(Clone, Debug)]
 enum Act {
     Play(String),
@@ -93,6 +100,11 @@ enum Act {
     Close,
     /// Play at this speed (the speed list).
     SetSpeed(f32),
+    /// The bell menu: this notification choice (`SUBSCRIPTION_NOTIFICATION_STATE_*`) and the
+    /// name it is shown by.
+    SetBell(String, &'static str),
+    /// The bell menu: leave the channel.
+    Unsubscribe,
     /// Install the release the automatic check found (closes the app).
     InstallUpdate,
 }
@@ -477,6 +489,32 @@ impl MenuScreen {
         ];
         let m = Self::make(entry, tr("Update available").to_string(), acts);
         m.refocus.set(Some(1));
+        m
+    }
+
+    /// The subscribe button of a subscribed channel, as YouTube's: who to be notified of (all
+    /// videos, personalized, none; the current choice ticked) and Unsubscribe.
+    pub fn bell(entry: EntryId, cx: &Cx<'_, YtHost>) -> Self {
+        let st = cx.views.player;
+        let w = st.extras.watch.as_ref();
+        let options = w.map(|w| w.notifications.as_slice()).unwrap_or_default();
+        let current = cx.views.store.bell.get(&st.channel_id).cloned().or_else(|| options.iter().find(|o| o.selected).map(|o| o.state.clone()));
+        let mut acts = Vec::new();
+        let mut focus = 0;
+        for (state, label) in BELL_CHOICES {
+            if !options.iter().any(|o| o.state == state) {
+                continue;
+            }
+            if current.as_deref() == Some(state) {
+                focus = acts.len();
+            }
+            let shown = if current.as_deref() == Some(state) { format!("{}  \u{2713}", tr(label)) } else { tr(label).to_string() };
+            acts.push((shown, Act::SetBell(state.to_string(), label)));
+        }
+        acts.push((tr("Unsubscribe").to_string(), Act::Unsubscribe));
+        let name = w.map(|w| w.channel_name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| st.author.clone());
+        let m = Self::make(entry, name, acts);
+        m.refocus.set(Some(focus));
         m
     }
 
@@ -914,6 +952,21 @@ impl MenuScreen {
             Act::Close => fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry))),
             Act::InstallUpdate => {
                 crate::update::install();
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
+            }
+            Act::SetBell(state, label) => {
+                let st = cx.views.player;
+                let options = st.extras.watch.as_ref().map(|w| w.notifications.clone()).unwrap_or_default();
+                let name = st.extras.watch.as_ref().map(|w| w.channel_name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| st.author.clone());
+                fx.push(Fx::App(YtFx::Act(UserAction::BellChoice { channel_id: st.channel_id.clone(), name, state: state.clone(), label: label.to_string(), options })));
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
+            }
+            Act::Unsubscribe => {
+                let channel_id = cx.views.player.channel_id.clone();
+                if let Err(e) = yt_core::bell_channels::set(&channel_id, "", false) {
+                    crate::log(&format!("bell channels: {e:#}"));
+                }
+                fx.push(Fx::App(YtFx::Act(UserAction::Subscribe { channel_id, subscribe: false })));
                 fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
             }
             Act::SetSpeed(r) => {

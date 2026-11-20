@@ -260,6 +260,9 @@ pub struct Store {
     /// The viewer's rating per video id, set when they press like / dislike (YouTube's own reads
     /// lag behind).
     pub rated: HashMap<String, yt_core::watch::LikeStatus>,
+    /// The notification bell picked for a channel here (its `SUBSCRIPTION_NOTIFICATION_STATE_*`),
+    /// over what the video's page said, until YouTube's pages catch up.
+    pub bell: HashMap<String, String>,
     /// A SponsorBlock segment is offered for skipping (OK skips it).
     pub sb_offered: bool,
     /// Playlists for the "Save to playlist" picker: video id -> options.

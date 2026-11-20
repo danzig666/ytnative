@@ -358,8 +358,14 @@ impl PlayerScreen {
             }
             OSD_SAVE => {}
             OSD_SUBSCRIBE if !st.channel_id.is_empty() => {
-                let subscribed = st.extras.watch.as_ref().and_then(|w| w.subscribed).unwrap_or(false);
-                fx.push(Fx::App(YtFx::Act(crate::host::UserAction::Subscribe { channel_id: st.channel_id.clone(), subscribe: !subscribed })));
+                // Subscribed: the bell's choices and Unsubscribe, as YouTube's button offers them
+                // (only Unsubscribe when the page told no choices). Not subscribed: subscribe.
+                if subscribed_now(cx) {
+                    self.osd_sel = None;
+                    fx.push(Fx::Nav(NavOp::Present(YtArg::BellMenu)));
+                } else {
+                    fx.push(Fx::App(YtFx::Act(crate::host::UserAction::Subscribe { channel_id: st.channel_id.clone(), subscribe: true })));
+                }
             }
             OSD_SUBSCRIBE => {}
             OSD_INFO => {
