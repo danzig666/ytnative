@@ -1836,7 +1836,7 @@ mod byline_tests {
 }
 
 /// Where the player is in the playlist: "Playlist title · 3 of 15", or "3 of more than 40" while
-/// the rest of it is loading (or could not be loaded); a mix: its title alone, it has no end.
+/// the rest of it is loading (or could not be loaded); a mix, which has no end: "3 of 25 so far".
 fn list_line(q: &PlayQueue, current: &str) -> String {
     use crate::i18n::tr;
     // A long title (some run to a hundred characters) would push the position off the line.
@@ -1846,7 +1846,10 @@ fn list_line(q: &PlayQueue, current: &str) -> String {
         _ => q.title.clone(),
     };
     let of = |words: &str, k: usize, n: usize| tr(words).replacen("{}", &k.to_string(), 1).replacen("{}", &n.to_string(), 1);
-    match q.position(current).filter(|_| !q.infinite) {
+    match q.position(current) {
+        // A mix never ends: how far into what YouTube has given so far.
+        Some((k, n)) if q.infinite && n > 1 => format!("{title} \u{00B7} {}", of("{} of {} so far", k, n)),
+        Some(_) if q.infinite => title,
         Some((k, n)) if q.complete() => format!("{title} \u{00B7} {}", of("{} of {}", k, n)),
         Some((k, n)) if n > 1 => format!("{title} \u{00B7} {}", of("{} of more than {}", k, n)),
         _ => title,
