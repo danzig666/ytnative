@@ -1,3 +1,14 @@
-- New: Settings › Playback › "Keep up with live": a live stream that falls behind (after buffering or a pause) jumps back to live when it plays again
-- Fixed: "Hide mixes" now also hides mixes on Home and Subscriptions
-- Fixed: Auto-translated subtitles on auto-dubbed videos are translated from the original speech, not from the dub
+- New: Settings in two panes: the categories with icons on the left, their options on the right, on / off options as switches; Left and BACK go back to the categories, OK or a click changes a value
+- New: Search settings, at the top of the Settings categories
+- New: Audio only (Settings › Playback, or the player's options): sound alone over a black screen, no video downloaded (issue #9)
+- New: Same volume for every video (Settings › Playback, on): loud videos are turned down, as YouTube's own players do
+- New: Ambient mode (Settings › Playback, on): a soft glow in the video's colours in the black bars of 4:3 videos, Shorts and films
+- New: Video details (the player's options or Settings › Playback): the engine, codecs, resolution, bitrates, buffer and connection speed over the video
+- New: Live chat beside live streams (the Comments button), with the time of each message
+- New: Notifications in the sidebar: the newest videos of the channels whose bell is set to All videos
+- New: The subscribe button of a subscribed channel offers the notification bell (All videos, Personalized, None) and Unsubscribe, as on YouTube
+- New: Video previews (Settings › Interface, off by default): a muted preview plays in the card the focus rests on
+- New: Problem report (Settings › Account & about): the logs on screen and a QR code to download them on a phone on the same Wi-Fi, without sign-in tokens or stream addresses
+- Changed: A sidebar section opens with OK or a click; moving through the sidebar only moves the selection
+- Fixed: Keys on the search keyboard sometimes did not type when clicked with the Magic Remote pointer
+- Fixed: The Settings list jumped back after scrolling it with the pointer at the screen's edge
