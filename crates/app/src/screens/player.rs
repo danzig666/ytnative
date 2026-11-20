@@ -899,6 +899,10 @@ impl Screen<YtHost> for PlayerScreen {
                 }
             }
         }
+        // Audio only: black where the picture would be, under everything else (dimming included).
+        if st.audio_only && !no_picture {
+            crate::audio_only::draw(p, f.measure, st, cx.views.now_ms);
+        }
         // Rebuffering (the download fell behind): the picture stays, a spinner over it, and after a
         // moment the reason.
         if let (Some(since), false) = (st.buffering_since, no_picture) {

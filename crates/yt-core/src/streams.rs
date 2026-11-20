@@ -62,11 +62,13 @@ pub struct Prefs {
     /// Preferred audio language ("de", "pt-BR"): the track in it when `audio_track` is not set
     /// (None = the default track).
     pub audio_language: Option<String>,
+    /// Audio only: the manifest carries the audio track alone (see [`Resolved::audio_mpd`]).
+    pub audio_only: bool,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { min_height: 720, max_height: 1080, codec: "avc1", audio_track: None, audio_language: None }
+        Prefs { min_height: 720, max_height: 1080, codec: "avc1", audio_track: None, audio_language: None, audio_only: false }
     }
 }
 
@@ -203,6 +205,18 @@ impl Resolved {
         mpd::build_with_audio(&self.adaptive, dur, prefs.codec, prefs.min_height, prefs.max_height, track.as_deref()).map(|m| m.0)
     }
 
+    /// Audio only: a DASH manifest for engine A with the audio adaptation set alone (the same
+    /// track choice as [`mpd`](Self::mpd)), so no video is downloaded or decoded.
+    pub fn audio_mpd(&self, prefs: &Prefs) -> Option<String> {
+        let dur = self
+            .adaptive
+            .iter()
+            .find_map(|f| f["approxDurationMs"].as_str()?.parse::<u64>().ok())
+            .unwrap_or(self.length_secs * 1000);
+        let track = prefs.audio_track.clone().or_else(|| prefs.audio_language.as_deref().and_then(|l| self.audio_track_for(l)));
+        mpd::build_audio_only(&self.adaptive, dur, track.as_deref()).map(|m| m.0)
+    }
+
     /// The audio track id in language `lang` ("de" matches "de" and "de-DE"; ids look like
     /// "de-DE.3"), if the video offers one.
     pub fn audio_track_for(&self, lang: &str) -> Option<String> {
@@ -321,6 +335,16 @@ pub fn filter_hls(master: &str, max_height: u64) -> String {
     out.join("\n") + "\n"
 }
 
+/// The shortest H.264 rendition in an HLS master (its height), for audio only on a stream that
+/// has no audio-only rendition: the least video to download and decode.
+pub fn hls_lowest_height(master: &str) -> Option<u64> {
+    master
+        .lines()
+        .filter(|l| l.starts_with("#EXT-X-STREAM-INF") && l.contains("avc1"))
+        .filter_map(|l| l.split("RESOLUTION=").nth(1)?.split(',').next()?.split('x').nth(1)?.parse::<u64>().ok())
+        .min()
+}
+
 #[cfg(test)]
 mod hls_tests {
     #[test]
@@ -340,6 +364,10 @@ vp9
         assert!(f.contains("GROUP-ID=\"a1\"") && !f.contains("GROUP-ID=\"a2\""));
         let f = super::filter_hls(m, 720);
         assert!(f.contains("v720") && !f.contains("v1080"));
+        // Audio only on HLS: the shortest H.264 rendition (the VP9 one does not count).
+        assert_eq!(super::hls_lowest_height(m), Some(720));
+        assert_eq!(super::hls_lowest_height("#EXTM3U
+"), None);
     }
 }
 

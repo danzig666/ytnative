@@ -230,6 +230,8 @@ pub enum YtFx {
     Toast(String),
     /// Add the video to "Play next" (or take it out).
     PlayNext { video: yt_core::local_playlists::Video, add: bool },
+    /// Audio only on or off (the player's options): the playing video again from here.
+    SetAudioOnly(bool),
 }
 
 pub enum YtMsg {
@@ -414,6 +416,11 @@ pub struct AppRig {
     /// The Library's YouTube part as last loaded: the "On this TV" row is put in front of it
     /// again whenever the playlists on this TV change.
     library_page: Option<yt_core::model::Page>,
+    /// Audio only as switched in the player's options; it stands in for the setting until the app
+    /// closes or the setting changes (a listener's next videos stay audio only).
+    audio_only_pick: Option<bool>,
+    /// The video that was started audio only (the player screen draws it black).
+    audio_only_video: Option<String>,
 }
 
 impl AppRig {
@@ -469,6 +476,8 @@ impl AppRig {
             pending_private: None,
             private_video: None,
             library_page: None,
+            audio_only_pick: None,
+            audio_only_video: None,
         };
         rig.store.local = yt_core::local_playlists::Store::load();
         rig.local_feeds();
@@ -688,6 +697,7 @@ impl AppRig {
         }
         self.player_view = self.player.status.lock().unwrap().clone();
         self.player_view.quality_pick = self.quality_pick.as_ref().filter(|(v, _)| *v == self.player_view.video_id).map_or(0, |(_, h)| *h);
+        self.player_view.audio_only = self.audio_only_video.as_deref().is_some_and(|v| v == self.player_view.video_id);
         // Engine B refused the speed: play this video again on the system player, from here.
         // webOS 4 has no other engine with a video plane (`vplane.rs`): back to normal speed.
         #[cfg(not(windows))]
@@ -1538,6 +1548,8 @@ impl Rig<YtHost> for AppRig {
                 } else if !again {
                     self.private_video = None;
                 }
+                let audio_only = self.audio_only_pick.unwrap_or(self.store.settings.audio_only);
+                self.audio_only_video = audio_only.then(|| video_id.clone());
                 let s = &self.store.settings;
                 let audio_track = self.audio_choice.as_ref().filter(|(v, _)| *v == video_id).map(|(_, t)| t.clone());
                 let audio_language = (!s.audio_language.is_empty()).then(|| s.audio_language.clone());
@@ -1553,7 +1565,7 @@ impl Rig<YtHost> for AppRig {
                     self.quality_pick = None;
                 }
                 let max_height = pick.unwrap_or(s.max_height as u32).min(cap);
-                let prefs = yt_core::streams::Prefs { min_height: (s.min_height as u64).min(max_height as u64), max_height: max_height as u64, codec: "avc1", audio_track, audio_language };
+                let prefs = yt_core::streams::Prefs { min_height: (s.min_height as u64).min(max_height as u64), max_height: max_height as u64, codec: "avc1", audio_track, audio_language, audio_only };
                 let extras = crate::player::ExtrasPrefs {
                     subtitles: s.subtitles,
                     language: s.subtitle_language.clone(),
@@ -1598,6 +1610,7 @@ impl Rig<YtHost> for AppRig {
                     let mut fp = crate::feed::Prefs::new(max_height, codec);
                     fp.allow_hdr = s.hdr;
                     fp.keep_live = s.keep_live;
+                    fp.audio_only = audio_only;
                     self.player.feed_prefs = Some(fp);
                     // A speed other than 1x on a TV whose engine B refused one: the system player.
                     self.player.prefer_feed = s.engine == "auto" && !(self.feed_no_rate && (speed - 1.0).abs() > 0.01);
@@ -1664,6 +1677,19 @@ impl Rig<YtHost> for AppRig {
                     self.app_fx(from, YtFx::Play { video_id: v, playlist }, _p, _out);
                 }
             }
+            YtFx::SetAudioOnly(on) => {
+                self.audio_only_pick = Some(on);
+                let v = self.player_view.video_id.clone();
+                let label = format!("{}: {}", crate::i18n::tr("Audio only"), crate::i18n::tr(if on { "On" } else { "Off" }));
+                self.store.toast(label, self.now_ms);
+                if !v.is_empty() && self.player_view.audio_only != on {
+                    crate::log(&format!("audio only {}: restarting {v} at {} ms", if on { "on" } else { "off" }, self.player_view.position_ms));
+                    self.pending_start = Some((v.clone(), self.player_view.position_ms));
+                    // Restart this video with or without its picture at the same position.
+                    let playlist = self.current_playlist.clone();
+                    self.app_fx(from, YtFx::Play { video_id: v, playlist }, _p, _out);
+                }
+            }
             YtFx::SetZoom(z) => self.player.set_zoom(z),
             YtFx::VideoRect(r) => self.video_target = r.map_or([0.0, 0.0, 1920.0, 1080.0], |r| r.map(|v| v as f32)),
             YtFx::Suggest(prefix) => {
@@ -1671,8 +1697,13 @@ impl Rig<YtHost> for AppRig {
             }
             YtFx::EditSettings(f) => {
                 let kept = self.store.settings.keep_play_next;
+                let audio_only = self.store.settings.audio_only;
                 f(&mut self.store.settings);
                 self.save_settings();
+                // "Audio only" changed in the settings: it decides again, over a player switch.
+                if self.store.settings.audio_only != audio_only {
+                    self.audio_only_pick = None;
+                }
                 // "Keep Play next after closing": switched on keeps the queue now, off forgets it.
                 if self.store.settings.keep_play_next != kept {
                     save_queue(if self.store.settings.keep_play_next { self.store.play_next.clone() } else { Vec::new() });

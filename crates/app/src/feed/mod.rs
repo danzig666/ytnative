@@ -54,11 +54,14 @@ pub struct Prefs {
     pub transport: Transport,
     /// "Keep up with live": a live stream that falls behind jumps back to the live edge.
     pub keep_live: bool,
+    /// Audio only (`crate::audio_only`): the engine clocks on video frames, so the smallest video
+    /// rendition is played under the black screen.
+    pub audio_only: bool,
 }
 
 impl Prefs {
     pub fn new(max_height: u32, codec: VideoCodec) -> Prefs {
-        Prefs { max_height, codec, allow_hdr: false, transport: Transport::Direct, keep_live: false }
+        Prefs { max_height, codec, allow_hdr: false, transport: Transport::Direct, keep_live: false, audio_only: false }
     }
 }
 
@@ -108,7 +111,10 @@ impl FeedPlayer {
         select::choose(
             &resolved.adaptive,
             select::Request {
-                max_height: prefs.max_height,
+                max_height: match prefs.audio_only {
+                    true => crate::audio_only::lowest_rung(&resolved.adaptive).unwrap_or(prefs.max_height),
+                    false => prefs.max_height,
+                },
                 codec: prefs.codec,
                 // webOS 4: a VP9 PQ stream stays SDR without plx's sourceInfo hdrType rewrite
                 // before setMediaVideoData (not ported; docs/feed-engine.md).
