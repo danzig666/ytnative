@@ -90,6 +90,26 @@ impl Section {
         self == Section::Notifications
     }
 
+    /// Left out in child mode (the inbox shows other people's comment replies).
+    pub fn hidden_in_child_mode(self) -> bool {
+        self == Section::Notifications
+    }
+
+    /// The section can be in the sidebar for this viewer (signed in or not, child mode or not).
+    pub fn allowed(self, signed_in: bool, child_mode: bool) -> bool {
+        (signed_in || !self.needs_account()) && !(child_mode && self.hidden_in_child_mode())
+    }
+
+    /// The section to open at start (the "Start in" choice): Home in place of a section the
+    /// viewer cannot have now. Notifications also has to be turned on in the sidebar: an inbox
+    /// the viewer took out of it is not opened on its own.
+    pub fn boot(key: &str, s: &crate::settings::Settings, signed_in: bool) -> Section {
+        match Section::from_key(key) {
+            Some(sec) if sec.allowed(signed_in, s.child_mode) && (!sec.needs_account() || s.sections.iter().any(|k| k == sec.key())) => sec,
+            _ => Section::Home,
+        }
+    }
+
     pub fn browse_id(self) -> &'static str {
         match self {
             Section::Home => "FEwhat_to_watch",
@@ -588,5 +608,32 @@ mod tests {
         assert_eq!(super::parse_duration("12:34"), Some(754_000));
         assert_eq!(super::parse_duration("1:02:03"), Some(3_723_000));
         assert_eq!(super::parse_duration("LIVE"), None);
+    }
+
+    #[test]
+    fn notifications_section_availability() {
+        use super::Section;
+        assert!(Section::Notifications.allowed(true, false));
+        assert!(!Section::Notifications.allowed(false, false), "signed out");
+        assert!(!Section::Notifications.allowed(true, true), "child mode");
+        assert!(Section::Home.allowed(false, true));
+    }
+
+    #[test]
+    fn start_in_falls_back_to_home() {
+        use super::Section;
+        let mut s = crate::settings::Settings::default();
+        s.sections.retain(|k| k != "notifications");
+        s.sections.push("notifications".into());
+        assert_eq!(Section::boot("notifications", &s, true), Section::Notifications);
+        assert_eq!(Section::boot("notifications", &s, false), Section::Home, "signed out");
+        s.child_mode = true;
+        assert_eq!(Section::boot("notifications", &s, true), Section::Home, "child mode");
+        s.child_mode = false;
+        s.sections.retain(|k| k != "notifications");
+        assert_eq!(Section::boot("notifications", &s, true), Section::Home, "turned off");
+        // Other sections open as before, in the sidebar or not.
+        assert_eq!(Section::boot("music", &s, false), Section::Music);
+        assert_eq!(Section::boot("nonsense", &s, true), Section::Home);
     }
 }
