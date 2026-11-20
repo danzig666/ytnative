@@ -1,14 +1,2 @@
-- New: Settings in two panes: the categories with icons on the left, their options on the right, on / off options as switches; Left and BACK go back to the categories, OK or a click changes a value
-- New: Search settings, at the top of the Settings categories
-- New: Audio only (Settings › Playback, or the player's options): sound alone over a black screen, no video downloaded (issue #9)
-- New: Same volume for every video (Settings › Playback, on): loud videos are turned down, as YouTube's own players do
-- New: Ambient mode (Settings › Playback, on): a soft glow in the video's colours in the black bars of 4:3 videos, Shorts and films
-- New: Video details (the player's options or Settings › Playback): the engine, codecs, resolution, bitrates, buffer and connection speed over the video
-- New: Live chat beside live streams (the Comments button), with the time of each message
-- New: Notifications in the sidebar: the newest videos of the channels whose bell is set to All videos
-- New: The subscribe button of a subscribed channel offers the notification bell (All videos, Personalized, None) and Unsubscribe, as on YouTube
-- New: Video previews (Settings › Interface, off by default): a muted preview plays in the card the focus rests on
-- New: Problem report (Settings › Account & about): the logs on screen and a QR code to download them on a phone on the same Wi-Fi, without sign-in tokens or stream addresses
-- Changed: A sidebar section opens with OK or a click; moving through the sidebar only moves the selection
-- Fixed: Keys on the search keyboard sometimes did not type when clicked with the Magic Remote pointer
-- Fixed: The Settings list jumped back after scrolling it with the pointer at the screen's edge
+- Changed: The sleep timer is a one-time countdown set in the player's options: it keeps running across the next videos, shows the minutes left, warns a minute before (a key starts it over) and ends when it pauses playback, is set to Off, or the player is left for the lists. It is no longer a saved setting
+- Fixed: Over HDR videos the shade behind the player's controls turned solid black; it now stays see-through, as over SDR videos
