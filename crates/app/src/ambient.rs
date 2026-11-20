@@ -40,6 +40,14 @@ const LIFT: f32 = 0.75;
 /// Texels across a bar, from the picture's edge to the screen's: the falloff curve, which the
 /// GPU's linear filtering smooths between them.
 const FALLOFF_TEXELS: usize = 8;
+/// The glow starts this far (px) inside the picture's edge, so the TV's scaler rounding never
+/// leaves a dark line between the two.
+const OVERLAP: f32 = 3.0;
+/// A frame edge darker than this (brightest channel, 0..1) is a black border of the video
+/// itself; the glow covers it.
+const BLACK: f32 = 0.07;
+/// At most this share of the frame is taken for a black border, either side.
+const MAX_BORDER: f32 = 0.2;
 /// Reduced sheets kept (each about 40 KB): enough for the sheets of a long video seeked around.
 const SHEETS_KEPT: usize = 48;
 /// The reduced copy of a sheet is at most this wide.
@@ -135,10 +143,37 @@ fn tame(c: Rgb) -> Rgb {
     }
 }
 
+/// How much of the frame at `(x, y, w, h)` (sheet pixels) is a black border of the video itself
+/// on the two sides that face the bars (left and right when `pillar`, else top and bottom), as
+/// shares of the frame's width (or height), each at most [`MAX_BORDER`]: many videos carry black
+/// strips in their frames, which would show as a dark line between the picture and the glow.
+pub fn black_edges(s: &Sheet, frame: (u32, u32, u32, u32), pillar: bool) -> [f32; 2] {
+    let (fx, fy, fw, fh) = frame;
+    let (x0, y0) = (fx / s.f, fy / s.f);
+    let (x1, y1) = (((fx + fw) / s.f).min(s.w), ((fy + fh) / s.f).min(s.h));
+    if x1 < x0 + 4 || y1 < y0 + 4 {
+        return [0.0; 2];
+    }
+    let dark = |c: Rgb| c[0].max(c[1]).max(c[2]) < BLACK;
+    let (len, cap) = if pillar { (x1 - x0, ((x1 - x0) as f32 * MAX_BORDER) as u32) } else { (y1 - y0, ((y1 - y0) as f32 * MAX_BORDER) as u32) };
+    // Lines (columns or rows) counted from one edge while they are dark.
+    let count = |from_far: bool| {
+        (0..cap)
+            .take_while(|&i| {
+                let at = if from_far { len - 1 - i } else { i };
+                let line = if pillar { average(s, x0 + at, x0 + at + 1, y0, y1) } else { average(s, x0, x1, y0 + at, y0 + at + 1) };
+                dark(line)
+            })
+            .count() as f32
+            / len as f32
+    };
+    [count(false), count(true)]
+}
+
 /// The colours along the two edges of the frame at `(x, y, w, h)` (sheet pixels) that face the
 /// bars: the left and right edges when `pillar`, else the top and bottom. Each colour is the
-/// average of a band a quarter of the frame deep (a little in from the edge, where a storyboard
-/// frame may carry a dark border), one third of the edge long.
+/// average of a band a quarter of the frame deep, a little in from the edge and past any black
+/// border ([`black_edges`]), one third of the edge long.
 pub fn edge_palette(s: &Sheet, frame: (u32, u32, u32, u32), pillar: bool) -> Option<Palette> {
     let (fx, fy, fw, fh) = frame;
     let (x0, y0) = (fx / s.f, fy / s.f);
@@ -147,10 +182,12 @@ pub fn edge_palette(s: &Sheet, frame: (u32, u32, u32, u32), pillar: bool) -> Opt
         return None;
     }
     let (w, h) = (x1 - x0, y1 - y0);
+    let border = black_edges(s, frame, pillar);
+    let past = |share: f32, len: u32| (share * len as f32).ceil() as u32;
     let third = |a: u32, len: u32, i: u32| (a + len * i / 3, a + len * (i + 1) / 3);
     let mut p: Palette = [[[0.0; 3]; 3]; 2];
     if pillar {
-        let inset = w * 3 / 100;
+        let inset = (w * 3 / 100).max(past(border[0].max(border[1]), w));
         let depth = (w / 4).max(1);
         for i in 0..3 {
             let (a, b) = third(y0, h, i);
@@ -158,7 +195,7 @@ pub fn edge_palette(s: &Sheet, frame: (u32, u32, u32, u32), pillar: bool) -> Opt
             p[1][i as usize] = tame(average(s, x1 - inset - depth, x1 - inset, a, b));
         }
     } else {
-        let inset = h * 3 / 100;
+        let inset = (h * 3 / 100).max(past(border[0].max(border[1]), h));
         let depth = (h / 4).max(1);
         for i in 0..3 {
             let (a, b) = third(x0, w, i);
@@ -178,6 +215,24 @@ pub fn content_rect(vw: u32, vh: u32, zoom: f32) -> Option<Rect> {
     let k = (1920.0 / vw as f32).min(1080.0 / vh as f32) * zoom;
     let (w, h) = (vw as f32 * k, vh as f32 * k);
     Some(Rect::new((1920.0 - w) / 2.0, (1080.0 - h) / 2.0, w, h))
+}
+
+/// The bars widened toward the picture over its black borders (`border`, shares of `content`)
+/// and [`OVERLAP`], so no dark line stays between the picture and the glow.
+pub fn reach_in(rects: [Rect; 2], content: Rect, pillar: bool, border: [f32; 2]) -> [Rect; 2] {
+    let [mut a, mut b] = rects;
+    if pillar {
+        let (l, r) = (border[0] * content.w + OVERLAP, border[1] * content.w + OVERLAP);
+        a.w += l;
+        b.x -= r;
+        b.w += r;
+    } else {
+        let (t, d) = (border[0] * content.h + OVERLAP, border[1] * content.h + OVERLAP);
+        a.h += t;
+        b.y -= d;
+        b.h += d;
+    }
+    [a, b]
 }
 
 /// The two bars around `content` (the parts of the screen it leaves black), first the left or
@@ -275,6 +330,8 @@ pub struct Glow {
     paused_since: Option<u32>,
     tex: [u32; 2],
     uploaded: Option<(bool, [[[u8; 3]; 3]; 2])>,
+    /// The video's own black borders on the two sides ([`black_edges`]): the glow covers them.
+    border: [f32; 2],
 }
 
 impl Glow {
@@ -362,9 +419,12 @@ pub fn draw(p: Painter, st: &crate::player::Status, enabled: bool, now_ms: u32) 
             if g.frame != Some(key) || g.pillar != pillar {
                 // Asks for the sheet (once; the thumbnail worker decodes it and calls `note_sheet`).
                 plx_ui::tex::warm_on(1, &fr.sheet_url, 0, 0, false);
-                if let Some(pal) = sheet(&fr.sheet_url).and_then(|s| edge_palette(&s, (fr.x, fr.y, fr.w, fr.h), pillar)) {
-                    g.retarget(pal, pillar, now_ms);
-                    g.frame = Some(key);
+                if let Some(s) = sheet(&fr.sheet_url) {
+                    if let Some(pal) = edge_palette(&s, (fr.x, fr.y, fr.w, fr.h), pillar) {
+                        g.retarget(pal, pillar, now_ms);
+                        g.border = black_edges(&s, (fr.x, fr.y, fr.w, fr.h), pillar);
+                        g.frame = Some(key);
+                    }
                 }
             }
         }
@@ -386,6 +446,8 @@ pub fn draw(p: Painter, st: &crate::player::Status, enabled: bool, now_ms: u32) 
             g.uploaded = Some((pillar, codes));
         }
         let ink = crate::ui::dimmed([1.0, 1.0, 1.0, g.master * PEAK * breath(now_ms)]);
+        let content = content_rect(vw, vh, zoom.unwrap_or(1.0));
+        let rects = content.map_or(rects, |c| reach_in(rects, c, pillar, g.border));
         for side in 0..2 {
             if g.tex[side] != 0 && rects[side].w > 0.0 && rects[side].h > 0.0 {
                 p.tex_uv(g.tex[side], [0.0, 0.0, 1.0, 1.0], rects[side], 0.0, ink);
@@ -397,6 +459,39 @@ pub fn draw(p: Painter, st: &crate::player::Status, enabled: bool, now_ms: u32) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 20 x 10 frame (one sheet pixel per reduced pixel): grey, with black columns at the left
+    /// (`l`) and right (`r`).
+    fn bordered(l: u32, r: u32) -> Sheet {
+        let (w, h) = (20u32, 10u32);
+        let mut rgb = vec![120u8; (w * h * 3) as usize];
+        for y in 0..h {
+            for x in (0..l).chain(w - r..w) {
+                let i = ((y * w + x) * 3) as usize;
+                rgb[i..i + 3].copy_from_slice(&[4, 4, 4]);
+            }
+        }
+        Sheet { w, h, f: 1, rgb }
+    }
+
+    #[test]
+    fn a_videos_black_strips_are_found() {
+        let e = black_edges(&bordered(2, 1), (0, 0, 20, 10), true);
+        assert!((e[0] - 0.10).abs() < 1e-6 && (e[1] - 0.05).abs() < 1e-6, "{e:?}");
+        assert_eq!(black_edges(&bordered(0, 0), (0, 0, 20, 10), true), [0.0, 0.0]);
+        // A black frame is not all border: at most MAX_BORDER either side.
+        let all = black_edges(&bordered(20, 0), (0, 0, 20, 10), true);
+        assert!(all[0] <= MAX_BORDER + 1e-6, "{all:?}");
+    }
+
+    #[test]
+    fn the_glow_reaches_over_the_strips_to_the_picture() {
+        let c = content_rect(1440, 1080, 1.0).unwrap();
+        let (pillar, rects) = bars(c).unwrap();
+        let r = reach_in(rects, c, pillar, [0.10, 0.0]);
+        assert!((r[0].w - (240.0 + 144.0 + OVERLAP)).abs() < 0.01, "left bar over a tenth of the picture: {:?}", r[0]);
+        assert!((r[1].x - (1680.0 - OVERLAP)).abs() < 0.01 && (r[1].x + r[1].w - 1920.0).abs() < 0.01, "{:?}", r[1]);
+    }
 
     /// A sheet of two 40x20 frames side by side: the first red on its left half and blue on its
     /// right, the second green on top and white below.
