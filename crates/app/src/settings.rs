@@ -484,6 +484,8 @@ pub struct Settings {
     pub settings_pin: String,
     /// The TV's capabilities were read once (first start) and the playback settings set from them.
     pub device_checked: bool,
+    /// Play a muted preview inside the focused video card's thumbnail (`preview.rs`).
+    pub video_previews: bool,
 }
 
 impl Default for Settings {
@@ -596,6 +598,7 @@ impl Default for Settings {
             child_mode: false,
             settings_pin: String::new(),
             device_checked: false,
+            video_previews: false,
         }
     }
 }

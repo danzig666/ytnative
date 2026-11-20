@@ -1524,6 +1524,8 @@ impl Rig<YtHost> for AppRig {
             }
             YtFx::Play { video_id, playlist } => {
                 crate::log(&format!("play {video_id} (playlist {playlist:?})"));
+                // One pipeline at a time: a card's preview is unloaded before the player loads.
+                crate::preview::stop();
                 // A queued video leaves "Play next" once it plays, however it was started.
                 let queued = self.store.play_next.len();
                 self.store.play_next.retain(|v| v.video_id != video_id);

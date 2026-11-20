@@ -703,6 +703,10 @@ impl CardSource<YtHost> for CardsSrc<'_> {
         if tile.scale <= 1.01 {
             note_card(p.to_screen(tile.rect).0);
         }
+        if tile.focused {
+            let (screen, _, clip) = p.to_screen(tile.rect);
+            crate::preview::note_focused(&self.cards[i], screen, clip);
+        }
         if self.cards[i].thumb.is_empty() {
             let r = tile.rect;
             fill(p, r, 18.0, [0.16, 0.17, 0.21, 1.0]);
