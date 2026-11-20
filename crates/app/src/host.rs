@@ -1435,6 +1435,7 @@ pub fn take_reset(g: &mut Option<yt_core::session::Session>) {
 
 fn load_page(session: &Mutex<Option<yt_core::session::Session>>, epoch: u64, key: &FeedKey, continuation: Option<String>) -> Work {
     let r = with_session(session, |s| match (&continuation, key) {
+        (c, FeedKey::Section(Section::Notifications)) => s.notifications(c.as_deref()),
         (Some(c), k) => s.more(k.endpoint(), c),
         (None, FeedKey::Section(sec)) => s.browse(sec.browse_id(), None),
         (None, FeedKey::Browse { id, params }) => s.browse(id, params.as_deref()),

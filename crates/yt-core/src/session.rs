@@ -110,6 +110,15 @@ impl Session {
         Ok(parse::shelf_continuation(&self.raw(endpoint, json!({ "continuation": continuation }))?))
     }
 
+    /// The notifications inbox (`ctoken`: the page after that token). Signed out there is none:
+    /// an empty page rather than an error, so a section left open after signing out stays quiet.
+    pub fn notifications(&mut self, ctoken: Option<&str>) -> Result<Page> {
+        if !self.signed_in() {
+            return Ok(Page::default());
+        }
+        Ok(crate::notifications::page(&self.raw(crate::notifications::ENDPOINT, crate::notifications::request(ctoken))?))
+    }
+
     /// Opens whatever a card or link points at, for the browse/search kinds.
     pub fn open(&mut self, ep: &Endpoint) -> Result<Option<Page>> {
         Ok(match ep {

@@ -568,7 +568,12 @@ impl Default for Settings {
             search_history: true,
             pinned: Vec::new(),
             // Trending is off by default: YouTube retired the page (browse answers HTTP 400).
-            sections: crate::store::Section::ALL.iter().filter(|s| **s != crate::store::Section::Trending).map(|s| s.key().to_string()).collect(),
+            // Notifications is opt-in (Settings > Interface).
+            sections: crate::store::Section::ALL
+                .iter()
+                .filter(|s| !matches!(s, crate::store::Section::Trending | crate::store::Section::Notifications))
+                .map(|s| s.key().to_string())
+                .collect(),
             boot_section: "home".into(),
             idle_blank_mins: 0,
             time_24h: true,
