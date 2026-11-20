@@ -3,6 +3,7 @@ pub mod accounts;
 pub mod actions;
 pub mod auth;
 pub mod backup;
+pub mod bell_channels;
 pub mod bootstrap;
 pub mod captions;
 pub mod channel_groups;

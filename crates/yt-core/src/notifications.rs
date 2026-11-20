@@ -3,13 +3,24 @@
 //! get_notification_menu` with the TVHTML5 client and the TV sign-in token, asking for the
 //! `NOTIFICATIONS_MENU_REQUEST_TYPE_INBOX` menu. YouTube answers with a popup menu of
 //! `notificationRenderer`s; each one that points at a video becomes a card.
+//!
+//! YouTube now answers that request with HTTP 400 "Precondition check failed" for every client
+//! (TV or web, any version or context extra; see the `live` diagnostics below), as it does for
+//! SmartTube. Like MediaServiceCore's `NotificationsServiceIntWrapper`, the section then falls
+//! back to [`rss_page`]: the newest videos of the channels in the local bell list
+//! ([`crate::bell_channels`]), from their public RSS feeds.
 
+use crate::channel_groups::{self, ChannelFeed, FeedCache};
 use crate::innertube::text;
 use crate::model::{Endpoint, Item, ItemKind, Page, Shelf};
+use anyhow::Result;
 use serde_json::{json, Value};
 
 /// The endpoint (under `youtubei/v1/`) that serves the inbox.
 pub const ENDPOINT: &str = "notification/get_notification_menu";
+
+/// At most this many videos in the page built from the RSS feeds.
+pub const MAX_RSS_ITEMS: usize = 60;
 
 /// Request body for the first page of the inbox, or for the page after `ctoken`.
 pub fn request(ctoken: Option<&str>) -> Value {
@@ -97,6 +108,41 @@ fn item(n: &Value) -> Option<Item> {
         }),
         ..Default::default()
     })
+}
+
+/// The fallback page: the newest videos of `channel_ids` from their RSS feeds (fetched a few at
+/// a time, cached for a while: [`channel_groups::fetch_feeds`]), newest first, at most
+/// [`MAX_RSS_ITEMS`], as one untitled shelf without a continuation. No channels: an empty page.
+/// Fails only when not one feed could be loaded.
+pub fn rss_page(http: &reqwest::blocking::Client, channel_ids: &[String]) -> Result<Page> {
+    if channel_ids.is_empty() {
+        return Ok(Page::default());
+    }
+    let mut feeds = Vec::new();
+    let mut last_err = None;
+    for (_, r) in channel_groups::fetch_feeds(http, channel_ids, FeedCache::global()) {
+        match r {
+            Ok(f) => feeds.push(f),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    if let (true, Some(e)) = (feeds.is_empty(), last_err) {
+        return Err(e.context("no channel's feed could be loaded"));
+    }
+    Ok(feeds_page(feeds.iter().map(|f| f.as_ref()), crate::fsutil::now_secs()))
+}
+
+/// Feeds merged into the notifications page (see [`rss_page`]); `now` in unix seconds, for the
+/// cards' ages. Each card: the video's title, the channel's name, then its views and age
+/// ("3 days ago"), as the channel groups' feeds show them.
+pub fn feeds_page<'a>(feeds: impl IntoIterator<Item = &'a ChannelFeed>, now: u64) -> Page {
+    let mut p = channel_groups::merge_feeds("", feeds, now);
+    p.title = None;
+    for s in &mut p.shelves {
+        s.items.truncate(MAX_RSS_ITEMS);
+    }
+    p.shelves.retain(|s| !s.items.is_empty());
+    p
 }
 
 /// "Channel uploaded: Title" -> (Some("Channel uploaded"), "Title"); a message without a colon
@@ -227,10 +273,168 @@ mod tests {
         assert_eq!(request(Some("T"))["ctoken"], "T");
     }
 
+    /// A hand-made channel feed shaped like YouTube's: entities in the title, a Short, an entry
+    /// without views or thumbnail, and one without a video id (left out).
+    const FEED_A: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns:media="http://search.yahoo.com/mrss/" xmlns="http://www.w3.org/2005/Atom">
+ <title>Cats &amp; Dogs</title>
+ <author><name>Cats &amp; Dogs</name></author>
+ <entry>
+  <id>yt:video:vidA0000001</id>
+  <yt:videoId>vidA0000001</yt:videoId>
+  <yt:channelId>UCaaaaaaaaaaaaaaaaaaaaaa</yt:channelId>
+  <title>Tom &amp; Jerry &#8211; &quot;live&quot;</title>
+  <link rel="alternate" href="https://www.youtube.com/watch?v=vidA0000001"/>
+  <author><name>Cats &amp; Dogs</name></author>
+  <published>2026-11-17T12:00:00+00:00</published>
+  <media:group>
+   <media:thumbnail url="https://i1.ytimg.com/vi/vidA0000001/hqdefault.jpg" width="480" height="360"/>
+   <media:community><media:statistics views="1234"/></media:community>
+  </media:group>
+ </entry>
+ <entry>
+  <yt:videoId>vidA0000002</yt:videoId>
+  <title>A short one</title>
+  <link rel="alternate" href="https://www.youtube.com/shorts/vidA0000002"/>
+  <published>2026-11-19T12:00:00Z</published>
+ </entry>
+ <entry>
+  <title>No video id</title>
+  <published>2026-11-20T00:00:00Z</published>
+ </entry>
+</feed>"#;
+
+    const FEED_B: &str = r#"<feed xmlns="http://www.w3.org/2005/Atom"><title>Birds</title>
+ <entry><yt:videoId>vidB0000001</yt:videoId><title>Birds today</title><author><name>Birds</name></author>
+  <published>2026-11-18T12:00:00.000+02:00</published><media:statistics views="5"/></entry>
+</feed>"#;
+
+    #[test]
+    fn rss_page_from_feeds() {
+        let a = channel_groups::parse_feed(FEED_A, "UCaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        let b = channel_groups::parse_feed(FEED_B, "UCbbbbbbbbbbbbbbbbbbbbbb").unwrap();
+        assert_eq!(a.entries.len(), 2, "the entry without a video id is left out");
+        let now = channel_groups::parse_rfc3339("2026-11-20T12:00:00Z").unwrap();
+        let p = feeds_page([&a, &b], now);
+        assert_eq!(p.title, None);
+        assert_eq!(p.continuation, None);
+        assert_eq!(p.shelves.len(), 1);
+        assert_eq!(p.shelves[0].title, "");
+        let items = &p.shelves[0].items;
+        let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, ["vidA0000002", "vidB0000001", "vidA0000001"], "newest first");
+        assert_eq!(items[2].title, "Tom & Jerry \u{2013} \"live\"");
+        assert_eq!(items[2].lines, ["Cats & Dogs", "1.2K views \u{2022} 3 days ago"]);
+        assert_eq!(items[2].thumbnail.as_deref(), Some("https://i1.ytimg.com/vi/vidA0000001/hqdefault.jpg"));
+        assert!(matches!(&items[2].endpoint, Some(Endpoint::Watch { video_id, .. }) if video_id == "vidA0000001"));
+        // No name in the entry: the feed's; no views: the age alone; no thumbnail: YouTube's.
+        assert_eq!(items[0].lines, ["Cats & Dogs", "1 day ago"]);
+        assert_eq!(items[0].kind, ItemKind::Short);
+        assert_eq!(items[0].thumbnail.as_deref(), Some("https://i.ytimg.com/vi/vidA0000002/hqdefault.jpg"));
+        assert_eq!(items[1].lines, ["Birds", "5 views \u{2022} 2 days ago"]);
+    }
+
+    #[test]
+    fn rss_page_caps_and_empties() {
+        let mut f = ChannelFeed { channel_id: "UC1".into(), title: "One".into(), entries: Vec::new() };
+        for i in 0..(MAX_RSS_ITEMS as u64 + 15) {
+            f.entries.push(channel_groups::FeedEntry { video_id: format!("v{i}"), title: format!("T{i}"), published: 1000 + i, ..Default::default() });
+        }
+        let p = feeds_page([&f], 5000);
+        assert_eq!(p.item_count(), MAX_RSS_ITEMS);
+        assert_eq!(p.shelves[0].items[0].id, format!("v{}", MAX_RSS_ITEMS as u64 + 14));
+        assert_eq!(feeds_page([], 0).shelves.len(), 0);
+        let http = reqwest::blocking::Client::new();
+        assert_eq!(rss_page(&http, &[]).unwrap().item_count(), 0, "no channels: nothing fetched");
+    }
+
     #[test]
     fn message_split() {
         assert_eq!(split_message("A: b: c"), (Some("A".into()), "b: c".into()));
         assert_eq!(split_message("No colon"), (None, "No colon".into()));
         assert_eq!(split_message("Trailing:"), (None, "Trailing:".into()));
+    }
+}
+
+/// Live diagnostics (ignored: they need the network; the inbox ones also `token.json` in the
+/// repository root): `cargo test -p yt-core notifications::live -- --ignored --nocapture`.
+#[cfg(test)]
+mod live {
+    /// The repository root, where a developer's `token.json` lives.
+    fn repo_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    /// What the inbox answers today (an HTTP 400 "Precondition check failed" since late 2026).
+    #[test]
+    #[ignore]
+    fn live_inbox() {
+        crate::paths::set_data_dir(repo_root());
+        let mut s = crate::session::Session::new().unwrap();
+        assert!(s.signed_in(), "no token.json");
+        match s.raw(super::ENDPOINT, super::request(None)) {
+            Ok(v) => {
+                let p = super::page(&v);
+                println!("ok: {} items, continuation {}", p.item_count(), p.continuation.is_some());
+            }
+            Err(e) => println!("error: {e:#}"),
+        }
+    }
+
+    /// The inbox with other client names, versions and headers, to see whether any of them is
+    /// still served.
+    #[test]
+    #[ignore]
+    fn live_inbox_variants() {
+        use serde_json::json;
+        crate::paths::set_data_dir(repo_root());
+        let mut s = crate::session::Session::new().unwrap();
+        let bearer = s.bearer().unwrap().expect("signed in");
+        let api = s.api();
+        let (ctx, _, ver) = crate::innertube::Client::Tv.context(api.cfg);
+        println!("our version {ver}");
+        // (name, client name, client name id, version, referer)
+        let variants = [
+            ("ours+referer", "TVHTML5", "7", ver.clone(), true),
+            ("st-version", "TVHTML5", "7", "7.20260901.15.00".to_string(), true),
+            ("downgraded", "TVHTML5", "7", "5.20260901".to_string(), true),
+            ("web", "WEB", "1", "2.20260907.06.00".to_string(), false),
+        ];
+        for (name, cname, cid, cver, referer) in variants {
+            let mut c = ctx.clone();
+            c["clientName"] = json!(cname);
+            c["clientVersion"] = json!(cver);
+            let mut body = super::request(None);
+            body["context"] = json!({ "client": c });
+            let mut req = api
+                .http
+                .post(format!("https://www.youtube.com/youtubei/v1/{}?prettyPrint=false", super::ENDPOINT))
+                .header("User-Agent", crate::bootstrap::TV_UA)
+                .header("X-YouTube-Client-Name", cid)
+                .header("X-YouTube-Client-Version", cver.as_str())
+                .header("Origin", "https://www.youtube.com")
+                .bearer_auth(&bearer)
+                .json(&body);
+            if referer {
+                req = req.header("Referer", "https://www.youtube.com/tv");
+            }
+            let r = req.send().unwrap();
+            let st = r.status();
+            let v: serde_json::Value = r.json().unwrap_or_default();
+            println!("{name}: {st} items={} error={}", super::page(&v).item_count(), v["error"]["message"]);
+        }
+    }
+
+    /// The fallback: one public channel's RSS feed through the notifications page.
+    #[test]
+    #[ignore]
+    fn live_rss() {
+        let http = crate::net::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap();
+        let p = super::rss_page(&http, &["UCBJycsmduvYEL83R_U4JriQ".to_string()]).unwrap();
+        println!("rss: {} items", p.item_count());
+        for it in p.shelves.iter().flat_map(|s| &s.items).take(3) {
+            println!("  {} | {}", it.title, it.lines.join(" | "));
+        }
+        assert!(p.item_count() > 0);
     }
 }

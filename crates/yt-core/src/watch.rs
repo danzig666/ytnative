@@ -102,6 +102,10 @@ pub struct WatchInfo {
     pub autoplay_next: Option<Item>,
     pub like_actions: LikeActions,
     pub subscribe_actions: SubscribeActions,
+    /// The channel's notification bell choices (only when subscribed and signed in), the
+    /// current one selected.
+    #[serde(default)]
+    pub notifications: Vec<crate::actions::NotificationOption>,
 }
 
 impl Session {
@@ -204,6 +208,8 @@ pub fn parse_watch(resp: &Value) -> WatchInfo {
         .or_else(|| owner.get("subscribeButton").and_then(|s| s.get("subscribeButtonRenderer")));
     if let Some(s) = sub {
         w.subscribed = s["subscribed"].as_bool();
+        let wrapped = json!({ "subscribeButtonRenderer": s });
+        w.notifications = crate::actions::subscribe_info(&wrapped).map(|i| i.notifications).unwrap_or_default();
         if let Some(id) = s["channelId"].as_str() {
             w.subscribe_actions.channel_ids = vec![id.to_string()];
             if w.channel_id.is_empty() {

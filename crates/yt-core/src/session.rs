@@ -50,7 +50,7 @@ impl Session {
         self.token.is_some()
     }
 
-    fn api(&self) -> Api<'_> {
+    pub(crate) fn api(&self) -> Api<'_> {
         Api { http: &self.http, cfg: &self.cfg }
     }
 
@@ -112,11 +112,27 @@ impl Session {
 
     /// The notifications inbox (`ctoken`: the page after that token). Signed out there is none:
     /// an empty page rather than an error, so a section left open after signing out stays quiet.
+    ///
+    /// YouTube now refuses the inbox (HTTP 400 "Precondition check failed"): the first page then
+    /// comes from the RSS feeds of the channels in the local bell list (`bell_channels`), as
+    /// SmartTube does. That page has no continuation; an empty list gives an empty page.
     pub fn notifications(&mut self, ctoken: Option<&str>) -> Result<Page> {
         if !self.signed_in() {
             return Ok(Page::default());
         }
-        Ok(crate::notifications::page(&self.raw(crate::notifications::ENDPOINT, crate::notifications::request(ctoken))?))
+        let inbox = self.raw(crate::notifications::ENDPOINT, crate::notifications::request(ctoken));
+        match inbox {
+            Ok(v) => Ok(crate::notifications::page(&v)),
+            Err(e) if ctoken.is_some() => Err(e),
+            Err(e) => {
+                // Once per run: the inbox fails the same way every time.
+                static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    eprintln!("[notifications] inbox unavailable, using the channels' RSS feeds: {e}");
+                }
+                crate::notifications::rss_page(&self.http, &crate::bell_channels::ids())
+            }
+        }
     }
 
     /// Opens whatever a card or link points at, for the browse/search kinds.

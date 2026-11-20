@@ -819,8 +819,17 @@ pub(crate) fn load_extras(video_id: &str, session: &Mutex<Option<yt_core::sessio
         }
     }
     publish(&ex);
-    match crate::host::with_session(session, |s| s.watch(video_id, None)) {
-        Ok(w) => ex.watch = Some(w),
+    match crate::host::with_session(session, |s| Ok((s.watch(video_id, None)?, s.signed_in()))) {
+        Ok((w, signed_in)) => {
+            // The channel's bell as YouTube has it decides whether the Notifications section
+            // shows its new videos ("All": yes; other choices, or not subscribed: no).
+            if signed_in {
+                if let Err(e) = yt_core::bell_channels::sync(&w.channel_id, &w.channel_name, w.subscribed, &w.notifications) {
+                    crate::log(&format!("bell channels: {e:#}"));
+                }
+            }
+            ex.watch = Some(w);
+        }
         Err(e) => crate::log(&format!("watch info: {e:#}")),
     }
     if prefs.dislikes {

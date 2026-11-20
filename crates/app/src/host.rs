@@ -173,6 +173,10 @@ pub enum SignIn {
 pub enum UserAction {
     Rate(String, yt_core::actions::Rating),
     Subscribe { channel_id: String, subscribe: bool },
+    /// "Notify me of new videos from this channel" on or off: the channel joins or leaves the
+    /// local bell list (the Notifications section), and its bell on YouTube is set to match.
+    /// `options`: the bell choices the watch page gave, used when the channel page has none.
+    Bell { channel_id: String, name: String, on: bool, options: Vec<yt_core::actions::NotificationOption> },
     WatchLater(String),
     /// Add (true) or remove a video from a playlist.
     Playlist { playlist_id: String, video_id: String, add: bool },
@@ -1255,6 +1259,25 @@ fn run_action(session: &Mutex<Option<yt_core::session::Session>>, a: &UserAction
                 Ok("Unsubscribed".to_string())
             }
         }),
+        UserAction::Bell { channel_id, name, on, options } => {
+            // The local list changed already (at once, in `apply`); YouTube's bell follows when
+            // it can. If it cannot, the list still works, so the result is the same message.
+            let r = with_session(session, |s| {
+                if !s.signed_in() {
+                    return Ok(());
+                }
+                let fresh = s.subscribe_info(channel_id).ok().flatten().map(|i| i.notifications).filter(|n| !n.is_empty());
+                match yt_core::bell_channels::option_for(fresh.as_deref().unwrap_or(options), *on) {
+                    Some(o) => s.set_notifications(&o.params),
+                    None => Ok(()),
+                }
+            });
+            if let Err(e) = r {
+                crate::log(&format!("notification bell on YouTube: {e:#}"));
+            }
+            let msg = if *on { "You will see new videos from {} in Notifications" } else { "New videos from {} will no longer be in Notifications" };
+            Ok(crate::i18n::tr(msg).replace("{}", name))
+        }
         UserAction::WatchLater(v) => with_session(session, |s| s.watch_later_add(v)).map(|_| "Saved to Watch later".to_string()),
         UserAction::Playlist { playlist_id, video_id, add } => with_session(session, |s| {
             if *add {
@@ -1819,6 +1842,11 @@ impl Rig<YtHost> for AppRig {
                 match &action {
                     UserAction::Subscribe { channel_id, subscribe } => {
                         self.store.subscribed.insert(channel_id.clone(), *subscribe);
+                    }
+                    UserAction::Bell { channel_id, name, on, .. } => {
+                        if let Err(e) = yt_core::bell_channels::set(channel_id, name, *on) {
+                            crate::log(&format!("bell channels: {e:#}"));
+                        }
                     }
                     // Taken out of a playlist or the history: the card leaves the page at once.
                     UserAction::Menu(m)

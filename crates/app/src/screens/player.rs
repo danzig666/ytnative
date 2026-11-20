@@ -1264,7 +1264,7 @@ pub fn rating(cx: &Cx<'_, YtHost>) -> Option<yt_core::watch::LikeStatus> {
 }
 
 /// Subscribed to the playing video's channel: what the viewer last pressed, else what YouTube said.
-fn subscribed_now(cx: &Cx<'_, YtHost>) -> bool {
+pub(crate) fn subscribed_now(cx: &Cx<'_, YtHost>) -> bool {
     let w = cx.views.player.extras.watch.as_ref();
     let pressed = w.and_then(|w| w.subscribe_actions.channel_ids.first().or(Some(&w.channel_id))).and_then(|id| cx.views.store.subscribed.get(id).copied());
     pressed.or_else(|| w.and_then(|w| w.subscribed)).unwrap_or(false)

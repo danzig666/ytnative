@@ -28,6 +28,7 @@ pub const FILES: &[&str] = &[
     crate::local_playlists::FILE_NAME,
     crate::search_history::FILE_NAME,
     crate::memory::FILE_NAME,
+    crate::bell_channels::FILE_NAME,
 ];
 /// Holds the sign-in tokens; only with explicit opt-in.
 pub const ACCOUNTS_FILE: &str = "accounts.json";
@@ -129,6 +130,9 @@ pub fn validate(b: &Bundle) -> Result<()> {
                 serde_json::from_value::<crate::search_history::SearchHistory>(v.clone()).map(drop)
             }
             crate::memory::FILE_NAME => serde_json::from_value::<crate::memory::PlayerMemory>(v.clone()).map(drop),
+            crate::bell_channels::FILE_NAME => {
+                serde_json::from_value::<crate::bell_channels::BellChannels>(v.clone()).map(drop)
+            }
             ACCOUNTS_FILE => serde_json::from_value::<crate::accounts::Store>(v.clone()).map(drop),
             _ => Ok(()),
         };
@@ -175,6 +179,7 @@ pub fn restore_into(data_dir: &Path, b: &Bundle, opts: RestoreOptions) -> Result
         crate::fsutil::write_atomic(&data_dir.join(name), &serde_json::to_vec_pretty(v)?)?;
         r.restored.push(name.clone());
     }
+    crate::bell_channels::reload();
     Ok(r)
 }
 

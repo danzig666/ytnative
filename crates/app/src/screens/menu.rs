@@ -86,6 +86,8 @@ enum Act {
     AudioOnly,
     /// The "Video details" panel on / off.
     VideoDetails,
+    /// "Notify me of new videos from this channel" on / off for the playing video's channel.
+    Bell,
     /// SponsorBlock on / off for a channel (by name).
     SbChannel(String),
     Close,
@@ -214,7 +216,7 @@ fn step_setting(act: &Act, s: &mut crate::settings::Settings, dir: i32) {
 /// Whether a held Left / Right keeps stepping the row. A switch does not: held, it would flip on
 /// and off with every repeat, and "Audio only" restarts the stream at each flip.
 fn repeats(act: &Act) -> bool {
-    !matches!(act, Act::AudioOnly | Act::VideoDetails)
+    !matches!(act, Act::AudioOnly | Act::VideoDetails | Act::Bell)
 }
 
 fn step_speed(current: f32, dir: i32) -> f32 {
@@ -550,6 +552,9 @@ impl MenuScreen {
             (tr("When the video ends").to_string(), Act::RepeatMode),
             (tr("Video details").to_string(), Act::VideoDetails),
         ]);
+        if cx.views.store.signed_in && !st.video_id.is_empty() && !st.channel_id.is_empty() {
+            acts.push((tr("Notify me of new videos from this channel").to_string(), Act::Bell));
+        }
         if cx.views.store.settings.sponsorblock && !st.author.is_empty() {
             acts.push((tr("SponsorBlock on this channel").to_string(), Act::SbChannel(st.author.clone())));
         }
@@ -645,6 +650,10 @@ impl MenuScreen {
             Act::SubStyle => format!("{}  \u{203A}", crate::i18n::tr(&s.subtitle_style)),
             Act::RepeatMode => format!("{}  \u{203A}", crate::i18n::tr(s.playback_mode.label())),
             Act::VideoDetails => format!("{}  \u{203A}", crate::i18n::tr(if s.video_details { "On" } else { "Off" })),
+            Act::Bell => {
+                let on = yt_core::bell_channels::contains(&cx.views.player.channel_id);
+                format!("{}  \u{203A}", crate::i18n::tr(if on { "On" } else { "Off" }))
+            }
             Act::SbChannel(ch) => crate::i18n::tr(if s.sb_excluded_channels.contains(ch) { "Off" } else { "On" }).to_string(),
             _ => return None,
         })
@@ -753,6 +762,19 @@ impl MenuScreen {
                 }
             }
             Act::AudioOnly => fx.push(Fx::App(YtFx::SetAudioOnly(!cx.views.player.audio_only))),
+            Act::Bell => {
+                let st = cx.views.player;
+                let on = !yt_core::bell_channels::contains(&st.channel_id);
+                if on && !super::player::subscribed_now(cx) {
+                    // YouTube notifies only of subscribed channels, and the next video of this
+                    // channel would take it off the list again.
+                    fx.push(Fx::App(YtFx::Toast(tr("Subscribe to {} first").replace("{}", &st.author))));
+                } else {
+                    let options = st.extras.watch.as_ref().map(|w| w.notifications.clone()).unwrap_or_default();
+                    let name = st.extras.watch.as_ref().map(|w| w.channel_name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| st.author.clone());
+                    fx.push(Fx::App(YtFx::Act(UserAction::Bell { channel_id: st.channel_id.clone(), name, on, options })));
+                }
+            }
             Act::ZoomMode => {
                 use crate::player::Zoom;
                 const Z: &[Zoom] = &[Zoom::Fit, Zoom::Fill, Zoom::Zoom];
@@ -1130,6 +1152,7 @@ mod tests {
     fn a_held_key_does_not_flip_switches() {
         assert!(!repeats(&Act::AudioOnly));
         assert!(!repeats(&Act::VideoDetails));
+        assert!(!repeats(&Act::Bell));
         assert!(repeats(&Act::SubSize));
     }
 

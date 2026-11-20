@@ -77,7 +77,6 @@ pub fn logo(p: Painter, x: f32, y: f32) {
     ui::text(p, "ytnative", x + 68.0, y + 1.0, 32, ui::WHITE, ui::ALIGN_LEFT, true);
 }
 
-/// A spinner (loading) or an error / empty message in place of a grid.
 /// Right on the last card of a grid row: the first card of the next row (reading order), as a
 /// page of videos with no sideways scrolling reads. `None` on the very last card.
 pub fn next_row_start(cards: &[Card], key: plx_machine::machine::FocusKey<u32>) -> Option<plx_machine::machine::FocusKey<u32>> {
@@ -85,12 +84,27 @@ pub fn next_row_start(cards: &[Card], key: plx_machine::machine::FocusKey<u32>) 
     cards.get(i + 1).map(|c| plx_machine::machine::FocusKey { entry: key.entry, elem: c.elem })
 }
 
-pub fn empty_state(p: Painter, m: &dyn plx_machine::machine::Measure, feed: Option<&Feed>, area: Rect, now_ms: u32) {
+/// What a page without cards says: the Notifications section explains how channels get there,
+/// other pages say there is nothing yet.
+pub fn empty_text(key: &FeedKey) -> (&'static str, &'static str) {
+    match key {
+        FeedKey::Section(crate::store::Section::Notifications) if yt_core::bell_channels::is_empty() => (
+            "No channels with notifications yet",
+            "Turn on Notify me of new videos from this channel in the player's options to see its new videos here.",
+        ),
+        _ => ("Nothing here yet", ""),
+    }
+}
+
+/// A spinner (loading) or an error / empty message in place of a grid.
+///
+/// `empty`: what a loaded page without cards says, and the line under it ([`empty_text`]).
+pub fn empty_state(p: Painter, m: &dyn plx_machine::machine::Measure, feed: Option<&Feed>, empty: (&str, &str), area: Rect, now_ms: u32) {
     let (msg, sub) = match feed {
         None => ("", ""),
         Some(f) if f.loading => ("", ""),
         Some(f) if f.error.is_some() => ("Couldn't load this page", "Press OK on the section to retry."),
-        Some(_) => ("Nothing here yet", ""),
+        Some(_) => empty,
     };
     if msg.is_empty() {
         ui::spinner(p, now_ms, area.x + area.w / 2.0, area.y + area.h / 2.0 - 20.0);
