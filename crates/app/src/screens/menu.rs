@@ -614,12 +614,8 @@ impl MenuScreen {
             (tr("When the video ends").to_string(), Act::RepeatMode),
             (tr("Video details").to_string(), Act::VideoDetails),
         ]);
-        // The playing playlist's shuffle (as the Shuffle button at the start of its row), and a
-        // new random order (which also turns shuffle on).
-        if super::player::playlist_shuffle(cx).is_some() {
-            acts.push((tr("Shuffle this playlist").to_string(), Act::ShufflePlaylist));
-            acts.push((tr("Shuffle in a new order").to_string(), Act::Reshuffle));
-        }
+        // The playlist's shuffle is not here: it is in the long-press menu of a video of the playing
+        // playlist only (`suggestion`), the user's choice.
         if cx.views.store.signed_in && !st.video_id.is_empty() && !st.channel_id.is_empty() {
             acts.push((tr("Notify me of new videos from this channel").to_string(), Act::Bell));
         }
