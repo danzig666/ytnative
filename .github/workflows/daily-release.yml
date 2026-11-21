@@ -1,0 +1,95 @@
+# Daily release: once a day, when GitHub's runners are least busy (04:17 UTC, before the US
+# working day and off the hour), a new version is released if code changed since the last
+# release and CI passed on it. A release can still be made by hand at any time by pushing a
+# `vX.Y.Z` tag (release.yml), or by running this workflow from the Actions tab.
+#
+# Release notes: docs/release-notes.md when it was changed since the last release (it is kept
+# up to date with the changes, as bullets starting with New:, Fixed: or Changed:); otherwise the
+# titles of the commits since then.
+name: daily release
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write # the release commit, the tag and the release
+  pages: write # the Homebrew Channel repository (release.yml)
+  id-token: write
+  actions: read # CI's result on the commit
+
+concurrency:
+  group: daily-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Code changed since the last release, and CI passed on it
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          last=$(git describe --tags --abbrev=0 --match 'v*')
+          echo "last release: $last"
+          if ! git diff --name-only "$last"..HEAD | grep -qE '^(crates/|vendor/|xtask/|Cargo\.(toml|lock)$|clients\.json$)'; then
+            echo "No code change since $last: nothing to release."
+            echo "go=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          head=$(git rev-parse HEAD)
+          ci=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$head" --json conclusion --jq '.[0].conclusion')
+          if [ "$ci" != "success" ]; then
+            echo "::warning::CI on ${head:0:7} is '${ci:-not run}': no release today."
+            echo "go=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "last=$last" >> "$GITHUB_OUTPUT"
+          echo "go=true" >> "$GITHUB_OUTPUT"
+
+      - name: Version, release notes, tag
+        id: release
+        if: steps.check.outputs.go == 'true'
+        env:
+          LAST: ${{ steps.check.outputs.last }}
+        run: |
+          ver=$(python3 - <<'PY'
+          import json
+          p = 'crates/app/pkg/appinfo.json'
+          info = json.load(open(p))
+          a, b, c = (int(x) for x in info['version'].split('.'))
+          info['version'] = f'{a}.{b}.{c + 1}'
+          s = open(p).read()
+          old = json.loads(s)['version']
+          open(p, 'w').write(s.replace(f'"version": "{old}"', f'"version": "{info["version"]}"', 1))
+          print(info['version'])
+          PY
+          )
+          if git diff --quiet "$LAST" HEAD -- docs/release-notes.md; then
+            # Not written for this release: the commits' titles.
+            git log --format='- %s' --no-merges "$LAST"..HEAD | grep -v -E '^- Release [0-9]' > docs/release-notes.md || true
+          fi
+          echo "Release notes:"; cat docs/release-notes.md
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/app/pkg/appinfo.json docs/release-notes.md
+          git commit -m "Release $ver"
+          git tag -a "v$ver" -m "ytnative $ver"
+          git push origin HEAD:main "v$ver"
+          echo "tag=v$ver" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: prepare
+    if: needs.prepare.outputs.tag != ''
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.prepare.outputs.tag }}
+    secrets: inherit
