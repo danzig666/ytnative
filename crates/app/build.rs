@@ -95,8 +95,15 @@ fn windows_sim(root: &std::path::Path) {
     );
     std::fs::write(out.join("gl_shim.rs"), code).unwrap();
 
-    // Stage runtime files next to the exe: OUT_DIR is target/<profile>/build/<pkg>-<hash>/out.
-    let exe_dir = out.ancestors().nth(3).unwrap().to_path_buf();
+    // Stage runtime files next to the exe, in target/<profile>: the parent of OUT_DIR's `build`
+    // folder (OUT_DIR is target/<profile>/build/<pkg>-<hash>/out, and one level deeper,
+    // build/<pkg>/<hash>/out, from Cargo 1.100 on).
+    let exe_dir = out
+        .ancestors()
+        .find(|a| a.file_name().is_some_and(|n| n == "build"))
+        .and_then(|b| b.parent())
+        .unwrap_or_else(|| out.ancestors().nth(3).unwrap())
+        .to_path_buf();
     let copy = |from: PathBuf| {
         if let Some(name) = from.file_name() {
             let _ = std::fs::copy(&from, exe_dir.join(name));
