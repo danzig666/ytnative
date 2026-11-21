@@ -215,6 +215,11 @@ pub enum YtFx {
     /// Shuffle the playing playlist (the playing video stays; every other plays once), or back to
     /// its own order from the playing video.
     ShuffleQueue(bool),
+    /// A YouTube playlist page's Shuffle: draw its first video from the whole playlist, not only
+    /// the videos loaded so far; the app then opens the player on it (`AppRig::shuffle_start`).
+    ShufflePlaylist { playlist_id: String, title: String, rand: u64 },
+    /// The playlist page that asked for a Shuffle was left: its answer opens nothing.
+    ShuffleCancel,
     /// The play queue's order as `next_up` worked it out (a shuffle started or went round again).
     SetQueueOrder(Vec<usize>),
     /// A "Play next" video takes over from this playlist video: the playlist goes on from it.
@@ -272,6 +277,10 @@ pub enum YtMsg {
     Acted,
     Comments,
     LiveChat,
+    /// A playlist page's Shuffle: the first video, drawn from the whole playlist (None: it could
+    /// not be had, the shuffle starts from the videos on the page). Delivered to the app itself
+    /// (`Rig::deliver`), not to a screen.
+    ShuffleStart(String, Option<String>),
 }
 
 /// Snapshot of playback state for the screens, refreshed once per frame.
@@ -369,6 +378,8 @@ enum Work {
     /// A window of the play queue's YouTube playlist (`asked`: the token it was asked with, None
     /// for its first), or the error, for the queue `gen` (`AppRig::queue_gen`) it was asked for.
     Queue { gen: u64, playlist_id: String, asked: Option<String>, result: Result<QueueWindow, String> },
+    /// A playlist page's Shuffle: its first video from the whole playlist, or the error.
+    ShuffleStart { playlist_id: String, result: Result<String, String> },
     /// A live chat request's answer, for the polling generation that asked.
     /// `Ok(None)`: the video has no live chat.
     LiveChat { gen: u64, page: Result<Option<yt_core::live_chat::LiveChatPage>, String> },
@@ -489,6 +500,9 @@ pub struct AppRig {
     queue_first: Option<String>,
     /// Windows loaded in this walk (a stop for a list that never ends its tokens).
     queue_windows: u32,
+    /// A playlist page's Shuffle waiting for its first video (`YtFx::ShufflePlaylist`): the page
+    /// that asked, and the playlist and its title. Cleared when the page is left.
+    shuffle_pending: Option<(MachineId, String, String)>,
 }
 
 impl AppRig {
@@ -554,6 +568,7 @@ impl AppRig {
             queue_gen: 0,
             queue_first: None,
             queue_windows: 0,
+            shuffle_pending: None,
         };
         rig.store.local = yt_core::local_playlists::Store::load();
         rig.local_feeds();
@@ -725,6 +740,41 @@ impl AppRig {
             });
             Work::Queue { gen, playlist_id, asked: token, result: result.map_err(|e| format!("{e:#}")) }
         });
+    }
+
+    /// `q` becomes the play queue, asked for by screen `from` (its loads answer it); a YouTube
+    /// playlist loads in full in the background (a mix as it plays).
+    fn set_queue(&mut self, from: MachineId, q: crate::play_queue::PlayQueue) {
+        self.queue_from = Some(from);
+        let load = q.playlist_id.clone().filter(|_| !q.infinite);
+        self.new_queue(Some(q));
+        // A video is about to start from this list: an earlier stop (the viewer left the
+        // player a while ago) must not end the queue while the player is still on its way
+        // under the page dip.
+        self.stopped_ms = None;
+        if let Some(id) = load {
+            self.load_queue(id, None);
+        }
+    }
+
+    /// A playlist page's Shuffle got its first video (`first`, drawn from the whole playlist;
+    /// None: it could not be had, any of the page's videos starts): the page's videos and that one
+    /// become the play queue, shuffled with it first, and the player opens on it. Nothing when
+    /// the page was left meanwhile.
+    fn shuffle_start(&mut self, playlist_id: &str, first: Option<String>, fx: &mut Effects<'_, YtHost>) {
+        let Some((from, title)) = self.shuffle_pending.take_if(|(_, p, _)| p == playlist_id).map(|(f, _, t)| (f, t)) else { return };
+        let key = FeedKey::Browse { id: format!("VL{playlist_id}"), params: None };
+        let mut q = crate::screens::common::playlist_queue(self.store.cards(&key), Some(playlist_id), &title);
+        if let Some(v) = &first {
+            // Further down than the page has loaded: it joins the list (the rest follows as the
+            // play queue loads the playlist).
+            q.extend(vec![v.clone()], None, 0);
+        }
+        q.shuffle(first.as_deref(), crate::play_queue::seed(self.now_ms));
+        let Some(video_id) = q.at(0).cloned() else { return };
+        self.set_queue(from, q);
+        use plx_machine::machine::{Fx, NavOp};
+        fx.push(Fx::Nav(NavOp::Push(YtArg::Player { video_id, playlist: Some(playlist_id.to_string()) })));
     }
 
     /// A new play queue: answers still on their way for the one before are dropped, and its walk
@@ -1185,6 +1235,12 @@ impl AppRig {
                     out.push((addr, YtMsg::Acted));
                 }
                 Work::Queue { gen, playlist_id, asked, result } => self.queue_window(gen, playlist_id, asked, result),
+                Work::ShuffleStart { playlist_id, result } => {
+                    if let Err(e) = &result {
+                        crate::log(&format!("shuffle {playlist_id}: {e}"));
+                    }
+                    out.push((addr, YtMsg::ShuffleStart(playlist_id, result.ok())));
+                }
                 Work::Suggestions(s) => {
                     self.store.suggestions = s;
                     out.push((addr, YtMsg::Suggestions));
@@ -1786,8 +1842,14 @@ impl Rig<YtHost> for AppRig {
             measure: &self.measure,
         }
     }
-    fn deliver(&mut self, _to: MachineId, _msg: &YtMsg, _p: &CxParts<u32>, _fx: &mut Effects<'_, YtHost>) -> Handled {
-        Handled::No
+    fn deliver(&mut self, _to: MachineId, msg: &YtMsg, _p: &CxParts<u32>, fx: &mut Effects<'_, YtHost>) -> Handled {
+        match msg {
+            YtMsg::ShuffleStart(playlist_id, first) => {
+                self.shuffle_start(playlist_id, first.clone(), fx);
+                Handled::Yes
+            }
+            _ => Handled::No,
+        }
     }
     fn timer(&mut self, _o: MachineId, _id: TimerId, _p: &CxParts<u32>, _fx: &mut Effects<'_, YtHost>) {}
     fn app_fx(&mut self, from: MachineId, fx: YtFx, _p: &CxParts<u32>, _out: &mut Effects<'_, YtHost>) {
@@ -2182,19 +2244,27 @@ impl Rig<YtHost> for AppRig {
                 self.store.toast(msg, self.now_ms);
                 self.play_next_changed();
             }
-            YtFx::SetQueue(q) => {
-                self.queue_from = Some(from);
-                // A YouTube playlist loads in full in the background (a mix as it plays).
-                let load = q.playlist_id.clone().filter(|_| !q.infinite);
-                self.new_queue(Some(q));
-                // A video is about to start from this list: an earlier stop (the viewer left the
-                // player a while ago) must not end the queue while the player is still on its way
-                // under the page dip.
-                self.stopped_ms = None;
-                if let Some(id) = load {
-                    self.load_queue(id, None);
+            YtFx::SetQueue(q) => self.set_queue(from, q),
+            YtFx::ShufflePlaylist { playlist_id, title, rand } => {
+                // A second press while the first is on its way waits for it.
+                if self.shuffle_pending.as_ref().is_some_and(|(_, p, _)| *p == playlist_id) {
+                    return;
+                }
+                self.shuffle_pending = Some((from, playlist_id.clone(), title));
+                // The answer goes to the app itself (`Rig::deliver`), which can open the player:
+                // a screen is not told of worker answers.
+                let addr = Addr { to: MachineId::Cache, req: self.next_addr(from).req };
+                let (session, done) = (self.session.clone(), self.done.clone());
+                let spawned = plx_base::task::spawn("shuffle", move || {
+                    let result = with_session(&session, |s| s.playlist_random_video(&playlist_id, rand)).map_err(|e| format!("{e:#}"));
+                    done.lock().unwrap().push((addr, Work::ShuffleStart { playlist_id, result }));
+                    plx_machine::present::wake_from_worker();
+                });
+                if spawned.is_none() {
+                    crate::log("shuffle: could not start worker thread");
                 }
             }
+            YtFx::ShuffleCancel => self.shuffle_pending = None,
             YtFx::ShuffleQueue(on) => {
                 let (v, seed) = (self.player_view.video_id.clone(), crate::play_queue::seed(self.now_ms));
                 if let Some(q) = &mut self.store.play_queue {

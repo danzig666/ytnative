@@ -296,6 +296,29 @@ mod tests {
         assert_eq!(q.index("v0"), Some(0));
     }
 
+    /// A playlist page's shuffle starting with a video further down than the page loaded (drawn
+    /// from the whole playlist): it plays first, and when the rest of the list loads every video
+    /// is in the round once, the first one not again.
+    #[test]
+    fn a_shuffle_can_start_with_a_video_not_loaded_yet() {
+        let mut q = PlayQueue::playlist(Some("PL1".into()), String::new(), ids(20));
+        q.extend(vec!["v100".into()], None, 0);
+        q.shuffle(Some("v100"), 7);
+        assert_eq!(q.at(0).map(String::as_str), Some("v100"));
+        q.extend(ids(138), Some("v100"), 11);
+        assert_eq!(q.len(), 138, "v100 is not in the list twice");
+        let mut seen = vec!["v100".to_string()];
+        let mut cur = "v100".to_string();
+        while let Some(n) = q.step(&cur, 1, false) {
+            seen.push(n.clone());
+            cur = n.clone();
+        }
+        seen.sort();
+        let mut all = ids(138);
+        all.sort();
+        assert_eq!(seen, all, "every video once");
+    }
+
     #[test]
     fn a_play_order_that_no_longer_fits_is_made_again() {
         let mut q = PlayQueue::playlist(None, String::new(), ids(3));

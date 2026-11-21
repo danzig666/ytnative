@@ -52,6 +52,12 @@ fn with_panel(mut page: Page, panel: PlaylistPanel) -> Page {
     page
 }
 
+/// A position in a list of `total` (> 0) from a random number: each equally likely (up to the
+/// negligible bias of a 64-bit modulo).
+fn random_index(total: usize, rand: u64) -> usize {
+    (rand % total as u64) as usize
+}
+
 /// A window of the panel as the next page of a playlist page: its videos, and the continuation
 /// on, unless this window is the last (empty, no token, the token it was asked with, or past the
 /// end: the list's first video again).
@@ -91,6 +97,29 @@ impl Session {
             Ok(panel) => with_panel(page, panel),
             Err(_) => page,
         })
+    }
+
+    /// The video at `index` (0-based) of a playlist: the watch page started at that position of
+    /// the list (`playlistIndex`), so it needs no walk to that far.
+    pub fn playlist_video_at(&mut self, playlist_id: &str, index: usize) -> Result<String> {
+        let w = parse_watch(&self.raw("next", json!({ "playlistId": playlist_id, "playlistIndex": index }))?);
+        Some(w.video_id).filter(|v| !v.is_empty()).ok_or_else(|| anyhow!("no video at {index} of {playlist_id}"))
+    }
+
+    /// **A shuffle's first video, from the whole playlist**: position `rand % total` of the list
+    /// (every video equally likely), not only of the videos loaded so far. From the panel's first
+    /// window when it is there, else asked for at that position.
+    pub fn playlist_random_video(&mut self, playlist_id: &str, rand: u64) -> Result<String> {
+        let panel = self.playlist_start(playlist_id)?;
+        let total = panel.total.unwrap_or(panel.items.len()).max(panel.items.len());
+        if total == 0 {
+            return Err(anyhow!("{playlist_id} has no videos"));
+        }
+        let k = random_index(total, rand);
+        match panel.items.get(k) {
+            Some(i) => Ok(i.id.clone()),
+            None => self.playlist_video_at(playlist_id, k),
+        }
     }
 
     /// The next videos of a [`Session::playlist_page`] from its panel continuation.
@@ -145,6 +174,21 @@ mod tests {
         assert!(panel_page("v1", "T2", vec![], Some("T3".into())).continuation.is_none());
         assert!(panel_page("v1", "T2", vec![video("v30")], None).continuation.is_none());
         assert!(panel_page("v1", "T2", vec![video("v30")], Some("T2".into())).continuation.is_none());
+    }
+
+    /// A random start is a position inside the list, and every position can come up.
+    #[test]
+    fn a_random_position_is_inside_the_list() {
+        for total in [1, 2, 50, 138] {
+            let mut hit = vec![false; total];
+            for r in u64::MAX - 3 * total as u64..u64::MAX {
+                let k = random_index(total, r);
+                assert!(k < total);
+                hit[k] = true;
+            }
+            assert!(hit.iter().all(|h| *h), "every position of {total} can come up");
+        }
+        assert_eq!(random_index(138, 1234567), 1234567 % 138);
     }
 
     /// Only the panel's own continuation is one: a browse token is not.
@@ -284,6 +328,22 @@ mod live {
         assert_eq!(ids, walked, "the same videos in the same order as the play queue");
     }
 
+    /// The video at a position far down the list comes straight from `playlistIndex`, the panel
+    /// says how long the list is, and a random start can land on any video of it.
+    #[test]
+    #[ignore]
+    fn a_shuffle_can_start_anywhere() {
+        let mut s = session();
+        let (walked, _, _) = walk(&mut s, LIST, 50);
+        assert_eq!(s.playlist_start(LIST).unwrap().total, Some(walked.len()), "the panel's totalVideos");
+        for k in [0, 19, 20, 100, walked.len() - 1] {
+            assert_eq!(s.playlist_video_at(LIST, k).unwrap(), walked[k], "video at {k}");
+        }
+        let v = s.playlist_random_video(LIST, 1234567).unwrap();
+        let at = walked.iter().position(|x| *x == v);
+        println!("random start: {v} at {at:?} of {}", walked.len());
+        assert_eq!(at, Some(1234567 % walked.len()));
+    }
     #[test]
     #[ignore]
     fn watch_later_and_liked() {

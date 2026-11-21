@@ -94,9 +94,15 @@ impl FeedScreen {
     }
 
     /// Play all / Shuffle: the playlist from its first video, or in a random order (each video
-    /// once; the rest of a YouTube playlist joins the order as it loads).
+    /// once; the rest of a YouTube playlist joins the order as it loads). A YouTube playlist's
+    /// shuffle draws its first video from the whole playlist, not only the videos loaded on the
+    /// page: the app asks for it and opens the player on it (`AppRig::shuffle_start`).
     fn play_all(&self, shuffle: bool, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
         let Some(pl) = playlist_of(&self.key) else { return };
+        if let Some(id) = pl.filter(|id| shuffle && !yt_core::playlist::is_mix(id)) {
+            fx.push(Fx::App(YtFx::ShufflePlaylist { playlist_id: id.to_string(), title: self.title(cx), rand: crate::play_queue::seed(cx.views.now_ms) }));
+            return;
+        }
         let mut q = common::playlist_queue(self.src(cx).cards, pl, &self.title(cx));
         if shuffle {
             q.shuffle(None, crate::play_queue::seed(cx.views.now_ms));
@@ -204,6 +210,10 @@ impl Machine<YtHost> for FeedScreen {
             ScreenEvent::Activate(e @ (PLAY_BTN | SHUFFLE_BTN)) => {
                 self.play_all(*e == SHUFFLE_BTN, cx, fx);
                 return Handled::Yes;
+            }
+            // A Shuffle still waiting for its first video opens nothing once the page is left.
+            ScreenEvent::Cover | ScreenEvent::Unmount if playlist_of(&self.key).is_some() => {
+                fx.push(Fx::App(YtFx::ShuffleCancel));
             }
             ScreenEvent::Async(..) => fx.invalidate(plx_machine::present::Provenance::Lifecycle),
             _ => {}

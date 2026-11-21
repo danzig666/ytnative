@@ -42,6 +42,9 @@ pub struct PlaylistPanel {
     /// Mixes are endless: more items come from `continuation`.
     pub infinite: bool,
     pub continuation: Option<String>,
+    /// How many videos the whole playlist has (`totalVideos`), when YouTube says.
+    #[serde(default)]
+    pub total: Option<usize>,
 }
 
 /// Tokens for `like/like`, `like/dislike`, `like/removelike` (body: `{"target":{"videoId"},"params"}`).
@@ -290,6 +293,7 @@ pub fn parse_watch(resp: &Value) -> WatchInfo {
             title: pl["title"].as_str().map(str::to_string).or_else(|| text(&pl["titleText"])).unwrap_or_default(),
             current_index: pl["currentIndex"].as_u64().map(|i| i as usize),
             infinite: pl["isInfinite"].as_bool().unwrap_or(false),
+            total: pl["totalVideos"].as_u64().map(|n| n as usize),
             ..Default::default()
         };
         if let Some(i) = queue_idx {
