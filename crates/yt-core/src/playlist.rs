@@ -52,6 +52,32 @@ fn with_panel(mut page: Page, panel: PlaylistPanel) -> Page {
     page
 }
 
+/// The videos in one window of the playlist panel, and so in one block of a playlist loaded by
+/// position ([`Session::playlist_block`]).
+pub const BLOCK: usize = 20;
+
+/// Videos the panel shows before the one it was started at (`currentIndex` 5).
+const PANEL_LEAD: usize = 5;
+
+/// A shuffle's first video ([`Session::playlist_random_video`]): its position, and how long the
+/// whole playlist is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RandomStart {
+    pub video_id: String,
+    pub index: usize,
+    pub total: usize,
+}
+
+/// The block a position is in ([`Session::playlist_block`]).
+pub fn block_of(index: usize) -> usize {
+    index / BLOCK
+}
+
+/// How many blocks a playlist of `total` videos has.
+pub fn blocks_in(total: usize) -> usize {
+    total.div_ceil(BLOCK)
+}
+
 /// A position in a list of `total` (> 0) from a random number: each equally likely (up to the
 /// negligible bias of a 64-bit modulo).
 fn random_index(total: usize, rand: u64) -> usize {
@@ -109,17 +135,29 @@ impl Session {
     /// **A shuffle's first video, from the whole playlist**: position `rand % total` of the list
     /// (every video equally likely), not only of the videos loaded so far. From the panel's first
     /// window when it is there, else asked for at that position.
-    pub fn playlist_random_video(&mut self, playlist_id: &str, rand: u64) -> Result<String> {
+    pub fn playlist_random_video(&mut self, playlist_id: &str, rand: u64) -> Result<RandomStart> {
         let panel = self.playlist_start(playlist_id)?;
         let total = panel.total.unwrap_or(panel.items.len()).max(panel.items.len());
         if total == 0 {
             return Err(anyhow!("{playlist_id} has no videos"));
         }
-        let k = random_index(total, rand);
-        match panel.items.get(k) {
-            Some(i) => Ok(i.id.clone()),
-            None => self.playlist_video_at(playlist_id, k),
-        }
+        let index = random_index(total, rand);
+        let video_id = match panel.items.get(index) {
+            Some(i) => i.id.clone(),
+            None => self.playlist_video_at(playlist_id, index)?,
+        };
+        Ok(RandomStart { video_id, index, total })
+    }
+
+    /// **Block `block` of a playlist**: its videos at positions `BLOCK * block ..` (up to
+    /// [`BLOCK`]), straight from that place in the list (`playlistIndex`; the panel there starts
+    /// five videos before the one asked for). Unlike the panel's continuation, which loses its way
+    /// in a long list (a 1051-video playlist ended after 395, numbered wrongly from about 290),
+    /// this reaches any part of it.
+    pub fn playlist_block(&mut self, playlist_id: &str, block: usize, total: usize) -> Result<Vec<Item>> {
+        let index = (block * BLOCK + PANEL_LEAD).min(total.saturating_sub(1));
+        let w = parse_watch(&self.raw("next", json!({ "playlistId": playlist_id, "playlistIndex": index }))?);
+        Ok(w.playlist.map(|p| p.items).unwrap_or_default())
     }
 
     /// The next videos of a [`Session::playlist_page`] from its panel continuation.
@@ -339,10 +377,28 @@ mod live {
         for k in [0, 19, 20, 100, walked.len() - 1] {
             assert_eq!(s.playlist_video_at(LIST, k).unwrap(), walked[k], "video at {k}");
         }
-        let v = s.playlist_random_video(LIST, 1234567).unwrap();
-        let at = walked.iter().position(|x| *x == v);
-        println!("random start: {v} at {at:?} of {}", walked.len());
-        assert_eq!(at, Some(1234567 % walked.len()));
+        let r = s.playlist_random_video(LIST, 1234567).unwrap();
+        let at = walked.iter().position(|x| *x == r.video_id);
+        println!("random start: {} at {at:?} of {}", r.video_id, walked.len());
+        assert_eq!((at, r.index, r.total), (Some(1234567 % walked.len()), 1234567 % walked.len(), walked.len()));
+    }
+
+    /// A long playlist's blocks, anywhere in it, each starting at its own position: the first
+    /// video of block `b` is the video at `20 * b`, the last block is the list's tail.
+    #[test]
+    #[ignore]
+    fn a_long_playlists_blocks_load_anywhere() {
+        const LONG: &str = "PL5fRL6A4m-DFddDPJU5Ugr3NRhxrm5GtR"; // 1051 videos in 2026-11
+        let mut s = session();
+        let total = s.playlist_start(LONG).unwrap().total.unwrap();
+        println!("{LONG}: {total} videos, {} blocks", super::blocks_in(total));
+        for b in [0, 1, 19, 30, super::blocks_in(total) - 1] {
+            let items = s.playlist_block(LONG, b, total).unwrap();
+            let first = s.playlist_video_at(LONG, b * super::BLOCK).unwrap();
+            println!("  block {b}: {} videos, starts with the video at {}: {}", items.len(), b * super::BLOCK, items.first().is_some_and(|i| i.id == first));
+            assert!(!items.is_empty());
+            assert_eq!(items[0].id, first, "block {b} starts at its own position");
+        }
     }
     #[test]
     #[ignore]

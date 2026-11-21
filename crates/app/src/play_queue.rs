@@ -39,7 +39,17 @@ pub struct PlayQueue {
     /// The playlist video a "Play next" video cut in after: the playlist goes on from it once
     /// the queued videos are done.
     pub resume_after: Option<String>,
+    /// A long playlist shuffled by blocks (`yt_core::playlist::playlist_block`): the blocks not
+    /// loaded yet. A random one of them loads whenever the round is about to run out, so every
+    /// video of the playlist can come up without the whole list being loaded.
+    pub blocks: Vec<usize>,
+    /// The length of the playlist loaded by blocks.
+    pub block_total: usize,
 }
+
+/// A shuffled playlist longer than this is loaded by random blocks: this many videos to start
+/// with (the page's and random blocks of the rest), then a block whenever the round runs low.
+pub const SHUFFLE_START_VIDEOS: usize = 100;
 
 impl PlayQueue {
     /// A list of cards (not a playlist): its videos in order.
@@ -68,7 +78,35 @@ impl PlayQueue {
 
     /// Every video of the list is known (nothing more to load, nothing loading, no load failed).
     pub fn complete(&self) -> bool {
-        self.more.is_none() && !self.loading && !self.truncated
+        self.more.is_none() && !self.loading && !self.truncated && self.blocks.is_empty()
+    }
+
+    /// The playlist (`total` videos) loads by random blocks from here on: every block but the
+    /// first `known` ones (the page's videos, from the start of the list).
+    pub fn by_blocks(&mut self, total: usize, known: usize) {
+        use yt_core::playlist::{blocks_in, BLOCK};
+        self.block_total = total;
+        self.blocks = (known / BLOCK..blocks_in(total)).collect();
+    }
+
+    /// A random block not loaded yet, taken off the list (None: all are loaded).
+    pub fn take_block(&mut self, rand: u64) -> Option<usize> {
+        if self.blocks.is_empty() {
+            return None;
+        }
+        let i = (Rng(rand).next() % self.blocks.len() as u64) as usize;
+        Some(self.blocks.swap_remove(i))
+    }
+
+    /// A block should load: some are left, none is loading, and fewer than a block's worth of
+    /// videos are left to play after `current` in this round, or fewer than
+    /// [`SHUFFLE_START_VIDEOS`] are known.
+    pub fn wants_block(&self, current: &str) -> bool {
+        if self.blocks.is_empty() || self.loading {
+            return false;
+        }
+        let left = self.index(current).map_or(self.len(), |k| self.len() - k - 1);
+        left < yt_core::playlist::BLOCK || self.len() < SHUFFLE_START_VIDEOS
     }
 
     pub fn shuffled(&self) -> bool {
@@ -317,6 +355,37 @@ mod tests {
         let mut all = ids(138);
         all.sort();
         assert_eq!(seen, all, "every video once");
+    }
+
+    /// A long playlist shuffled by blocks: the page's blocks are known, the rest wait; it asks for
+    /// blocks until it knows 100 videos and whenever the round runs low, and it is complete only
+    /// once every block is loaded.
+    #[test]
+    fn a_long_playlist_loads_random_blocks_as_the_round_runs_low() {
+        let mut q = PlayQueue::playlist(Some("PL1".into()), String::new(), ids(20));
+        q.by_blocks(1051, 20);
+        assert_eq!(q.blocks.len(), 52, "53 blocks, the page's first one known");
+        assert!(!q.complete());
+        q.shuffle(Some("v0"), 1);
+        assert!(q.wants_block("v0"), "fewer than 100 known");
+        let mut seen = std::collections::HashSet::new();
+        let mut n = 0;
+        while let Some(b) = q.take_block(n) {
+            assert!(seen.insert(b), "block {b} taken twice");
+            assert!((1..53).contains(&b));
+            n += 1;
+        }
+        assert_eq!(n, 52);
+        assert!(q.complete() || q.more.is_some(), "all blocks taken");
+        // 100 known, the round just started: no block is wanted until it runs low.
+        let mut q = PlayQueue::playlist(Some("PL1".into()), String::new(), ids(100));
+        q.by_blocks(1051, 20);
+        q.shuffle(Some("v0"), 1);
+        assert!(!q.wants_block("v0"));
+        let near_end = q.at(q.len() - 5).unwrap().clone();
+        assert!(q.wants_block(&near_end));
+        q.loading = true;
+        assert!(!q.wants_block(&near_end), "one block at a time");
     }
 
     #[test]

@@ -1,4 +1,4 @@
 - Fixed: Opening the sidebar on a list scrolled down (Notifications, Channels and the other grid pages) sent the list to its top, and closing the sidebar scrolled it back; the list now stays where it is
 - Changed: "Shuffle this playlist" and "Shuffle in a new order" are only in the menu of a playlist video (hold OK on it), no longer in the player's options
 - Fixed: A playlist's page showed only its first 15 videos (the card said 50 or 138); it now lists them all, loading more as you scroll down
-- Fixed: Shuffle on a playlist's page started with one of its first 20 videos; any video of the whole playlist can now come first
+- Fixed: Shuffle on a playlist's page started with one of its first 20 videos, and a very long playlist (over about 400 videos) never got past its first few hundred; any video of the whole playlist can now come first and come up later. A long playlist starts with 100 videos from all over the list and loads more as they play

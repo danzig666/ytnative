@@ -280,7 +280,7 @@ pub enum YtMsg {
     /// A playlist page's Shuffle: the first video, drawn from the whole playlist (None: it could
     /// not be had, the shuffle starts from the videos on the page). Delivered to the app itself
     /// (`Rig::deliver`), not to a screen.
-    ShuffleStart(String, Option<String>),
+    ShuffleStart(String, Option<yt_core::playlist::RandomStart>),
 }
 
 /// Snapshot of playback state for the screens, refreshed once per frame.
@@ -379,7 +379,10 @@ enum Work {
     /// for its first), or the error, for the queue `gen` (`AppRig::queue_gen`) it was asked for.
     Queue { gen: u64, playlist_id: String, asked: Option<String>, result: Result<QueueWindow, String> },
     /// A playlist page's Shuffle: its first video from the whole playlist, or the error.
-    ShuffleStart { playlist_id: String, result: Result<String, String> },
+    ShuffleStart { playlist_id: String, result: Result<yt_core::playlist::RandomStart, String> },
+    /// A block of the play queue's playlist loaded by position (a long playlist shuffled by
+    /// blocks), for the queue `gen` it was asked for.
+    QueueBlock { gen: u64, playlist_id: String, block: usize, result: Result<Vec<yt_core::model::Item>, String> },
     /// A live chat request's answer, for the polling generation that asked.
     /// `Ok(None)`: the video has no live chat.
     LiveChat { gen: u64, page: Result<Option<yt_core::live_chat::LiveChatPage>, String> },
@@ -747,28 +750,85 @@ impl AppRig {
     fn set_queue(&mut self, from: MachineId, q: crate::play_queue::PlayQueue) {
         self.queue_from = Some(from);
         let load = q.playlist_id.clone().filter(|_| !q.infinite);
+        let by_blocks = !q.blocks.is_empty();
         self.new_queue(Some(q));
         // A video is about to start from this list: an earlier stop (the viewer left the
         // player a while ago) must not end the queue while the player is still on its way
         // under the page dip.
         self.stopped_ms = None;
-        if let Some(id) = load {
+        if by_blocks {
+            self.load_block();
+        } else if let Some(id) = load {
             self.load_queue(id, None);
         }
     }
 
-    /// A playlist page's Shuffle got its first video (`first`, drawn from the whole playlist;
+    /// Loads a random block of the play queue's playlist not loaded yet (a long playlist shuffled
+    /// by blocks).
+    fn load_block(&mut self) {
+        let Some(from) = self.queue_from else { return };
+        let seed = crate::play_queue::seed(self.now_ms);
+        let Some(q) = &mut self.store.play_queue else { return };
+        let (Some(playlist_id), Some(block)) = (q.playlist_id.clone(), q.take_block(seed)) else { return };
+        q.loading = true;
+        let (gen, total) = (self.queue_gen, q.block_total);
+        self.spawn(from, "play queue block", move |s| {
+            let result = with_session(s, |s| s.playlist_block(&playlist_id, block, total)).map_err(|e| format!("{e:#}"));
+            Work::QueueBlock { gen, playlist_id, block, result }
+        });
+    }
+
+    /// A block of the play queue's playlist arrived: its videos join this round at random places
+    /// after the playing one, and the next block loads while fewer than
+    /// `play_queue::SHUFFLE_START_VIDEOS` are known (later ones as the round runs low:
+    /// [`AppRig::follow_queue`]).
+    fn queue_block(&mut self, gen: u64, playlist_id: String, block: usize, result: Result<Vec<yt_core::model::Item>, String>) {
+        if gen != self.queue_gen {
+            return;
+        }
+        let current = self.player_view.video_id.clone();
+        let seed = crate::play_queue::seed(self.now_ms);
+        let Some(q) = self.store.play_queue.as_mut().filter(|q| q.playlist_id.as_deref() == Some(playlist_id.as_str())) else { return };
+        q.loading = false;
+        match result {
+            Ok(items) => {
+                let added = q.add_items(items, Some(&current), seed);
+                crate::log(&format!("play queue {playlist_id} block {block}: +{added} ({} known, {} blocks left)", q.len(), q.blocks.len()));
+            }
+            Err(e) => {
+                // The rest is not loaded: the list is not taken as ended (YouTube's next of the
+                // playlist follows, see `next_up`), and no block is asked for again.
+                crate::log(&format!("play queue {playlist_id} block {block}: {e}"));
+                q.blocks.clear();
+                q.truncated = true;
+                return;
+            }
+        }
+        if q.len() < crate::play_queue::SHUFFLE_START_VIDEOS && !q.blocks.is_empty() {
+            self.load_block();
+        }
+    }
+
+    /// A playlist page's Shuffle got its first video (`start`, drawn from the whole playlist;
     /// None: it could not be had, any of the page's videos starts): the page's videos and that one
-    /// become the play queue, shuffled with it first, and the player opens on it. Nothing when
-    /// the page was left meanwhile.
-    fn shuffle_start(&mut self, playlist_id: &str, first: Option<String>, fx: &mut Effects<'_, YtHost>) {
+    /// become the play queue, shuffled with it first, and the player opens on it. A playlist
+    /// longer than `play_queue::SHUFFLE_START_VIDEOS` then loads by random blocks rather than
+    /// from its start. Nothing when the page was left meanwhile.
+    fn shuffle_start(&mut self, playlist_id: &str, start: Option<yt_core::playlist::RandomStart>, fx: &mut Effects<'_, YtHost>) {
         let Some((from, title)) = self.shuffle_pending.take_if(|(_, p, _)| p == playlist_id).map(|(f, _, t)| (f, t)) else { return };
         let key = FeedKey::Browse { id: format!("VL{playlist_id}"), params: None };
-        let mut q = crate::screens::common::playlist_queue(self.store.cards(&key), Some(playlist_id), &title);
+        let cards = self.store.cards(&key);
+        let mut q = crate::screens::common::playlist_queue(cards, Some(playlist_id), &title);
+        // The page's cards are the start of the list, in order: the blocks they fill are known.
+        let known = q.len();
+        let first = start.as_ref().map(|s| s.video_id.clone());
         if let Some(v) = &first {
             // Further down than the page has loaded: it joins the list (the rest follows as the
             // play queue loads the playlist).
             q.extend(vec![v.clone()], None, 0);
+        }
+        if let Some(s) = start.as_ref().filter(|s| s.total > crate::play_queue::SHUFFLE_START_VIDEOS) {
+            q.by_blocks(s.total, known);
         }
         q.shuffle(first.as_deref(), crate::play_queue::seed(self.now_ms));
         let Some(video_id) = q.at(0).cloned() else { return };
@@ -862,6 +922,10 @@ impl AppRig {
         });
         if let Some((token, id)) = more {
             self.load_queue(id, Some(token));
+        }
+        // A long playlist shuffled by blocks: another block as the round runs low.
+        if self.store.play_queue.as_ref().is_some_and(|q| q.wants_block(&current)) {
+            self.load_block();
         }
     }
 
@@ -1235,6 +1299,7 @@ impl AppRig {
                     out.push((addr, YtMsg::Acted));
                 }
                 Work::Queue { gen, playlist_id, asked, result } => self.queue_window(gen, playlist_id, asked, result),
+                Work::QueueBlock { gen, playlist_id, block, result } => self.queue_block(gen, playlist_id, block, result),
                 Work::ShuffleStart { playlist_id, result } => {
                     if let Err(e) = &result {
                         crate::log(&format!("shuffle {playlist_id}: {e}"));
