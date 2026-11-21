@@ -1,5 +1,1 @@
-- Fixed: ytnative crashed every time it closed, and each crash left a file of several hundred MB in its folder, which filled the TV's app storage until updates failed (issue #11). The crash is gone, those files are no longer written, and the ones left over are removed when ytnative starts
-- Fixed: Thumbnails in the playlist and Mix rows under the video looked squashed
-- Fixed: Holding OK on a video of the playlist row offered only Close
-- New: Holding OK on a video of the playing playlist (and the player's options) offers "Shuffle this playlist" and "Shuffle in a new order"
-- Changed: The playlist's name and position have a line of their own, so the line under the title fits; a Mix shows its position too ("3 of 25 so far")
+- Fixed: Opening the sidebar on a list scrolled down (Notifications, Channels and the other grid pages) sent the list to its top, and closing the sidebar scrolled it back; the list now stays where it is

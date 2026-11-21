@@ -24,8 +24,10 @@ const LEFT: f32 = 96.0;
 /// Sidebar width.
 const NAV_W: f32 = 390.0;
 
+/// The grid keeps its scroll while focus is on the sidebar: opening the sidebar over a list scrolled
+/// down (Notifications, Channels...) must not send the list to its top and back again when it closes.
 fn spec() -> GridSpec {
-    GridSpec::new(150.0, 96.0).columns(ui::card_cols(), ui::card_style(ui::card_cols(), ROW_W, 40.0), LEFT)
+    GridSpec { home_when_unfocused: false, ..GridSpec::new(150.0, 96.0).columns(ui::card_cols(), ui::card_style(ui::card_cols(), ROW_W, 40.0), LEFT) }
 }
 const G_NAV: GroupId = GroupId(1);
 const G_GRID: GroupId = GroupId(2);
@@ -460,6 +462,11 @@ impl Machine<YtHost> for BrowseScreen {
             };
         }
         let src = self.src(cx);
+        // The grid no longer scrolls home when unfocused (`spec`): a section whose feed was cleared
+        // (back from sign-in or settings) starts its reloaded cards from the top instead.
+        if src.cards.is_empty() && self.grid.scroll() != 0.0 {
+            self.grid.restore_scroll(0.0);
+        }
         match self.grid.on(ev, cx, &src, fx) {
             Some(CardEvent::Activate(e)) => {
                 if let Some(card) = cx.views.store.card(e) {
@@ -705,5 +712,15 @@ impl Screen<YtHost> for BrowseScreen {
     }
     fn render(&self) -> RenderStrategy {
         RenderStrategy::Page
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Opening the sidebar moves focus off the grid: the grid must keep its scroll then, so a list
+    /// scrolled down (Notifications, Channels...) stays where it is under the sidebar.
+    #[test]
+    fn the_grid_keeps_its_scroll_while_the_sidebar_has_focus() {
+        assert!(!super::spec().home_when_unfocused);
     }
 }
