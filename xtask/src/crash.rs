@@ -186,6 +186,13 @@ fn selftest() -> Result<()> {
     let elf = Elf::parse(&data)?;
     let mut funcs = elf.functions();
     funcs.retain(|(n, _, s)| *s >= 16 && (n.contains("crashtrace") || n.contains("8ytnative4main") || n.contains("now_us")));
+    // Our own functions only: a library generic instantiated with one of ours (`Option::filter::<
+    // ytnative::main::{closure#9}>`) and closures are inlined and named in other ways, so which of
+    // them a build happens to have made the test pass or fail with the code's layout.
+    funcs.retain(|(n, _, _)| {
+        let d = format!("{:#}", rustc_demangle::demangle(n));
+        (d.starts_with("ytnative::") || d.starts_with("<ytnative::")) && !d.contains("{closure")
+    });
     funcs.sort_by(|a, b| a.0.cmp(&b.0));
     funcs.dedup_by(|a, b| a.1 == b.1);
     if funcs.len() < 2 {
