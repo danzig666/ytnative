@@ -1,5 +1,5 @@
-- Fixed: Mixes and YouTube's playlists played one video and then YouTube's recommendations; they now play on in their own order (a whole playlist is loaded, a Mix keeps growing)
-- New: While a playlist or a Mix plays, the row under the video shows it, the playing video marked; OK on another plays it within the playlist
-- New: Shuffle for playlists: a button at the start of that row, and Play all / Shuffle on a playlist's page; every video plays once, in a random order
-- New: The player shows where it is in the playlist ("3 of 15"); Next and Previous follow the playlist's order
-- Changed: A video added with Play next cuts into a playlist, which then goes on; leaving the player ends the playlist
+- Fixed: ytnative crashed every time it closed, and each crash left a file of several hundred MB in its folder, which filled the TV's app storage until updates failed (issue #11). The crash is gone, those files are no longer written, and the ones left over are removed when ytnative starts
+- Fixed: Thumbnails in the playlist and Mix rows under the video looked squashed
+- Fixed: Holding OK on a video of the playlist row offered only Close
+- New: Holding OK on a video of the playing playlist (and the player's options) offers "Shuffle this playlist" and "Shuffle in a new order"
+- Changed: The playlist's name and position have a line of their own, so the line under the title fits; a Mix shows its position too ("3 of 25 so far")
