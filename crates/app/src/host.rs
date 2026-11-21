@@ -1747,8 +1747,11 @@ pub fn take_reset(g: &mut Option<yt_core::session::Session>) {
 fn load_page(session: &Mutex<Option<yt_core::session::Session>>, epoch: u64, key: &FeedKey, continuation: Option<String>) -> Work {
     let r = with_session(session, |s| match (&continuation, key) {
         (c, FeedKey::Section(Section::Notifications)) => s.notifications(c.as_deref()),
+        // A playlist's page goes on past YouTube's first 15 through the playlist panel.
+        (Some(c), _) if yt_core::playlist::is_panel_token(c) => s.playlist_page_more(c),
         (Some(c), k) => s.more(k.endpoint(), c),
         (None, FeedKey::Section(sec)) => s.browse(sec.browse_id(), None),
+        (None, FeedKey::Browse { id, params: None }) if id.starts_with("VL") => s.playlist_page(&id[2..]),
         (None, FeedKey::Browse { id, params }) => s.browse(id, params.as_deref()),
         (None, FeedKey::Search { query, params }) => s.search(query, params.as_deref()),
         (None, FeedKey::Related(_)) => Ok(Default::default()),

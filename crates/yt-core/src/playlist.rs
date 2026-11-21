@@ -9,7 +9,7 @@
 //! Mixes (ids starting with "RD": "My Mix", "Mix – <artist>") are endless: the panel says
 //! `isInfinite` and its continuation keeps giving more.
 
-use crate::model::Item;
+use crate::model::{Item, Page, Shelf};
 use crate::session::Session;
 use crate::watch::{parse_watch, PlaylistPanel};
 use anyhow::{anyhow, Result};
@@ -18,6 +18,51 @@ use serde_json::json;
 /// A mix: YouTube makes it up as it plays (endless), so there is no complete list to load.
 pub fn is_mix(playlist_id: &str) -> bool {
     playlist_id.starts_with("RD")
+}
+
+/// Marks a playlist page's continuation that goes on through the playlist panel
+/// ([`Session::playlist_page`]) rather than through `browse`: `<prefix><first video id> <token>`.
+/// The first video is what tells a window past the list's end (it starts over with it).
+const PANEL_TOKEN: &str = "ytnative-panel:";
+
+/// Whether `continuation` is a playlist page's panel continuation ([`Session::playlist_page_more`]).
+pub fn is_panel_token(continuation: &str) -> bool {
+    continuation.starts_with(PANEL_TOKEN)
+}
+
+fn panel_token(first: &str, token: &str) -> String {
+    format!("{PANEL_TOKEN}{first} {token}")
+}
+
+fn split_panel_token(continuation: &str) -> Option<(&str, &str)> {
+    continuation.strip_prefix(PANEL_TOKEN)?.split_once(' ')
+}
+
+/// The playlist page's cards followed by the panel's first window (the videos after the page's
+/// 15, without the ones it already has), and the panel's continuation to the rest.
+fn with_panel(mut page: Page, panel: PlaylistPanel) -> Page {
+    let Some(first) = panel.items.first().map(|i| i.id.clone()) else { return page };
+    let have: std::collections::HashSet<String> = page.shelves.iter().flat_map(|s| s.items.iter().map(|i| i.id.clone())).collect();
+    let extra: Vec<Item> = panel.items.into_iter().filter(|i| !have.contains(&i.id)).collect();
+    match page.shelves.last_mut() {
+        Some(sh) => sh.items.extend(extra),
+        None => page.shelves.push(Shelf { items: extra, ..Default::default() }),
+    }
+    page.continuation = panel.continuation.map(|t| panel_token(&first, &t));
+    page
+}
+
+/// A window of the panel as the next page of a playlist page: its videos, and the continuation
+/// on, unless this window is the last (empty, no token, the token it was asked with, or past the
+/// end: the list's first video again).
+fn panel_page(first: &str, asked: &str, items: Vec<Item>, next: Option<String>) -> Page {
+    let round = items.iter().any(|i| i.id == first);
+    let next = next.filter(|n| !items.is_empty() && !round && n != asked);
+    Page {
+        shelves: vec![Shelf { items, ..Default::default() }],
+        continuation: next.map(|t| panel_token(first, &t)),
+        ..Default::default()
+    }
 }
 
 impl Session {
@@ -30,6 +75,83 @@ impl Session {
     /// The next window of a playlist panel ([`PlaylistPanel::continuation`]).
     pub fn playlist_more(&mut self, continuation: &str) -> Result<(Vec<Item>, Option<String>)> {
         self.shelf_more("next", continuation)
+    }
+
+    /// **A playlist's own page with all its videos.** The page (browse `VL<id>`) stops at 15 with
+    /// no continuation, so the rest comes from the playlist panel: its first window is added to
+    /// the page, and the page's continuation walks the panel ([`Session::playlist_page_more`]).
+    /// A page that has a continuation of its own, a mix, or a panel that cannot be had is the page
+    /// as YouTube sends it.
+    pub fn playlist_page(&mut self, playlist_id: &str) -> Result<Page> {
+        let page = self.browse(&format!("VL{playlist_id}"), None)?;
+        if page.continuation.is_some() || is_mix(playlist_id) {
+            return Ok(page);
+        }
+        Ok(match self.playlist_start(playlist_id) {
+            Ok(panel) => with_panel(page, panel),
+            Err(_) => page,
+        })
+    }
+
+    /// The next videos of a [`Session::playlist_page`] from its panel continuation.
+    pub fn playlist_page_more(&mut self, continuation: &str) -> Result<Page> {
+        let (first, token) = split_panel_token(continuation).ok_or_else(|| anyhow!("not a playlist panel continuation"))?;
+        let (items, next) = self.playlist_more(token)?;
+        Ok(panel_page(first, token, items, next))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn video(id: &str) -> Item {
+        Item { id: id.into(), ..Default::default() }
+    }
+
+    fn ids(page: &Page) -> Vec<&str> {
+        page.shelves.iter().flat_map(|s| s.items.iter().map(|i| i.id.as_str())).collect()
+    }
+
+    /// The page's 15 videos go on with the panel's window, without the ones the page has.
+    #[test]
+    fn the_page_goes_on_with_the_panel() {
+        let page = Page { shelves: vec![Shelf { items: (1..=15).map(|i| video(&format!("v{i}"))).collect(), ..Default::default() }], ..Default::default() };
+        let panel = PlaylistPanel { items: (1..=20).map(|i| video(&format!("v{i}"))).collect(), continuation: Some("T1".into()), ..Default::default() };
+        let p = with_panel(page, panel);
+        assert_eq!(ids(&p), (1..=20).map(|i| format!("v{i}")).collect::<Vec<_>>());
+        let c = p.continuation.unwrap();
+        assert!(is_panel_token(&c));
+        assert_eq!(split_panel_token(&c), Some(("v1", "T1")));
+    }
+
+    /// No panel window (or one with no continuation): the page as it was, ending there.
+    #[test]
+    fn an_empty_panel_leaves_the_page() {
+        let page = Page { shelves: vec![Shelf { items: vec![video("v1")], ..Default::default() }], ..Default::default() };
+        let p = with_panel(page, PlaylistPanel::default());
+        assert_eq!(ids(&p), ["v1"]);
+        assert!(p.continuation.is_none());
+    }
+
+    /// A window goes on with the next token; the walk ends past the list's end (its first video
+    /// again), on an empty window, without a token, or with the token it was asked with.
+    #[test]
+    fn the_walk_ends_at_the_list_end() {
+        let more = panel_page("v1", "T1", vec![video("v21"), video("v22")], Some("T2".into()));
+        assert_eq!(ids(&more), ["v21", "v22"]);
+        assert_eq!(more.continuation.as_deref().and_then(split_panel_token), Some(("v1", "T2")));
+        assert!(panel_page("v1", "T2", vec![video("v49"), video("v50"), video("v1")], Some("T3".into())).continuation.is_none());
+        assert!(panel_page("v1", "T2", vec![], Some("T3".into())).continuation.is_none());
+        assert!(panel_page("v1", "T2", vec![video("v30")], None).continuation.is_none());
+        assert!(panel_page("v1", "T2", vec![video("v30")], Some("T2".into())).continuation.is_none());
+    }
+
+    /// Only the panel's own continuation is one: a browse token is not.
+    #[test]
+    fn a_browse_token_is_not_a_panel_token() {
+        assert!(!is_panel_token("4qmFsgKbARIPRkV3aGF0X3RvX3dhdGNo"));
+        assert!(split_panel_token("4qmFsgK").is_none());
     }
 }
 
@@ -134,6 +256,32 @@ mod live {
         let w = s.watch(&ids[45], Some(LIST)).unwrap();
         let p = w.playlist.unwrap();
         println!("panel at the 46th video starts at {} (a window around it)", p.items.iter().position(|i| i.id == ids[40]).map_or("?".into(), |i| i.to_string()));
+    }
+
+    /// The playlist page with every video: the page's 15, then the panel's windows until the end,
+    /// the way the app pages it (`Session::playlist_page`, `playlist_page_more`).
+    #[test]
+    #[ignore]
+    fn playlist_page_has_every_video() {
+        let mut s = session();
+        let mut page = s.playlist_page(LIST).unwrap();
+        let mut ids: Vec<String> = Vec::new();
+        let mut pages = 1;
+        loop {
+            for i in page.shelves.iter().flat_map(|sh| sh.items.iter()) {
+                if !ids.contains(&i.id) {
+                    ids.push(i.id.clone());
+                }
+            }
+            let Some(c) = page.continuation.take() else { break };
+            assert!(pages < 40, "the walk did not end");
+            page = s.playlist_page_more(&c).unwrap();
+            pages += 1;
+        }
+        let (walked, _, why) = walk(&mut s, LIST, 50);
+        println!("page: {} videos in {pages} pages; the panel walk: {} ({why})", ids.len(), walked.len());
+        assert!(ids.len() > 15, "more than the page's first 15");
+        assert_eq!(ids, walked, "the same videos in the same order as the play queue");
     }
 
     #[test]
