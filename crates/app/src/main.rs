@@ -779,6 +779,16 @@ fn main() {
             }
         }
         log("ytnative: exit");
+        // On the TV: unload the video, then leave at once. Tearing SDL down crashed every exit
+        // (SIGSEGV in libSDL2 on its timer thread while SDL_Quit and the libraries' exit
+        // handlers freed what it used); the system releases the window, the bus and the rest
+        // with the process anyway.
+        #[cfg(not(windows))]
+        {
+            rig.player.stop();
+            libc::_exit(0);
+        }
+        #[cfg(windows)]
         sdl::SDL_Quit();
     }
 }

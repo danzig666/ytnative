@@ -54,6 +54,12 @@ mod imp {
 
     pub fn install() {
         unsafe {
+            // No core dumps: the record above is what a report needs, and a core (a copy of the
+            // whole process, hundreds of MB) lands in the app's own folder on the apps' storage,
+            // which it filled up on TVs that crashed now and then, until installs failed.
+            let none = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+            libc::setrlimit(libc::RLIMIT_CORE, &none);
+            remove_old_cores();
             libc::mkdir(DIR.as_ptr().cast(), 0o755);
             let mut st: libc::stat = std::mem::zeroed();
             if libc::stat(LOG.as_ptr().cast(), &mut st) == 0 && st.st_size as i64 > MAX_LOG {
@@ -71,6 +77,21 @@ mod imp {
             let old = &mut *std::ptr::addr_of_mut!(OLD);
             for (i, &sig) in SIGNALS.iter().enumerate() {
                 libc::sigaction(sig, &sa, &mut old[i]);
+            }
+        }
+    }
+
+    /// Removes the core dumps earlier versions left in the app's folder (`core.<pid>`, next to
+    /// the program): they filled the apps' storage.
+    fn remove_old_cores() {
+        let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.to_path_buf())) else { return };
+        let Ok(entries) = std::fs::read_dir(&dir) else { return };
+        for e in entries.flatten() {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            let is_core = name == "core" || name.strip_prefix("core.").is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()));
+            if is_core && e.file_type().is_ok_and(|t| t.is_file()) {
+                let _ = std::fs::remove_file(e.path());
             }
         }
     }
