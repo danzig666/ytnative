@@ -39,10 +39,11 @@ tests against YouTube.
 - Notifications: the TV client gets HTTP 400. Trending: YouTube retired the page (off by default).
 - Age-restricted and made-for-kids videos don't play anonymously.
 - Google Drive backup needs the user's own Google Cloud OAuth client (USB/app-storage backup works).
-- Voice search: `voice.rs` registers with `voiceconductor` for `SearchContent`, but the bus refuses
-  our `com.webos.media.client.*` name ("Not permitted"); only the app-id name, which LG's SDL holds,
-  has the public group. Needs SDL's `HELPER_HLunaServiceCall` (libhelpers `HContext` layout unknown).
-  Launch links with `{"query": …}` do open a search.
+- Voice search works (C3, 2026-11-22): voiceconductor routes a mic press only to the interactor
+  registered under the app id, which SDL's connection holds; `voice.rs` borrows it (libhelpers'
+  `HLunaServiceBridge::PrivateHandle`, calls run on its GLib context), answers `setContext` with no
+  intents, reads `sttResult` from `getUtteranceEvents` and calls `cancelRecognition` (both private,
+  over the wide connection). `LSCallFromApplication` is refused to the app (uid 5977, jailed).
 - UI scale is a "Screen size" setting (90-100%, shrinks the whole UI for overscan); card size
   (3/4/5 per row) and card-menu order / hiding are done.
 - Engine B needs `libplayerAPIs.so.1` at launch (present on every known webOS release).
@@ -148,7 +149,7 @@ number is the phase (§4).
 | Playlists: create/rename/delete, add/remove, save, Watch Later, sort; editable queue | P | 3 |
 | Context menu (play next, queue, mark watched, not interested, don't recommend, remove from history, pin, share/QR, reminder, block…), configurable order | P | 3 |
 | Search: suggestions, history, filters (date/duration/type/features/sort), on-screen keyboard | P | 2 (filters 3) |
-| Voice search | A: Magic Remote mic via webOS voice service, unproven | 7 |
+| Voice search | A: Magic Remote mic via webOS voiceconductor, works on the C3 | 7 |
 
 ### Accounts and personal data
 | Feature | | Ph |

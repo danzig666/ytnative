@@ -1,1 +1,2 @@
 - Fixed: Videos made for kids (Baby Shark, Cocomelon and other nursery rhymes) said "This video is not available"; they now play, from the YouTube Kids app's version of YouTube
+- New: Voice search: hold the Magic Remote's microphone button while ytnative is open and say what you are looking for; ytnative searches it instead of LG opening its own results

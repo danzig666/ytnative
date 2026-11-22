@@ -32,6 +32,14 @@ struct Api {
 pub struct Luna {
     api: Api,
     handle: *mut c_void,
+    /// For a borrowed connection ([`Luna::sdl_app`]): the GLib context its owner dispatches it on.
+    /// Calls on it are made there, never concurrently with the owner's own (null = our own loop).
+    owner: Option<Owner>,
+}
+
+struct Owner {
+    context: *mut c_void,
+    invoke: unsafe extern "C" fn(*mut c_void, unsafe extern "C" fn(*mut c_void) -> c_int, *mut c_void),
 }
 unsafe impl Send for Luna {}
 unsafe impl Sync for Luna {}
@@ -117,6 +125,78 @@ impl Luna {
         Ok(l)
     }
 
+    /// SDL's own connection, registered under the bare app id (libhelpers' `HLunaServiceBridge`,
+    /// the way LG's SDL keeps it; borrowed as the Cobalt port's microphone code does). Some services
+    /// match the caller to the app in front by that id (voiceconductor). Calls on it run on its
+    /// owner's dispatch context; the connection stays SDL's.
+    pub fn sdl_app() -> Result<&'static Luna, String> {
+        static LOCK: std::sync::Mutex<Option<&'static Luna>> = std::sync::Mutex::new(None);
+        let mut g = LOCK.lock().unwrap();
+        if let Some(l) = *g {
+            return Ok(l);
+        }
+        unsafe {
+            let ls = open("libluna-service2.so.3").or_else(|_| open("libluna-service2.so"))?;
+            let glib = open("libglib-2.0.so.0")?;
+            let helpers = open("libhelpers.so.2")?;
+            let instance: unsafe extern "C" fn() -> *mut c_void = sym(helpers, "_ZN18HLunaServiceBridge8instanceEv")?;
+            let private: unsafe extern "C" fn(*mut c_void) -> *mut c_void = sym(helpers, "_ZN18HLunaServiceBridge13PrivateHandleEv")?;
+            let get_context: unsafe extern "C" fn(*mut c_void, *mut LSError) -> *mut c_void = sym(ls, "LSGmainGetContext")?;
+            let bridge = instance();
+            if bridge.is_null() {
+                return Err("no HLunaServiceBridge".into());
+            }
+            let handle = private(bridge);
+            if handle.is_null() {
+                return Err("HLunaServiceBridge has no private handle".into());
+            }
+            let api = Api {
+                error_init: sym(ls, "LSErrorInit")?,
+                error_free: sym(ls, "LSErrorFree")?,
+                register: sym(ls, "LSRegister")?,
+                gmain_attach: sym(ls, "LSGmainAttach")?,
+                call: sym(ls, "LSCall")?,
+                call_one: sym(ls, "LSCallOneReply")?,
+                payload: sym(ls, "LSMessageGetPayload")?,
+            };
+            let mut err: LSError = std::mem::zeroed();
+            (api.error_init)(&mut err);
+            let context = get_context(handle, &mut err);
+            (api.error_free)(&mut err);
+            if context.is_null() {
+                return Err("SDL's connection is not attached to a main context".into());
+            }
+            PAYLOAD_FN = api.payload as usize;
+            let owner = Owner { context, invoke: sym(glib, "g_main_context_invoke")? };
+            let l: &'static Luna = Box::leak(Box::new(Luna { api, handle, owner: Some(owner) }));
+            crate::log("LS2: borrowed SDL's app connection");
+            *g = Some(l);
+            Ok(l)
+        }
+    }
+
+    /// Runs `f` where calls on this connection may be made: on the owner's context for a borrowed
+    /// one (waiting until it ran), else right here.
+    fn on_bus<R: Send>(&self, f: impl FnOnce() -> R + Send) -> R {
+        let Some(owner) = &self.owner else { return f() };
+        struct Task<'a, R> {
+            f: Option<Box<dyn FnOnce() -> R + Send + 'a>>,
+            tx: mpsc::Sender<R>,
+        }
+        unsafe extern "C" fn run<R>(data: *mut c_void) -> c_int {
+            let task = &mut *(data as *mut Task<R>);
+            if let Some(f) = task.f.take() {
+                let _ = task.tx.send(f());
+            }
+            0 // G_SOURCE_REMOVE
+        }
+        let (tx, rx) = mpsc::channel();
+        let mut task = Task { f: Some(Box::new(f)), tx };
+        unsafe { (owner.invoke)(owner.context, run::<R>, &mut task as *mut Task<R> as *mut c_void) };
+        // `task` lives on this stack until the owner has run it.
+        rx.recv().expect("bus task dropped")
+    }
+
     /// Registers on the bus under the first name the hub accepts.
     fn connect(names: &[String]) -> Result<&'static Luna, String> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -170,7 +250,7 @@ impl Luna {
             if first {
                 std::thread::spawn(move || loop_run(main_loop as *mut c_void));
             }
-            Ok(Box::leak(Box::new(Luna { api, handle })))
+            Ok(Box::leak(Box::new(Luna { api, handle, owner: None })))
         }
     }
 
@@ -184,7 +264,13 @@ impl Luna {
             let mut err: LSError = std::mem::zeroed();
             (self.api.error_init)(&mut err);
             let mut tok: libc::c_ulong = 0;
-            if !(self.api.call_one)(self.handle, u.as_ptr(), p.as_ptr(), on_reply, ctx, &mut tok, &mut err) {
+            let (h, ctx_addr, err_addr, tok_addr) = (self.handle as usize, ctx as usize, &mut err as *mut LSError as usize, &mut tok as *mut libc::c_ulong as usize);
+            let call_one = self.api.call_one;
+            let (up, pp) = (u.as_ptr() as usize, p.as_ptr() as usize);
+            let ok = self.on_bus(move || {
+                call_one(h as _, up as _, pp as _, on_reply, ctx_addr as _, tok_addr as _, err_addr as _)
+            });
+            if !ok {
                 let m = if err.message.is_null() { "?".into() } else { CStr::from_ptr(err.message).to_string_lossy().into_owned() };
                 (self.api.error_free)(&mut err);
                 drop(Box::from_raw(ctx as *mut Ctx));
@@ -202,7 +288,16 @@ impl Luna {
             let mut err: LSError = std::mem::zeroed();
             (self.api.error_init)(&mut err);
             let mut tok: libc::c_ulong = 0;
-            (self.api.call)(self.handle, u.as_ptr(), p.as_ptr(), on_reply, ctx, &mut tok, &mut err)
+            let (h, ctx_addr, err_addr, tok_addr) = (self.handle as usize, ctx as usize, &mut err as *mut LSError as usize, &mut tok as *mut libc::c_ulong as usize);
+            let call = self.api.call;
+            let (up, pp) = (u.as_ptr() as usize, p.as_ptr() as usize);
+            let ok = self.on_bus(move || call(h as _, up as _, pp as _, on_reply, ctx_addr as _, tok_addr as _, err_addr as _));
+            if !ok {
+                let m = if err.message.is_null() { "?".into() } else { CStr::from_ptr(err.message).to_string_lossy().into_owned() };
+                crate::log(&format!("LSCall {uri}: {m}"));
+                (self.api.error_free)(&mut err);
+            }
+            ok
         }
     }
 }
