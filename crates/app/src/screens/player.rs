@@ -1170,7 +1170,7 @@ impl Screen<YtHost> for PlayerScreen {
         // Too long for the line: the subscribers go first, then the age, then the views.
         let (views, age, subs) = fit_byline(
             |v: Option<&str>, a: Option<&str>, sb: Option<&str>| {
-                let mut t = st.author.clone();
+                let mut t = author_line(st, sep);
                 for x in [v, a].into_iter().flatten() {
                     t.push_str(sep);
                     t.push_str(x);
@@ -1186,7 +1186,7 @@ impl Screen<YtHost> for PlayerScreen {
             age,
             subs,
         );
-        let mut byline = st.author.clone();
+        let mut byline = author_line(st, sep);
         for x in [&views, &age].into_iter().flatten() {
             byline.push_str(sep);
             byline.push_str(x);
@@ -1496,7 +1496,7 @@ impl PlayerScreen {
         let sep = " \u{2022} ";
         let (views, age, _) = fit_byline(
             |v: Option<&str>, a: Option<&str>, _| {
-                let mut t = st.author.clone();
+                let mut t = author_line(st, sep);
                 for x in [v, a].into_iter().flatten() {
                     t.push_str(sep);
                     t.push_str(x);
@@ -1508,7 +1508,7 @@ impl PlayerScreen {
             w.and_then(common::video_age),
             None,
         );
-        let mut byline = st.author.clone();
+        let mut byline = author_line(st, sep);
         for x in [&views, &age].into_iter().flatten() {
             byline.push_str(sep);
             byline.push_str(x);
@@ -1791,6 +1791,15 @@ fn list_eyebrow(p: plx_ui::Painter, m: &dyn plx_machine::machine::Measure, line:
     let s = size as f32;
     ui::icon::draw(p, ui::icon::Kind::List, Rect::new(x, y + s * 0.12, s, s), ui::WHITE, false);
     ui::text_cut(p, m, line, x + s + 12.0, y, w - s - 12.0, size, ui::WHITE, ui::ALIGN_LEFT, true);
+}
+
+/// The start of the line under the title: the channel, after "18+" for an age-restricted video.
+pub(crate) fn author_line(st: &crate::player::Status, sep: &str) -> String {
+    if st.age_restricted == Some(true) {
+        format!("18+{sep}{}", st.author)
+    } else {
+        st.author.clone()
+    }
 }
 
 /// The line under the title, made to fit `room`: `width` measures it with the given parts

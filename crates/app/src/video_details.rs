@@ -246,6 +246,14 @@ pub fn rows(st: &Status) -> Vec<(&'static str, Val)> {
         ("HDR", hdr),
         ("Buffered ahead", d.buffered_ms.map_or(Val::Unknown, |ms| Val::Template("{} seconds", format!("{:.1}", ms as f64 / 1000.0)))),
         ("Connection speed", d.speed_bps.map_or(Val::Unknown, rate)),
+        (
+            "Age restriction",
+            match st.age_restricted {
+                Some(true) => Val::Raw("18+".into()),
+                Some(false) => Val::Phrase("None"),
+                None => Val::Unknown,
+            },
+        ),
         ("Video ID", if st.video_id.is_empty() { Val::Unknown } else { Val::Raw(st.video_id.clone()) }),
     ]
 }
@@ -370,6 +378,14 @@ mod tests {
         assert_eq!(r["Buffered ahead"], Val::Template("{} seconds", "12.3".into()));
         assert_eq!(r["Connection speed"], Val::Template("{} megabits per second", "85.0".into()));
         assert_eq!(r["Video ID"], Val::Raw("abc".into()));
+        assert_eq!(r["Age restriction"], Val::Unknown, "not resolved yet");
+    }
+
+    #[test]
+    fn age_restriction_once_resolved() {
+        let row = |age| rows(&Status { age_restricted: age, ..Default::default() }).into_iter().find(|(l, _)| *l == "Age restriction").unwrap().1;
+        assert_eq!(row(Some(true)), Val::Raw("18+".into()));
+        assert_eq!(row(Some(false)), Val::Phrase("None"));
     }
 
     #[test]

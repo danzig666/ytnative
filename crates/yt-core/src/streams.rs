@@ -48,6 +48,9 @@ pub struct Resolved {
     pub translations: Vec<(String, String)>,
     pub storyboard_spec: Option<String>,
     pub raw: Value,
+    /// YouTube refused the video to an anonymous viewer for being age-restricted (it then played
+    /// with the signed-in account). Lists carry no such mark, so this is only known once resolved.
+    pub age_restricted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -113,7 +116,10 @@ pub fn resolve(api: &Api, video_id: &str, bearer: Option<&str>) -> Result<Resolv
     // (private videos, members only), once the URLs' challenges are solved.
     if let Some(bearer) = bearer {
         match signed_in(api, video_id, bearer) {
-            Ok(Ok(r)) => return Ok(r),
+            Ok(Ok(mut r)) => {
+                r.age_restricted = refusals.iter().any(|reason| is_age_refusal(reason));
+                return Ok(r);
+            }
             Ok(Err(reason)) => {
                 errors.push(format!("tv_signed_in: {reason}"));
                 refusals.push(reason);
@@ -175,6 +181,13 @@ pub fn signed_in(api: &Api, video_id: &str, bearer: &str) -> Result<std::result:
         }
     }
     Ok(Ok(r))
+}
+
+/// A refusal for the video's age ("Sign in to confirm your age", "This video may be inappropriate
+/// for some users"): the clients ask in English (`hl` "en").
+pub fn is_age_refusal(reason: &str) -> bool {
+    let r = reason.to_ascii_lowercase();
+    ["confirm your age", "age-restricted", "age restricted", "inappropriate for some users"].iter().any(|k| r.contains(k))
 }
 
 /// The signed-in TV client's stream URLs are refused (403) for about two seconds after the player
@@ -281,6 +294,7 @@ fn build(client: Client, video_id: &str, pr: Value) -> Resolved {
         translations,
         storyboard_spec: pr["storyboards"]["playerStoryboardSpecRenderer"]["spec"].as_str().map(str::to_string),
         raw: pr,
+        age_restricted: false,
     }
 }
 
@@ -497,5 +511,15 @@ mod reason_tests {
         // A client that failed some other way (network, no formats) is not a refusal.
         assert_eq!(same_reason(&[r("Video unavailable")], 2), None);
         assert_eq!(same_reason(&[r(""), r("")], 2), None);
+    }
+
+    #[test]
+    fn age_refusals_are_told_from_others() {
+        use super::is_age_refusal;
+        assert!(is_age_refusal("Sign in to confirm your age"));
+        assert!(is_age_refusal("This video may be inappropriate for some users."));
+        assert!(!is_age_refusal("This video is private"));
+        assert!(!is_age_refusal("Video unavailable"));
+        assert!(!is_age_refusal(""));
     }
 }

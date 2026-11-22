@@ -58,6 +58,7 @@ impl Player {
                         s.author = resolved.author.clone();
                         s.duration_ms = resolved.length_secs * 1000;
                         s.paid_promotion = resolved.raw.get("paidContentOverlay").is_some();
+                        s.age_restricted = Some(resolved.age_restricted);
                         s.video_id = video_id.clone();
                         s.channel_id = resolved.channel_id.clone();
                         s.storyboard = resolved.storyboard_spec.clone();

@@ -216,7 +216,7 @@ impl Screen<YtHost> for InfoScreen {
         let w = st.extras.watch.as_ref();
         let m = f.measure;
         ui::text_cut(p, m, &st.title, 80.0, 70.0, 1760.0, 42, ui::WHITE, ui::ALIGN_LEFT, true);
-        let mut meta = st.author.clone();
+        let mut meta = super::player::author_line(st, "  \u{2022}  ");
         if let Some(w) = w {
             for t in [&w.subscriber_count_text, &w.view_count_text, &super::common::video_age(w), &w.like_count_text].into_iter().flatten() {
                 meta.push_str(&format!("  \u{2022}  {t}"));

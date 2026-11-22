@@ -139,6 +139,8 @@ pub struct Status {
     pub fps: u32,
     /// YouTube marks the video as containing paid promotion.
     pub paid_promotion: bool,
+    /// Age-restricted (`Resolved::age_restricted`): `None` until the video is resolved.
+    pub age_restricted: Option<bool>,
     /// Engine B: paused while the download catches up (since this app time, ms), the picture
     /// kept on screen.
     pub buffering_since: Option<u32>,
@@ -546,6 +548,7 @@ fn run(
         s.author = resolved.author.clone();
         s.duration_ms = resolved.length_secs * 1000;
         s.paid_promotion = resolved.raw.get("paidContentOverlay").is_some();
+        s.age_restricted = Some(resolved.age_restricted);
         // The track engine A's manifest plays (a dubbed track has a loudness of its own); a live
         // stream plays YouTube's HLS renditions, which the player response's figure describes.
         let audio = if resolved.is_live { None } else { resolved.manifest_audio(&prefs) };

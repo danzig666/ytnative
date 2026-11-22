@@ -158,6 +158,7 @@ impl FeedPlayer {
             audio_tracks,
             audio_track,
             paid_promotion,
+            age_restricted: Some(resolved.age_restricted),
             phase: Phase::Loading,
             rate: 1.0,
             video_id: video_id.clone(),
