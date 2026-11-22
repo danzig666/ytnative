@@ -157,12 +157,22 @@ impl Api<'_> {
     }
 
     pub fn player(&self, client: Client, video_id: &str, bearer: Option<&str>) -> Result<Value> {
+        self.player_with(client, video_id, bearer, None)
+    }
+
+    /// `player` with the player script's `signatureTimestamp`, which the stream URLs of a client
+    /// that needs its challenges solved must match (`crate::jsc`).
+    pub fn player_with(&self, client: Client, video_id: &str, bearer: Option<&str>, signature_timestamp: Option<u32>) -> Result<Value> {
+        let mut playback = json!({ "html5Preference": "HTML5_PREF_WANTS" });
+        if let Some(sts) = signature_timestamp {
+            playback["signatureTimestamp"] = json!(sts);
+        }
         self.call(
             client,
             "player",
             json!({
                 "videoId": video_id,
-                "playbackContext": { "contentPlaybackContext": { "html5Preference": "HTML5_PREF_WANTS" } },
+                "playbackContext": { "contentPlaybackContext": playback },
                 "contentCheckOk": true,
                 "racyCheckOk": true,
             }),

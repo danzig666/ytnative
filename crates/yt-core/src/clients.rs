@@ -290,6 +290,7 @@ mod tests {
             tv_client_version: "7.20261110.12.00".into(),
             visitor_data: Some("VISITOR".into()),
             scraped: false,
+            player_url: None,
         }
     }
 

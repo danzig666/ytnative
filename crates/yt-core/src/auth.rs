@@ -205,6 +205,7 @@ mod tests {
             tv_client_version: "7.0".into(),
             visitor_data: None,
             scraped: false,
+            player_url: None,
         }
     }
 

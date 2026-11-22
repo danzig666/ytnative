@@ -18,3 +18,6 @@ ring = "0.17"
 socket2 = { version = "0.6", features = ["all"] }
 # Already in the tree via reqwest: the DoH fallback runs the system resolver off the runtime thread.
 tokio = { version = "1", default-features = false, features = ["rt"] }
+
+[build-dependencies]
+cc = "1"

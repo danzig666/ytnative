@@ -43,6 +43,15 @@
       "sendAuth": false
     },
     {
+      "key": "tv_signed_in",
+      "purpose": "media",
+      "clientName": "TVHTML5",
+      "clientVersion": "5.20260901",
+      "clientNameId": 7,
+      "userAgent": "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/25.lts.30.1034943-gold (unlike Gecko), Unknown_TV_Unknown_0/Unknown (Unknown, Unknown)",
+      "sendAuth": true
+    },
+    {
       "key": "tv",
       "purpose": "metadata",
       "clientName": "TVHTML5",

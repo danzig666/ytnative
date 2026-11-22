@@ -185,6 +185,9 @@ Homebrew Channel repository. See [docs/release.md](docs/release.md).
   vendored UI core and much of the webOS integration (GPL-3.0).
 - [SponsorBlock](https://sponsor.ajay.app), [DeArrow](https://dearrow.ajay.app) and
   [Return YouTube Dislike](https://returnyoutubedislike.com) for their public APIs.
+- [QuickJS-ng](https://github.com/quickjs-ng/quickjs) (MIT, `vendor/quickjs`) running
+  [yt-dlp's ejs](https://github.com/yt-dlp/ejs) challenge solver (Unlicense, with meriyah (ISC)
+  and astring (MIT) bundled; `vendor/ejs`): the stream URLs of signed-in playback.
 - Fonts: Inter (OFL) and other bundled fonts with their licences in `crates/app/pkg`; DejaVu and Roboto (Apache-2.0) for subtitles.
 
 ytnative is licensed under the GNU GPL v3.0 (see [LICENSE](LICENSE)).

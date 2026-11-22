@@ -37,3 +37,5 @@ mp4url.txt
 # Windows simulator third-party libraries (tools/fetch-sim-deps.ps1; never committed)
 /third_party/win/
 web_comments.json
+# Cached preprocessed player scripts (yt-core jsc; tests use the repo as the data dir)
+player-*.json

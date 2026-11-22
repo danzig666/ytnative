@@ -20,6 +20,9 @@ pub struct TvConfig {
     pub tv_client_version: String,
     pub visitor_data: Option<String>,
     pub scraped: bool,
+    /// The TV player script (`/s/player/<id>/tv-player-ias.vflset/tv-player-ias.js`): its
+    /// functions answer the stream URLs' challenges (`crate::jsc`).
+    pub player_url: Option<String>,
 }
 
 pub fn fetch(http: &reqwest::blocking::Client) -> Result<TvConfig> {
@@ -52,5 +55,16 @@ pub fn parse(html: &str) -> TvConfig {
             .unwrap_or_else(|| FALLBACK_TV_VERSION.into()),
         visitor_data: cap(r#""visitorData":"([^"]+)""#),
         scraped,
+        player_url: cap(r#"(/s/player/[0-9A-Za-z]+/[A-Za-z0-9_./-]*?\.js)"#).map(|u| u.replace("\\/", "/")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_player_script_url_is_found() {
+        let html = r#"<script src="/s/player/6b3d0364/tv-player-ias.vflset/tv-player-ias.js" nonce="x"></script><link href="/s/player/6b3d0364/tv-player.css">"#;
+        assert_eq!(super::parse(html).player_url.as_deref(), Some("/s/player/6b3d0364/tv-player-ias.vflset/tv-player-ias.js"));
+        assert_eq!(super::parse("<html></html>").player_url, None);
     }
 }

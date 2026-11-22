@@ -7,7 +7,7 @@
 
 use crate::innertube::{text, Api, Client};
 use crate::mpd;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -109,10 +109,101 @@ pub fn resolve(api: &Api, video_id: &str, bearer: Option<&str>) -> Result<Resolv
     if let Some(r) = partial {
         return Ok(r);
     }
+    // Signed in: the TV client takes the token, so it plays what the anonymous ring may not
+    // (private videos, members only), once the URLs' challenges are solved.
+    if let Some(bearer) = bearer {
+        match signed_in(api, video_id, bearer) {
+            Ok(Ok(r)) => return Ok(r),
+            Ok(Err(reason)) => {
+                errors.push(format!("tv_signed_in: {reason}"));
+                refusals.push(reason);
+            }
+            Err(e) => {
+                // Not a refusal of this video: the viewer is told what the ring said.
+                eprintln!("[streams] signed-in TV client for {video_id}: {e:#}");
+            }
+        }
+    }
     if let Some(reason) = same_reason(&refusals, errors.len()) {
         bail!("{reason}");
     }
     bail!("no client could play {video_id}: {}", errors.join("; "))
+}
+
+/// The signed-in TV client (profile `tv_signed_in`): its stream URLs carry the player script's
+/// challenges, solved by `crate::jsc`. `Ok(Err(reason))` when YouTube refuses the video to this
+/// account too; `Err` when the route itself failed (no player script, solver error...).
+pub fn signed_in(api: &Api, video_id: &str, bearer: &str) -> Result<std::result::Result<Resolved, String>> {
+    let profile = crate::clients::active(api.http)
+        .get("tv_signed_in")
+        .or_else(|| crate::clients::builtin().get("tv_signed_in"))
+        .context("no tv_signed_in client profile")?;
+    let url = api.cfg.player_url.as_deref().context("no player script URL on youtube.com/tv")?;
+    let player = crate::jsc::Player::load(api.http, url)?;
+    let client = Client::Profile(profile);
+    let mut pr = api.player_with(client, video_id, Some(bearer), player.signature_timestamp)?;
+    let status = pr["playabilityStatus"]["status"].as_str().unwrap_or("?").to_string();
+    if status != "OK" {
+        let reason = pr["playabilityStatus"]["reason"].as_str().unwrap_or("").to_string();
+        return Ok(Err(if reason.is_empty() { status } else { reason }));
+    }
+    let t0 = std::time::Instant::now();
+    let mut fixed = 0;
+    for key in ["adaptiveFormats", "formats"] {
+        if let Some(formats) = pr["streamingData"][key].as_array_mut() {
+            fixed += crate::jsc::decipher_formats(&player, formats)?;
+        }
+    }
+    eprintln!("[streams] {video_id}: signed-in TV client, {fixed} stream URLs solved in {} ms", t0.elapsed().as_millis());
+    let mut r = build(client, video_id, pr);
+    if r.hls.is_none() && r.dash_live.is_none() && !r.adaptive.iter().any(|f| f["url"].is_string()) {
+        bail!("no playable formats after solving the challenges");
+    }
+    wait_until_served(api.http, &r)?;
+    // This client's videoDetails has no title or author: the watch page has them.
+    if r.title.is_empty() {
+        match api.call(Client::Tv, "next", serde_json::json!({ "videoId": video_id }), Some(bearer)) {
+            Ok(next) => {
+                let w = crate::watch::parse_watch(&next);
+                r.title = w.title;
+                r.author = w.channel_name;
+                if r.channel_id.is_empty() {
+                    r.channel_id = w.channel_id;
+                }
+            }
+            Err(e) => eprintln!("[streams] {video_id}: no title from the watch page: {e:#}"),
+        }
+    }
+    Ok(Ok(r))
+}
+
+/// The signed-in TV client's stream URLs are refused (403) for about two seconds after the player
+/// response (seen 2026-11: 403 until t+2.1 s, then 206 for good). The TV's media pipeline would
+/// fetch inside that window and fail, so one URL is probed until the media server serves it; a
+/// URL still refused after that means the challenges were not solved right.
+fn wait_until_served(http: &reqwest::blocking::Client, r: &Resolved) -> Result<()> {
+    let Some(url) = r.adaptive.iter().find(|f| f["mimeType"].as_str().is_some_and(|m| m.starts_with("audio/"))).or(r.adaptive.first()).and_then(|f| f["url"].as_str()) else {
+        return Ok(()); // HLS / live: nothing to probe
+    };
+    let t0 = std::time::Instant::now();
+    loop {
+        let status = http
+            .get(url)
+            .header("User-Agent", r.client.user_agent())
+            .header("Range", "bytes=0-0")
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .map(|resp| resp.status().as_u16());
+        match status {
+            Ok(200 | 206) => {
+                eprintln!("[streams] {}: stream URLs served after {} ms", r.video_id, t0.elapsed().as_millis());
+                return Ok(());
+            }
+            Ok(s) if t0.elapsed() > std::time::Duration::from_secs(8) => bail!("stream URL still refused (HTTP {s})"),
+            Err(e) if t0.elapsed() > std::time::Duration::from_secs(8) => bail!("stream URL probe: {e}"),
+            _ => std::thread::sleep(std::time::Duration::from_millis(400)),
+        }
+    }
 }
 
 /// The one reason every client refused with (`tried` clients in all), if they all agree. Only the
