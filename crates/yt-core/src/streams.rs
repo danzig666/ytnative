@@ -3,7 +3,8 @@
 //!
 //! The ring is data so a YouTube change can be answered by reordering, not by a rewrite.
 //! Today (2026-11) VISIONOS returns direct URLs with no cipher, no `n` challenge and no PO token;
-//! the signed-in TV client returns SABR only (kept for when the SABR engine lands).
+//! videos made for kids come from the YouTube Kids client, and with a sign-in the TV client plays
+//! private, members-only and age-restricted videos (its URLs' challenges solved by `crate::jsc`).
 
 use crate::innertube::{text, Api, Client};
 use crate::mpd;
@@ -84,29 +85,22 @@ pub fn resolve(api: &Api, video_id: &str, bearer: Option<&str>) -> Result<Resolv
     // case no later client does better (engine B still plays VP9/AV1).
     let mut partial: Option<Resolved> = None;
     for profile in crate::clients::active(api.http).ring_profiles() {
-        let (client, auth) = (Client::Profile(profile), profile.send_auth);
-        match api.player(client, video_id, if auth { bearer } else { None }) {
-            Ok(pr) => {
-                let status = pr["playabilityStatus"]["status"].as_str().unwrap_or("?").to_string();
-                if status != "OK" {
-                    let reason = pr["playabilityStatus"]["reason"].as_str().unwrap_or("").to_string();
-                    errors.push(format!("{client:?}: {status} {reason}"));
-                    refusals.push(reason);
-                    continue;
-                }
-                let r = build(client, video_id, pr);
-                let direct = r.adaptive.iter().any(|f| f["url"].is_string());
-                if r.hls.is_some() || r.dash_live.is_some() || (direct && r.mpd(Default::default()).is_some()) {
-                    return Ok(r);
-                }
-                if direct {
-                    errors.push(format!("{client:?}: no H.264 + AAC"));
-                    partial.get_or_insert(r);
-                } else {
-                    errors.push(format!("{client:?}: no direct formats"));
-                }
+        if let Some(r) = attempt(api, profile, video_id, bearer, &mut errors, &mut refusals, &mut partial) {
+            return Ok(r);
+        }
+    }
+    // Made for kids: the ring answers "This video is not available" and YouTube wants them watched
+    // in YouTube Kids, whose Android client gets plain URLs (no challenges, no ad wait; 2026-11-22:
+    // 1080p H.264 + AAC). Not for an age refusal, which Kids won't pass. Its refusals are kept out
+    // of the report, so a private video still says "This video is private".
+    if !refusals.iter().any(|reason| is_age_refusal(reason)) {
+        let profiles = crate::clients::active(api.http);
+        if let Some(kids) = profiles.get("android_kids").or_else(|| crate::clients::builtin().get("android_kids")) {
+            let (mut kids_errors, mut kids_refusals) = (Vec::new(), Vec::new());
+            if let Some(r) = attempt(api, kids, video_id, None, &mut kids_errors, &mut kids_refusals, &mut partial) {
+                return Ok(r);
             }
-            Err(e) => errors.push(format!("{client:?}: {e}")),
+            eprintln!("[streams] {video_id}: YouTube Kids client: {}", kids_errors.join("; "));
         }
     }
     if let Some(r) = partial {
@@ -134,6 +128,45 @@ pub fn resolve(api: &Api, video_id: &str, bearer: Option<&str>) -> Result<Resolv
         bail!("{reason}");
     }
     bail!("no client could play {video_id}: {}", errors.join("; "))
+}
+
+/// One client's answer: the stream when it plays here; otherwise its error (and YouTube's reason
+/// for refusing, if it gave one) is recorded, and direct URLs the TV's DASH player can't take (no
+/// H.264 + AAC with ranges) are kept in `partial` in case no later client does better.
+fn attempt(
+    api: &Api,
+    profile: &'static crate::clients::ClientProfile,
+    video_id: &str,
+    bearer: Option<&str>,
+    errors: &mut Vec<String>,
+    refusals: &mut Vec<String>,
+    partial: &mut Option<Resolved>,
+) -> Option<Resolved> {
+    let client = Client::Profile(profile);
+    match api.player(client, video_id, if profile.send_auth { bearer } else { None }) {
+        Ok(pr) => {
+            let status = pr["playabilityStatus"]["status"].as_str().unwrap_or("?").to_string();
+            if status != "OK" {
+                let reason = pr["playabilityStatus"]["reason"].as_str().unwrap_or("").to_string();
+                errors.push(format!("{client:?}: {status} {reason}"));
+                refusals.push(reason);
+                return None;
+            }
+            let r = build(client, video_id, pr);
+            let direct = r.adaptive.iter().any(|f| f["url"].is_string());
+            if r.hls.is_some() || r.dash_live.is_some() || (direct && r.mpd(Default::default()).is_some()) {
+                return Some(r);
+            }
+            if direct {
+                errors.push(format!("{client:?}: no H.264 + AAC"));
+                partial.get_or_insert(r);
+            } else {
+                errors.push(format!("{client:?}: no direct formats"));
+            }
+        }
+        Err(e) => errors.push(format!("{client:?}: {e}")),
+    }
+    None
 }
 
 /// The signed-in TV client (profile `tv_signed_in`): its stream URLs carry the player script's

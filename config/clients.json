@@ -43,6 +43,18 @@
       "sendAuth": false
     },
     {
+      "key": "android_kids",
+      "purpose": "media",
+      "clientName": "ANDROID_KIDS",
+      "clientVersion": "7.36.1",
+      "clientNameId": 18,
+      "userAgent": "com.google.android.apps.youtube.kids/7.36.1 (Linux; U; Android 11) gzip",
+      "osName": "Android",
+      "osVersion": "11",
+      "androidSdkVersion": 30,
+      "sendAuth": false
+    },
+    {
       "key": "tv_signed_in",
       "purpose": "media",
       "clientName": "TVHTML5",
