@@ -420,6 +420,9 @@ fn main() {
                     sdl::SDL_QUIT => running = false,
                     // Text typed on the TV's keyboard (only while it is up: desktop SDL sends text
                     // for every key).
+                    0x302 if textin::active() => {
+                        log("tv keyboard: text editing event");
+                    }
                     sdl::SDL_TEXTINPUT if textin::active() => {
                         if let Some(t) = input::text_of(&ev) {
                             inputs.push(input::text(plx_machine::machine::TextEdit::Commit(t.into()), tick));
@@ -462,6 +465,19 @@ fn main() {
                                 inputs.push(input::text(edit, tick));
                             }
                             continue;
+                        }
+                        // The TV keyboard's arrows move the cursor in the field.
+                        if textin::active() && matches!(sym, 0x4000_0050 | 0x4000_004F) {
+                            if state & 0xff != 0 {
+                                let edit = if sym == 0x4000_0050 { plx_machine::machine::TextEdit::Left } else { plx_machine::machine::TextEdit::Right };
+                                inputs.push(input::text(edit, tick));
+                            }
+                            continue;
+                        }
+                        // Any other special key of the TV keyboard: its code, for the log (what
+                        // it sends for Clear All, say). Never a letter's.
+                        if textin::active() && state & 0xff != 0 && !(32..0x4000_0000).contains(&sym) {
+                            log(&format!("tv keyboard: key sym={sym:#x} wcode={wcode}"));
                         }
                         // A letter of the TV's keyboard sent as a key (its keycode is the
                         // character), not as text.

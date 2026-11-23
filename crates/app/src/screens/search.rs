@@ -171,6 +171,8 @@ pub struct SearchScreen {
     upper: bool,
     /// The set of letters shown.
     layout: Layout,
+    /// Where typing goes, in characters (the TV keyboard's arrows move it); `None`: at the end.
+    cursor: Option<usize>,
     /// The key the focus goes to on the next frame (the layout key, after the keys changed).
     focus_req: std::cell::Cell<Option<u32>>,
     query: String,
@@ -186,6 +188,7 @@ impl SearchScreen {
             naming: None,
             upper: false,
             layout: Layout::Latin,
+            cursor: None,
             focus_req: std::cell::Cell::new(None),
             query: String::new(),
             recent: yt_core::search_history::SearchHistory::load().list().iter().take(10).cloned().collect(),
@@ -277,14 +280,49 @@ impl SearchScreen {
         fx.push(Fx::App(YtFx::Local(op)));
         fx.push(Fx::Nav(NavOp::Pop));
     }
+    /// `s` typed where the cursor is.
+    fn insert(&mut self, s: &str) {
+        match self.cursor {
+            None => self.query.push_str(s),
+            Some(c) => {
+                let at = self.query.char_indices().nth(c).map_or(self.query.len(), |(i, _)| i);
+                self.query.insert_str(at, s);
+                self.cursor = Some(c + s.chars().count());
+            }
+        }
+    }
+
+    /// The character before the cursor, deleted.
+    fn backspace(&mut self) {
+        match self.cursor {
+            None => {
+                self.query.pop();
+            }
+            Some(0) => {}
+            Some(c) => {
+                if let Some((i, _)) = self.query.char_indices().nth(c - 1) {
+                    self.query.remove(i);
+                }
+                self.cursor = Some(c - 1);
+            }
+        }
+    }
+
+    /// The cursor one character left (`-1`) or right; at the end again, it follows the typing.
+    fn move_cursor(&mut self, d: i32) {
+        let n = self.query.chars().count();
+        let c = self.cursor.unwrap_or(n) as i32 + d;
+        self.cursor = if c >= n as i32 { None } else { Some(c.max(0) as usize) };
+    }
+
     fn press(&mut self, k: K, record: bool, fx: &mut Effects<'_, YtHost>) {
         match k {
             K::Ch(c) if self.upper && self.naming.is_some() => {
-                self.query.push_str(&capital(c));
+                self.insert(&capital(c));
                 // As on a phone keyboard: one capital letter, then small letters again.
                 self.upper = false;
             }
-            K::Ch(c) => self.query.push(c),
+            K::Ch(c) => self.insert(&c.to_string()),
             K::Shift => self.upper = !self.upper,
             K::Field => crate::textin::show(),
             K::Accents => {
@@ -298,11 +336,12 @@ impl SearchScreen {
                 self.save_name(fx);
                 return;
             }
-            K::Space => self.query.push(' '),
-            K::Back => {
-                self.query.pop();
+            K::Space => self.insert(" "),
+            K::Back => self.backspace(),
+            K::Clear => {
+                self.query.clear();
+                self.cursor = None;
             }
-            K::Clear => self.query.clear(),
             K::Go => {
                 let q = self.query.clone();
                 self.search(&q, record, fx);
@@ -355,7 +394,8 @@ impl Machine<YtHost> for SearchScreen {
                     }
                     TextEdit::Backspace => self.press(K::Back, record, fx),
                     TextEdit::Clear => self.press(K::Clear, record, fx),
-                    _ => {}
+                    TextEdit::Left => self.move_cursor(-1),
+                    TextEdit::Right => self.move_cursor(1),
                 }
                 fx.invalidate(plx_machine::present::Provenance::Input);
                 Handled::Yes
@@ -522,7 +562,14 @@ impl Screen<YtHost> for SearchScreen {
             ui::text_cut(p, f.measure, hint, field.x + 36.0, field.y + 26.0, room, 40, ui::FAINT, ui::ALIGN_LEFT, false);
         } else {
             // Longer than the field: its start fades out at the left edge.
-            ui::text_cut_start(p, f.measure, &format!("{}|", self.query), field.x + 36.0, field.y + 26.0, room, 40, ui::WHITE, false);
+            let shown = match self.cursor {
+                None => format!("{}|", self.query),
+                Some(c) => {
+                    let at = self.query.char_indices().nth(c).map_or(self.query.len(), |(i, _)| i);
+                    format!("{}|{}", &self.query[..at], &self.query[at..])
+                }
+            };
+            ui::text_cut_start(p, f.measure, &shown, field.x + 36.0, field.y + 26.0, room, 40, ui::WHITE, false);
         }
         // Keyboard
         let focused = cx.focus.current.filter(|k| k.entry == self.entry).map(|k| k.elem);
@@ -577,6 +624,25 @@ mod tests {
         for c in "áéíóöőúüűäßñçèêà".chars() {
             assert!(ACCENTED.contains(c), "{c} missing");
         }
+    }
+
+    #[test]
+    fn the_cursor_edits_where_it_is() {
+        let mut s = SearchScreen::new(plx_machine::machine::EntryId(1));
+        s.insert("ábc");
+        s.move_cursor(-1);
+        s.move_cursor(-1);
+        s.insert("x");
+        assert_eq!((s.query.as_str(), s.cursor), ("áxbc", Some(2)));
+        s.backspace();
+        s.backspace();
+        assert_eq!((s.query.as_str(), s.cursor), ("bc", Some(0)));
+        s.backspace();
+        s.move_cursor(1);
+        s.move_cursor(1);
+        assert_eq!(s.cursor, None, "at the end it follows the typing again");
+        s.insert("d");
+        assert_eq!(s.query, "bcd");
     }
 
     #[test]
