@@ -15,3 +15,5 @@
 - Fixed: signed-in playback no longer fails a video when the download of YouTube's player script drops once (up to three tries, as in SmartTube)
 - Changed: on 2019 LCD TVs without /dev/rtkmem (#8), the message now also says to delete ytnative and install it again: the app's sandbox is made when the app is installed
 - Fixed: the messages that were still English only (the video errors, the /dev/rtkmem help, backup and restore, the updater's errors) are in every interface language; long ones are no longer cut on the error screen, and toasts in Chinese, Japanese and Korean fit their box
+- Fixed: a video whose SponsorBlock segments overlap and run to its end (a sponsor and an outro) no longer replays its last seconds endlessly when "Skip segments again" is on
+- Fixed: the Problem report shows the TV's model and webOS version (it said "unknown")

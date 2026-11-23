@@ -226,6 +226,17 @@ mod sponsorblock_tests {
     }
 
     #[test]
+    fn overlapping_segments_that_end_together_do_not_loop() {
+        // jP9yjEDlc4k: a sponsor and an outro both run to the video's end; the skip lands on a
+        // keyframe inside the sponsor, before the outro starts.
+        let segs = [seg(Category::Sponsor, 252_209, 270_876, "s"), seg(Category::Outro, 265_401, 270_876, "o")];
+        for again in [true, false] {
+            let seeks = play(&segs, again, 7_800, None);
+            assert_eq!(seeks, vec![270_876], "skip again {again}");
+        }
+    }
+
+    #[test]
     fn back_to_back_segments_are_skipped_one_after_the_other() {
         let segs = [seg(Category::Intro, 0, 10_000, "i"), seg(Category::Sponsor, 10_000, 40_000, "s")];
         assert_eq!(play(&segs, false, 0, None), vec![10_000, 40_000]);

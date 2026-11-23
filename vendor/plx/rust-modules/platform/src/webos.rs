@@ -81,6 +81,13 @@ fn parse(s: &str) -> Info {
 
 /// Read it once and log it. Called at boot; safe to call when the file does not exist.
 pub fn probe() {
+    probe_info();
+    probe_jail();
+}
+
+/// ytnative local change: the release and hardware half of [`probe`], without the jail pre-flight
+/// (ytnative runs its own, which also repairs the jail).
+pub fn probe_info() {
     let text = match std::fs::read_to_string(OS_INFO) {
         Ok(s) => Some(s),
         Err(e) => {
@@ -100,7 +107,6 @@ pub fn probe() {
     crate::tv::device::publish_info(info);
     let device_info = probe_hw();
     crate::tv::device::publish_probe(crate::tv::device::Probe { os_info, device_info });
-    probe_jail();
 }
 
 // ---- which SET this is, as opposed to which webOS ---------------------------------------------

@@ -318,8 +318,19 @@ impl SkipTracker {
         }
         self.inside = Some(seg.uuid.clone());
         // Near the end: at most half the segment (a short one seeked back into still counts).
-        let slack = LANDING_SLACK_MS.min(seg.duration_ms() / 2);
-        if self.last.as_ref().is_some_and(|(u, end)| *u == seg.uuid && pos_ms + slack >= *end) {
+        // Another segment that ends no later than the skip's target (overlapping ones that end
+        // together, as a sponsor and an outro running to the video's end) is the same landing.
+        let landed = self.last.as_ref().is_some_and(|(u, end)| {
+            let slack = if *u == seg.uuid {
+                LANDING_SLACK_MS.min(seg.duration_ms() / 2)
+            } else if seg.end_ms <= *end {
+                LANDING_SLACK_MS
+            } else {
+                return false;
+            };
+            pos_ms + slack >= *end
+        });
+        if landed {
             return None; // landed just before the end of the segment we skipped
         }
         let first_time = self.done.insert(seg.uuid.clone());

@@ -289,6 +289,8 @@ fn main() {
         #[cfg(not(windows))]
         voice::repair();
         #[cfg(not(windows))]
+        plx_platform::webos::probe_info();
+        #[cfg(not(windows))]
         jail::probe();
         #[cfg(windows)]
         let win = sim_window();
