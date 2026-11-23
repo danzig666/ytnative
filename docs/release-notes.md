@@ -1,1 +1,1 @@
-- Changed: UM7100, UM7600 and other 2019 TVs whose sandbox lacks /dev/rtkmem: without root, the player now says plainly that videos need a rooted TV on this model, instead of asking to try again (#8)
+- Fixed: UM7100, UM7600 and other 2019 LCD TVs whose sandbox lacks /dev/rtkmem, without root: ytnative now installs LG's own sandbox settings for Developer Mode apps, which add the device; after unplugging the TV once, videos should play (#8)

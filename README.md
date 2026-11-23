@@ -53,7 +53,7 @@ and install it with LG's CLI:
 ares-install --device <tv> io.github.danzig666.ytnative_<version>_arm.ipk
 ```
 
-Root is not required, except on the 2019 TVs below.
+Root is not required.
 
 ### Requirements
 
@@ -62,12 +62,17 @@ Root is not required, except on the 2019 TVs below.
   [2esq](https://github.com/2esq)). On webOS 4 video plays through the 4K engine only: no HDR yet, the
   picture stays full screen beside the comments, and speeds other than normal are not available.
   webOS 3 is not supported.
-- **Some 2019 LG LCD TVs need root to play videos at all.** On TVs with a Realtek chip of the
-  k5lp or k3lp family, such as the **UM7100** and **UM7600**, LG's Developer Mode sandbox lacks a
-  device the video player needs (`/dev/rtkmem`). On a rooted TV with Homebrew Channel, ytnative
-  repairs the sandbox itself the first time a video is opened. Without root, nothing an app can do
-  fixes it: ytnative opens and you can browse and search, but no video plays, and the player
-  says so. See [issue #8](https://github.com/danzig666/ytnative/issues/8).
+- **Some 2019 LG LCD TVs need a one-time fix before videos play.** On TVs with a Realtek chip of
+  the k5lp or k3lp family, such as the **UM7100**, **UM7400** and **UM7600** (not the OLED models),
+  the sandbox webOS runs apps in can lack a device the video player needs (`/dev/rtkmem`), and a
+  video would close the app. ytnative checks for this and fixes it the first time a video is
+  opened (from version 0.2.72):
+  - On a rooted TV with Homebrew Channel, the fix works at once: open the video again.
+  - Without root, ytnative installs LG's own sandbox settings for Developer Mode apps (downloaded
+    from LG's developer site), which add the device. Then turn the TV off, unplug it for 15
+    seconds and turn it on again. This is the fix Kodi's "webOS jailer fix" add-on uses; it has
+    not been tried with ytnative yet, so please report how it went in
+    [issue #8](https://github.com/danzig666/ytnative/issues/8).
 - Any GPU: the app links only the generic `libGLESv2`, loads EGL at runtime and falls back where
   an extension or shader precision is missing (developed on Mali; other GPUs are untested).
 - A Google account is optional: sign in with a code from **Settings > Account & about** to get
