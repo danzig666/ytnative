@@ -43,6 +43,34 @@ pub fn set_language(pref: &str, system: &str) {
     CURRENT.store(map, Ordering::Relaxed);
 }
 
+/// The interface language setting's values in the order the picker shows them: English, then
+/// every translation by its own name in alphabetical order (accents folded, so "Čeština" sits
+/// with C; Latin script first, then Greek, Cyrillic and the others in Unicode's script order),
+/// then "system" (the TV's language).
+pub fn picker_languages() -> Vec<&'static str> {
+    let mut l = languages();
+    l.sort_by_cached_key(|c| sort_key(&language_name(c)));
+    let mut out = vec!["en"];
+    out.extend(l);
+    out.push("system");
+    out
+}
+
+/// A name folded for sorting: lower case, Latin letters without their accents.
+fn sort_key(name: &str) -> String {
+    const FOLD: &[(&str, char)] = &[
+        ("àáâãäåāăąǎ", 'a'), ("çćĉċč", 'c'), ("ďđ", 'd'), ("èéêëēĕėęěə", 'e'), ("ĝğġģ", 'g'),
+        ("ĥħ", 'h'), ("ìíîïĩīĭįı", 'i'), ("ĵ", 'j'), ("ķ", 'k'), ("ĺļľŀł", 'l'), ("ñńņňŉ", 'n'),
+        ("òóôõöøōŏőơ", 'o'), ("ŕŗř", 'r'), ("śŝşšș", 's'), ("ţťŧț", 't'), ("ùúûüũūŭůűųư", 'u'),
+        ("ŵ", 'w'), ("ýÿŷ", 'y'), ("źżž", 'z'), ("ạảấầẩẫậắằẳẵặ", 'a'), ("ẹẻẽếềểễệ", 'e'),
+        ("ỉị", 'i'), ("ọỏốồổỗộớờởỡợ", 'o'), ("ụủứừửữự", 'u'), ("ỳỵỷỹ", 'y'),
+    ];
+    name.to_lowercase()
+        .chars()
+        .map(|c| FOLD.iter().find(|(from, _)| from.contains(c)).map_or(c, |(_, to)| *to))
+        .collect()
+}
+
 /// The table column for a TV locale ("de-DE" -> "de", "zh-Hant-TW" -> "zh-TW", "nb-NO" /
 /// "no" -> "nb", "iw" -> "he", "in" -> "id").
 fn table_code(locale: &str) -> &str {
@@ -248,6 +276,13 @@ mod tests {
         assert_eq!(table_code("pt-BR"), "pt");
         assert_eq!(table_code("xx-YY"), "en");
         assert_eq!(youtube_hl("zh"), "zh-CN");
+        let p = picker_languages();
+        assert_eq!(p.len(), languages().len() + 2);
+        assert_eq!((p[0], *p.last().unwrap()), ("en", "system"));
+        let names: Vec<String> = p.iter().map(|c| language_name(c)).collect();
+        let pos = |n: &str| names.iter().position(|x| x == n).unwrap();
+        assert!(pos("Català") < pos("Čeština") && pos("Čeština") < pos("Dansk"));
+        assert!(pos("Türkçe") < pos("Ελληνικά") && pos("Ελληνικά") < pos("Русский"));
         set_language("pl", "");
         assert_eq!(full_date(2026, 11, 22), "22 listopada 2026");
         assert_eq!(date_words(0, 22, 11), "niedziela, 22 listopada");

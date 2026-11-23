@@ -438,8 +438,7 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
                     s.card_columns = cycle(&[3u8, 4, 5], s.card_columns, d)
                 }),
                 Opt("Interface language", |s| language_name(&s.ui_language), |s, d| {
-                    let mut l = vec!["system", "en"];
-                    l.extend(crate::i18n::languages());
+                    let l = crate::i18n::picker_languages();
                     let i = l.iter().position(|x| *x == s.ui_language).unwrap_or(0) as i32;
                     s.ui_language = l[((i + d).rem_euclid(l.len() as i32)) as usize].into();
                 }),
