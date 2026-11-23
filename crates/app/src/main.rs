@@ -46,6 +46,7 @@ mod signin;
 #[cfg(windows)]
 mod sim;
 mod store;
+mod textin;
 mod ui;
 mod update;
 #[cfg_attr(windows, allow(dead_code))] // engine A and B's parts are used by the TV build only
@@ -374,6 +375,7 @@ fn main() {
         // input unless a video is playing. Any key wakes it and is swallowed.
         let mut last_input = sdl::SDL_GetTicks();
         let mut blanked = false;
+        let mut kb_since = 0u32;
         let mut foreground = true;
         // A key or a return to the foreground since the TV took the decoder back.
         let mut viewer_back = false;
@@ -387,9 +389,41 @@ fn main() {
             recommended::tick(now);
 
             let mut inputs = Vec::new();
+            // The TV's keyboard, as the search screen asked; closed by the viewer (BACK on it), it
+            // stops being text input.
+            match textin::take_request() {
+                Some(true) => {
+                    sdl::SDL_StartTextInput();
+                    textin::set_active(true);
+                    kb_since = now;
+                }
+                Some(false) if textin::active() => {
+                    sdl::SDL_StopTextInput();
+                    textin::set_active(false);
+                }
+                _ => {}
+            }
+            if textin::active() && now.wrapping_sub(kb_since) > 1500 && sdl::SDL_IsScreenKeyboardShown(win) == 0 {
+                #[cfg(not(windows))]
+                {
+                    sdl::SDL_StopTextInput();
+                    textin::set_active(false);
+                }
+            }
             while sdl::SDL_PollEvent(ev.as_mut_ptr().cast()) != 0 {
                 match input::rd_u32(&ev, 0) {
                     sdl::SDL_QUIT => running = false,
+                    // Text typed on the TV's keyboard (only while it is up: desktop SDL sends text
+                    // for every key).
+                    sdl::SDL_TEXTINPUT if textin::active() => {
+                        let raw = &ev[12..44];
+                        let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
+                        if let Ok(t) = std::str::from_utf8(&raw[..end]) {
+                            if !t.is_empty() {
+                                inputs.push(input::text(plx_machine::machine::TextEdit::Commit(t.into()), tick));
+                            }
+                        }
+                    }
                     sdl::SDL_MOUSEMOTION => {
                         cursor_motion_at = now;
                         cursor_hidden = false;
@@ -420,6 +454,14 @@ fn main() {
                     }
                     sdl::SDL_KEYDOWN | sdl::SDL_KEYUP => {
                         let (state, wcode, sym) = input::decode_key(&ev);
+                        // The TV's keyboard is up: its Backspace and Enter edit the search field.
+                        if textin::active() && matches!(sym, 8 | 13 | 0x4000_0058) {
+                            if state & 0xff != 0 {
+                                let edit = if sym == 8 { plx_machine::machine::TextEdit::Backspace } else { plx_machine::machine::TextEdit::Commit("\n".into()) };
+                                inputs.push(input::text(edit, tick));
+                            }
+                            continue;
+                        }
                         // BACK and EXIT leave the player instead: they start nothing again.
                         if state & 0xff != 0 && !matches!(wcode, 461 | 482 | 505) {
                             viewer_back = true;

@@ -9,7 +9,7 @@
 use crate::host::{LocalOp, NamePurpose, YtArg, YtFx, YtHost, YtMsg};
 use crate::store::FeedKey;
 use crate::ui::{self, Row, VList};
-use plx_machine::machine::{Canon, Cx, Effects, EntryId, FocusKey, Fx, GroupId, Handled, LogicalState, Machine, NavOp, ScreenEvent};
+use plx_machine::machine::{Canon, Cx, Effects, EntryId, FocusKey, Fx, GroupId, Handled, InputEvent, InputKind, LogicalState, Machine, NavOp, ScreenEvent, TextEdit};
 use plx_ui::frame::Budget;
 use plx_ui::screen::{
     Activate, AxisMask, At, Hover, Stop, Dir, DrawFrame, EdgeRule, ElemKind, Focusable, GroupKind, GroupSpec, Placed, RenderStrategy, Screen, Seat, Step,
@@ -40,6 +40,8 @@ enum K {
     Shift,
     /// The next set of letters: plain, the interface language's own alphabet, accented.
     Accents,
+    /// The TV's own keyboard (every language the TV has, with its input methods).
+    TvKeyboard,
     Go,
 }
 
@@ -98,7 +100,7 @@ fn letters(l: Layout) -> &'static str {
 /// Shift key for capital letters.
 fn keys_for(naming: bool, layout: Layout) -> Vec<K> {
     let mut v: Vec<K> = letters(layout).chars().chain("1234567890".chars()).map(K::Ch).collect();
-    v.extend([K::Ch('-'), K::Ch('\''), K::Space, K::Back, K::Clear, K::Accents]);
+    v.extend([K::Ch('-'), K::Ch('\''), K::Space, K::Back, K::Clear, K::Accents, K::TvKeyboard]);
     if naming {
         v.push(K::Shift);
     }
@@ -127,6 +129,7 @@ fn key_label(k: K, naming: bool, upper: bool, layout: Layout) -> String {
             Layout::Accented => "\u{E1}\u{E9}".into(),
             Layout::Native => letters(Layout::Native).chars().take(3).collect(),
         },
+        K::TvKeyboard => "TV keyboard".into(),
         K::Go if naming => "Save".into(),
         K::Go => "Search".into(),
     }
@@ -259,6 +262,7 @@ impl SearchScreen {
             }
             K::Ch(c) => self.query.push(c),
             K::Shift => self.upper = !self.upper,
+            K::TvKeyboard => crate::textin::show(),
             K::Accents => {
                 self.layout = next_layout(self.layout, native_alphabet(crate::i18n::current()).is_some());
                 // The letters' count changed: the focus stays on this key in its new place.
@@ -310,6 +314,30 @@ impl Machine<YtHost> for SearchScreen {
             }
             ScreenEvent::Async(_, YtMsg::Suggestions) => {
                 fx.invalidate(plx_machine::present::Provenance::Lifecycle);
+                Handled::Yes
+            }
+            // The TV's keyboard: its text, Backspace and Enter, as if typed on the keys here.
+            ScreenEvent::Input(InputEvent { kind: InputKind::Text(edit), .. }) => {
+                let record = cx.views.store.settings.search_history;
+                match edit {
+                    TextEdit::Commit(t) if &**t == "\n" => {
+                        crate::textin::hide();
+                        self.press(K::Go, record, fx);
+                    }
+                    TextEdit::Commit(t) => {
+                        for c in t.chars().filter(|c| !c.is_control()) {
+                            self.press(if c == ' ' { K::Space } else { K::Ch(c) }, record, fx);
+                        }
+                    }
+                    TextEdit::Backspace => self.press(K::Back, record, fx),
+                    TextEdit::Clear => self.press(K::Clear, record, fx),
+                    _ => {}
+                }
+                fx.invalidate(plx_machine::present::Provenance::Input);
+                Handled::Yes
+            }
+            ScreenEvent::Unmount => {
+                crate::textin::hide();
                 Handled::Yes
             }
             ScreenEvent::Input(_) => Handled::No,
@@ -497,9 +525,12 @@ mod tests {
 
     #[test]
     fn native_alphabets_fit_seven_rows() {
+        // The most keys (a name: Shift too) still end on the screen.
+        let others = keys_for(true, Layout::Latin).len() - LETTERS.chars().count();
         for code in ["ru", "uk", "bg", "sr", "el", "he", "ar", "fa", "hy", "ka"] {
-            let n = native_alphabet(code).unwrap().chars().count() + 10 + 8;
-            assert!(n.div_ceil(COLS) <= 7, "{code}: {n} keys");
+            let n = native_alphabet(code).unwrap().chars().count() + others;
+            let bottom = SearchScreen::key_rect(n - 1);
+            assert!(bottom.y + bottom.h <= 1070.0, "{code}: {n} keys end at {}", bottom.y + bottom.h);
         }
         assert_eq!(native_alphabet("ru").unwrap().chars().count(), 33);
         assert_eq!(next_layout(Layout::Latin, true), Layout::Native);

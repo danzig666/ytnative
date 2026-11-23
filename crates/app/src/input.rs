@@ -75,6 +75,11 @@ pub fn wheel(dy: i32, now: Tick) -> Vec<InputEvent<u32>> {
     [Edge::Down, Edge::Up].into_iter().map(|edge| ev(InputKind::Key { key, sym: 0, wcode: 0, edge, at_edge: false }, now)).collect()
 }
 
+/// Text from the TV's keyboard ([`crate::textin`]).
+pub fn text(edit: plx_machine::machine::TextEdit, now: Tick) -> InputEvent<u32> {
+    InputEvent { at: now, source: Source::Sdl, kind: InputKind::Text(edit) }
+}
+
 pub fn key_input(sym: u32, wcode: u32, state: u32, now: Tick) -> InputEvent<u32> {
     use plx_ui::consts::{classify, Key as K};
     if matches!(classify(sym, wcode), K::PointerHidden) {

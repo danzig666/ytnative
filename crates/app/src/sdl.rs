@@ -30,12 +30,17 @@ pub const SDL_APP_WILLENTERFOREGROUND: u32 = 0x105;
 pub const SDL_APP_DIDENTERFOREGROUND: u32 = 0x106;
 pub const SDL_KEYDOWN: u32 = 0x300;
 pub const SDL_KEYUP: u32 = 0x301;
+pub const SDL_TEXTINPUT: u32 = 0x303;
 pub const SDL_MOUSEMOTION: u32 = 0x400;
 pub const SDL_MOUSEBUTTONDOWN: u32 = 0x401;
 pub const SDL_MOUSEBUTTONUP: u32 = 0x402;
 pub const SDL_MOUSEWHEEL: u32 = 0x403;
 
 extern "C" {
+    /// webOS: shows LG's on-screen keyboard (its text arrives as SDL_TEXTINPUT).
+    pub fn SDL_StartTextInput();
+    pub fn SDL_StopTextInput();
+    pub fn SDL_IsScreenKeyboardShown(win: *mut c_void) -> c_int;
     pub fn SDL_SetMainReady();
     pub fn SDL_Init(flags: u32) -> c_int;
     pub fn SDL_Quit();
