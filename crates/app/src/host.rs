@@ -1043,9 +1043,6 @@ impl AppRig {
         let hl = crate::i18n::current();
         if self.applied_hl != Some(hl) {
             yt_core::innertube::set_content_language(crate::i18n::youtube_hl(hl));
-            // Voice search listens in it too while ytnative is in front.
-            #[cfg(not(windows))]
-            crate::voice::set_language(hl);
             // Another language: the lists reload in it.
             if self.applied_hl.is_some() {
                 self.clear_feeds();
