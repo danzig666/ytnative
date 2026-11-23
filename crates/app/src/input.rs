@@ -75,6 +75,17 @@ pub fn wheel(dy: i32, now: Tick) -> Vec<InputEvent<u32>> {
     [Edge::Down, Edge::Up].into_iter().map(|edge| ev(InputKind::Key { key, sym: 0, wcode: 0, edge, at_edge: false }, now)).collect()
 }
 
+/// The text of an SDL_TEXTINPUT event: at offset 12 in stock SDL; LG's SDL adds a field before
+/// it as it does to key events, so offset 16 is tried too.
+pub fn text_of(ev: &[u8]) -> Option<String> {
+    [12usize, 16].iter().find_map(|&at| {
+        let raw = ev.get(at..at + 32)?;
+        let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
+        let s = std::str::from_utf8(&raw[..end]).ok()?;
+        (!s.is_empty() && s.chars().all(|c| !c.is_control() || c == '\n')).then(|| s.to_string())
+    })
+}
+
 /// Text from the TV's keyboard ([`crate::textin`]).
 pub fn text(edit: plx_machine::machine::TextEdit, now: Tick) -> InputEvent<u32> {
     InputEvent { at: now, source: Source::Sdl, kind: InputKind::Text(edit) }

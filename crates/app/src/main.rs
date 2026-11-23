@@ -403,11 +403,16 @@ fn main() {
                 }
                 _ => {}
             }
-            if textin::active() && now.wrapping_sub(kb_since) > 1500 && sdl::SDL_IsScreenKeyboardShown(win) == 0 {
-                #[cfg(not(windows))]
-                {
+            // Up: the TV has a keyboard. Not up 1.5 s after it was asked: closed by the viewer, or
+            // (never seen) this TV has none, and Search gets ytnative's own keys back.
+            #[cfg(not(windows))]
+            if textin::active() {
+                if sdl::SDL_IsScreenKeyboardShown(win) != 0 {
+                    textin::note_shown();
+                } else if now.wrapping_sub(kb_since) > 1500 {
                     sdl::SDL_StopTextInput();
                     textin::set_active(false);
+                    textin::note_missing();
                 }
             }
             while sdl::SDL_PollEvent(ev.as_mut_ptr().cast()) != 0 {
@@ -416,12 +421,8 @@ fn main() {
                     // Text typed on the TV's keyboard (only while it is up: desktop SDL sends text
                     // for every key).
                     sdl::SDL_TEXTINPUT if textin::active() => {
-                        let raw = &ev[12..44];
-                        let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
-                        if let Ok(t) = std::str::from_utf8(&raw[..end]) {
-                            if !t.is_empty() {
-                                inputs.push(input::text(plx_machine::machine::TextEdit::Commit(t.into()), tick));
-                            }
+                        if let Some(t) = input::text_of(&ev) {
+                            inputs.push(input::text(plx_machine::machine::TextEdit::Commit(t.into()), tick));
                         }
                     }
                     sdl::SDL_MOUSEMOTION => {
@@ -459,6 +460,16 @@ fn main() {
                             if state & 0xff != 0 {
                                 let edit = if sym == 8 { plx_machine::machine::TextEdit::Backspace } else { plx_machine::machine::TextEdit::Commit("\n".into()) };
                                 inputs.push(input::text(edit, tick));
+                            }
+                            continue;
+                        }
+                        // A letter of the TV's keyboard sent as a key (its keycode is the
+                        // character), not as text.
+                        if textin::active() && (32..0x4000_0000).contains(&sym) && sym != 127 {
+                            if state & 0xff != 0 {
+                                if let Some(c) = char::from_u32(sym) {
+                                    inputs.push(input::text(plx_machine::machine::TextEdit::Commit(c.to_string().into()), tick));
+                                }
                             }
                             continue;
                         }

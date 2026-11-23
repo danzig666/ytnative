@@ -24,6 +24,16 @@ const SUG_BASE: u32 = 0x2000_0000;
 
 const COLS: usize = 8;
 const KEY_W: f32 = 92.0;
+
+/// Columns of keys: three wide keys when the TV's keyboard types (`crate::textin::exclusive`).
+fn cols() -> usize {
+    if crate::textin::exclusive() { 3 } else { COLS }
+}
+
+/// A key's width (wide ones beside the TV's keyboard).
+fn key_w() -> f32 {
+    if crate::textin::exclusive() { 290.0 } else { KEY_W }
+}
 const KEY_H: f32 = 84.0;
 /// The space between two keys.
 const KEY_GAP: f32 = 12.0;
@@ -99,6 +109,10 @@ fn letters(l: Layout) -> &'static str {
 /// The keys: the letters (of the layout), digits, marks and the controls. Names also get a
 /// Shift key for capital letters.
 fn keys_for(naming: bool, layout: Layout) -> Vec<K> {
+    // The TV's keyboard types: here only a key to bring it back, Clear and the search / save key.
+    if crate::textin::exclusive() {
+        return vec![K::TvKeyboard, K::Clear, K::Go];
+    }
     let mut v: Vec<K> = letters(layout).chars().chain("1234567890".chars()).map(K::Ch).collect();
     v.extend([K::Ch('-'), K::Ch('\''), K::Space, K::Back, K::Clear, K::Accents, K::TvKeyboard]);
     if naming {
@@ -199,7 +213,7 @@ impl SearchScreen {
         keys_for(self.names(), self.layout)
     }
     fn key_rect(i: usize) -> Rect {
-        Rect::new(KEYS_X + (i % COLS) as f32 * (KEY_W + KEY_GAP), KEYS_Y + (i / COLS) as f32 * (KEY_H + KEY_GAP), KEY_W, KEY_H)
+        Rect::new(KEYS_X + (i % cols()) as f32 * (key_w() + KEY_GAP), KEYS_Y + (i / cols()) as f32 * (KEY_H + KEY_GAP), key_w(), KEY_H)
     }
     fn kkey(&self, i: usize) -> FocusKey<u32> {
         FocusKey { entry: self.entry, elem: KEY_BASE + i as u32 }
@@ -336,6 +350,10 @@ impl Machine<YtHost> for SearchScreen {
                 fx.invalidate(plx_machine::present::Provenance::Input);
                 Handled::Yes
             }
+            ScreenEvent::Mount if crate::textin::exclusive() => {
+                crate::textin::show();
+                Handled::Yes
+            }
             ScreenEvent::Unmount => {
                 crate::textin::hide();
                 Handled::Yes
@@ -351,11 +369,11 @@ impl Focusable<YtHost> for SearchScreen {
         let n = self.keys().len();
         out.push(GroupSpec {
             id: G_KEYS,
-            kind: GroupKind::Grid { cols: COLS, holes: &[] },
+            kind: GroupKind::Grid { cols: cols(), holes: &[] },
             seat: Seat::Remembered,
             reachable: AxisMask::BOTH,
             edge: [EdgeRule::Geometric; 4],
-            extent: Rect::new(KEYS_X, KEYS_Y, COLS as f32 * (KEY_W + KEY_GAP), (n.div_ceil(COLS)) as f32 * (KEY_H + KEY_GAP)),
+            extent: Rect::new(KEYS_X, KEYS_Y, cols() as f32 * (key_w() + KEY_GAP), (n.div_ceil(cols())) as f32 * (KEY_H + KEY_GAP)),
             len: n,
             elem: ElemKind::Control,
         });
@@ -371,20 +389,20 @@ impl Focusable<YtHost> for SearchScreen {
         let sugs = self.suggestions(cx).len();
         if key.elem >= SUG_BASE {
             if dir == Dir::Left {
-                return Step::Move(self.kkey(COLS - 1));
+                return Step::Move(self.kkey(cols() - 1));
             }
             return self.sug.neighbour(key, dir, sugs);
         }
         let n = self.keys().len();
         let i = (key.elem - KEY_BASE) as usize;
-        let (r, c) = (i / COLS, i % COLS);
+        let (r, c) = (i / cols(), i % cols());
         let to = match dir {
             Dir::Left if c > 0 => Some(i - 1),
-            Dir::Right if c + 1 < COLS && i + 1 < n => Some(i + 1),
+            Dir::Right if c + 1 < cols() && i + 1 < n => Some(i + 1),
             Dir::Right if sugs > 0 => return Step::Move(self.sug.key(0)),
-            Dir::Up if r > 0 => Some(i - COLS),
-            Dir::Down if i + COLS < n => Some(i + COLS),
-            Dir::Down if r + 1 < n.div_ceil(COLS) => Some(n - 1),
+            Dir::Up if r > 0 => Some(i - cols()),
+            Dir::Down if i + cols() < n => Some(i + cols()),
+            Dir::Down if r + 1 < n.div_ceil(cols()) => Some(n - 1),
             _ => None,
         };
         to.map_or(Step::Edge, |j| Step::Move(self.kkey(j)))
@@ -410,7 +428,7 @@ impl Focusable<YtHost> for SearchScreen {
             return self.kkey(n - 1);
         }
         if want.elem >= SUG_BASE && self.sug.index(want.elem, self.suggestions(cx).len()).is_none() {
-            return self.kkey(COLS - 1);
+            return self.kkey(cols() - 1);
         }
         if want.elem < KEY_BASE {
             return self.kkey(0);

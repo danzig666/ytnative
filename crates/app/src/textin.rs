@@ -12,6 +12,28 @@ const HIDE: u8 = 2;
 
 static WANT: AtomicU8 = AtomicU8::new(NONE);
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+/// The TV's keyboard came up at least once in this run.
+static SEEN: AtomicBool = AtomicBool::new(false);
+/// It was asked for and never came up: this TV has none (Search keeps ytnative's own keys).
+static MISSING: AtomicBool = AtomicBool::new(false);
+
+/// Search uses the TV's keyboard alone (on the TV, unless it never came up). The simulator keeps
+/// ytnative's keys.
+pub fn exclusive() -> bool {
+    cfg!(not(windows)) && !MISSING.load(Ordering::SeqCst)
+}
+
+/// Main loop: the keyboard is on screen.
+pub fn note_shown() {
+    SEEN.store(true, Ordering::SeqCst);
+}
+
+/// Main loop: asked for, not on screen after a while.
+pub fn note_missing() {
+    if !SEEN.load(Ordering::SeqCst) {
+        MISSING.store(true, Ordering::SeqCst);
+    }
+}
 
 /// Ask for the TV's keyboard (from a screen; started on the next frame).
 pub fn show() {
