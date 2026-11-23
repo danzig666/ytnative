@@ -143,7 +143,8 @@ Everything SmartTube users expect, rebuilt for webOS:
 - **Recommendations on the TV's Home** (off by default): the newest videos of the Subscriptions
   feed as cards in LG Home's Recommended row, which opens them in the app — the row the stock
   streaming apps fill, also read by third-party homes.
-- Interface in English, Hungarian, German, Spanish, French, Italian and Russian.
+- Interface in 46 languages (all of SmartTube's), following the TV's language; YouTube is asked in
+  the same language, so titles and dates come as youtube.com shows them there.
 - Settings backup and restore (USB or app storage).
 - **Problem report** (Settings > Account & about): the app's logs on screen, and a QR code to
   download them on a phone on the same Wi-Fi, with sign-in tokens and stream addresses removed.

@@ -211,7 +211,7 @@ const WATCHING: [&str; 8] = ["watching", "zuschauer", "néz", "espectador", "spe
 
 /// A card line of a past live stream ("Streamed 2 days ago", "vor 2 Tagen gestreamt", ...).
 pub fn was_streamed(line: &str) -> bool {
-    ["Streamed ", "gestreamt", "Streamelve", "Emitido", "Diffusé", "Трансляция", "Trasmesso"].iter().any(|w| line.contains(w))
+    crate::lang_data::current().is_streamed(line) || ["Streamed ", "gestreamt", "Streamelve", "Emitido", "Diffusé", "Трансляция", "Trasmesso"].iter().any(|w| line.contains(w))
 }
 
 /// How long ago a video was published, from its card's lines ("1.2K views • 3 days ago",
@@ -219,6 +219,20 @@ pub fn was_streamed(line: &str) -> bool {
 /// (channels, playlists). The lines are in the language YouTube was asked in
 /// (`innertube::set_content_language`).
 pub fn age_secs(lines: &[String]) -> Option<u64> {
+    age_secs_in(crate::lang_data::current(), lines)
+}
+
+/// [`age_secs`] for lines in `lang`'s wording: the generated tables first, then the hand-made
+/// words of the first interface languages.
+pub fn age_secs_in(lang: &crate::lang_data::Lang, lines: &[String]) -> Option<u64> {
+    for line in lines {
+        if lang.is_watching(line) {
+            return Some(0);
+        }
+        if let Some(s) = line.split('\u{2022}').find_map(|part| lang.age(part)) {
+            return Some(s);
+        }
+    }
     for line in lines {
         let low = line.to_lowercase();
         if WATCHING.iter().any(|w| low.contains(w)) {

@@ -1,10 +1,1 @@
-- Fixed: UM7100, UM7600 and other 2019 LCD TVs whose sandbox lacks /dev/rtkmem, without root: ytnative now installs LG's own sandbox settings for Developer Mode apps, which add the device; after unplugging the TV once, videos should play (#8)
-- New: the newest videos of your subscriptions as cards in the TV's home Recommended row (Settings > Interface, off by default, never in child mode); thanks to cchrkk (#12, #14)
-- New: Italian interface; thanks to cchrkk (#15)
-- Changed: Settings > Interface > Card menu is now a page of its own that says what the card menu is (the menu you get by holding OK on a video, channel or playlist), lists its items in their real order with a switch each, and moves an item with Right, then Up / Down; with a reset
-- Changed: moving through the sidebar opens the section the focus stops on, so Right goes straight into its videos; OK still reloads it (#21)
-- Fixed: Left from a pinned playlist or channel, or a channel group, goes back to the sidebar, as it does from Home (#16)
-- Fixed: the player's Save to playlist button is filled when the video is in one of your playlists (#17)
-- Fixed: Save to playlist opens at the top of the list, with the playlists that already hold the video first (#18)
-- New: the player's like and dislike buttons show their counts when focused (#20)
-- Fixed: titles in the lists are the ones YouTube shows you on its website: YouTube is now asked in the interface language, so a channel's English translation of its titles no longer replaces the original for other languages; the lines under the titles ("3 days ago", views) and YouTube's row names are in the interface language too (#19)
+- New: the interface in 39 more languages, the ones SmartTube has: Polish, Portuguese, Dutch, Turkish, Ukrainian, Czech, Slovak, Slovenian, Croatian, Serbian, Romanian, Bulgarian, Greek, Lithuanian, Latvian, Estonian, Finnish, Swedish, Norwegian, Danish, Catalan, Galician, Albanian, Azerbaijani, Armenian, Georgian, Arabic, Hebrew, Persian, Hindi, Telugu, Thai, Vietnamese, Indonesian, Malay, Japanese, Korean and Chinese (Simplified and Traditional); with "System" ytnative follows the TV's language, and YouTube is asked in it too, so sorting by date, hiding past streams and video dates work in every one of them

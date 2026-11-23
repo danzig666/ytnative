@@ -16,6 +16,7 @@ pub mod fsutil;
 pub mod gdrive;
 pub mod innertube;
 pub mod jsc;
+pub mod lang_data;
 pub mod local_playlists;
 pub mod live_chat;
 pub mod loudness;

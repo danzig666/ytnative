@@ -38,9 +38,34 @@ static CURRENT: AtomicPtr<Map> = AtomicPtr::new(std::ptr::null_mut());
 
 /// `pref` is the setting ("system", "en", "hu", ...); `system` is the TV's locale (e.g. "hu-HU").
 pub fn set_language(pref: &str, system: &str) {
-    let code = if pref == "system" { system.split(['-', '_']).next().unwrap_or("en") } else { pref };
+    let code = if pref == "system" { table_code(system) } else { pref };
     let map = tables().get(code).map_or(std::ptr::null_mut(), |m| m as *const Map as *mut Map);
     CURRENT.store(map, Ordering::Relaxed);
+}
+
+/// The table column for a TV locale ("de-DE" -> "de", "zh-Hant-TW" -> "zh-TW", "nb-NO" /
+/// "no" -> "nb", "iw" -> "he", "in" -> "id").
+fn table_code(locale: &str) -> &str {
+    let low = locale.to_ascii_lowercase().replace('_', "-");
+    let parts: Vec<&str> = low.split('-').collect();
+    match parts[0] {
+        "zh" if parts.iter().any(|p| matches!(*p, "hant" | "tw" | "hk" | "mo")) => "zh-TW",
+        "zh" => "zh",
+        "no" | "nb" | "nn" => "nb",
+        "iw" | "he" => "he",
+        "in" | "id" => "id",
+        base => languages().into_iter().find(|l| *l == base).unwrap_or("en"),
+    }
+}
+
+/// The `hl` YouTube knows a table language by (its own older codes for some).
+pub fn youtube_hl(code: &str) -> &str {
+    match code {
+        "he" => "iw",
+        "nb" => "no",
+        "zh" => "zh-CN",
+        c => c,
+    }
 }
 
 /// The interface language's code ("en" when English or untranslated).
@@ -55,6 +80,9 @@ pub fn current() -> &'static str {
 /// A full date in words in the interface language (no abbreviations): `month` 1..=12.
 pub fn full_date(year: i32, month: u32, day: u32) -> String {
     let m = (month.clamp(1, 12) - 1) as usize;
+    if let Some((_, months, _, full, _)) = dates::DATES.iter().find(|d| d.0 == current()) {
+        return cldr_format(full, Some(year), months[m], month, day, "");
+    }
     match current() {
         "hu" => {
             const M: [&str; 12] = ["január", "február", "március", "április", "május", "június", "július", "augusztus", "szeptember", "október", "november", "december"];
@@ -91,6 +119,9 @@ pub fn full_date(year: i32, month: u32, day: u32) -> String {
 /// A date in words in the interface language: `weekday` 0 = Sunday, `month` 1..=12.
 pub fn date_words(weekday: usize, day: u32, month: usize) -> String {
     let (w, m) = (weekday % 7, month.clamp(1, 12) - 1);
+    if let Some((_, months, days, _, pat)) = dates::DATES.iter().find(|d| d.0 == current()) {
+        return cldr_format(pat, None, months[m], m as u32 + 1, day, days[w]);
+    }
     match current() {
         "hu" => {
             const W: [&str; 7] = ["vasárnap", "hétfő", "kedd", "szerda", "csütörtök", "péntek", "szombat"];
@@ -130,6 +161,57 @@ pub fn date_words(weekday: usize, day: u32, month: usize) -> String {
     }
 }
 
+#[path = "i18n_dates.rs"]
+mod dates;
+
+/// A CLDR date pattern ("EEEE, d 'de' MMMM", "y年M月d日") filled in: `d` the day, `M` / `L` the
+/// month (three or more letters: `month_name`), `y` the year, `E` / `c` the weekday's name;
+/// quoted text and everything else as it is.
+fn cldr_format(pat: &str, year: Option<i32>, month_name: &str, month: u32, day: u32, weekday: &str) -> String {
+    let mut out = String::new();
+    let chars: Vec<char> = pat.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\'' {
+            // 'text', '' for a quote.
+            let mut j = i + 1;
+            if chars.get(j) == Some(&'\'') {
+                out.push('\'');
+                i += 2;
+                continue;
+            }
+            while j < chars.len() && chars[j] != '\'' {
+                out.push(chars[j]);
+                j += 1;
+            }
+            i = j + 1;
+            continue;
+        }
+        if !c.is_ascii_alphabetic() {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        let mut n = 1;
+        while chars.get(i + n) == Some(&c) {
+            n += 1;
+        }
+        match c {
+            'd' if n >= 2 => out.push_str(&format!("{day:02}")),
+            'd' => out.push_str(&day.to_string()),
+            'M' | 'L' if n >= 3 => out.push_str(month_name),
+            'M' | 'L' if n == 2 => out.push_str(&format!("{month:02}")),
+            'M' | 'L' => out.push_str(&month.to_string()),
+            'y' => out.push_str(&year.map(|y| y.to_string()).unwrap_or_default()),
+            'E' | 'c' => out.push_str(weekday),
+            _ => {}
+        }
+        i += n;
+    }
+    out.trim().to_string()
+}
+
 /// The translation of `s`, or `s` itself.
 pub fn tr(s: &str) -> &str {
     let p = CURRENT.load(Ordering::Relaxed);
@@ -159,6 +241,26 @@ mod tests {
         assert_eq!(date_words(0, 22, 11), "domenica 22 novembre");
         assert_eq!(full_date(2026, 11, 22), "22 novembre 2026");
         assert_eq!(tr("Some video title"), "Some video title");
+        assert_eq!(table_code("zh-Hant-TW"), "zh-TW");
+        assert_eq!(table_code("zh-Hans-CN"), "zh");
+        assert_eq!(table_code("nb-NO"), "nb");
+        assert_eq!(table_code("iw-IL"), "he");
+        assert_eq!(table_code("pt-BR"), "pt");
+        assert_eq!(table_code("xx-YY"), "en");
+        assert_eq!(youtube_hl("zh"), "zh-CN");
+        set_language("pl", "");
+        assert_eq!(full_date(2026, 11, 22), "22 listopada 2026");
+        assert_eq!(date_words(0, 22, 11), "niedziela, 22 listopada");
+        set_language("ja", "");
+        assert_eq!(full_date(2026, 11, 22), "2026年11月22日");
+        assert_eq!(date_words(0, 22, 11), "11月22日日曜日");
+        set_language("pt", "");
+        assert_eq!(full_date(2026, 11, 22), "22 de novembro de 2026");
+        set_language("lv", "");
+        assert_eq!(date_words(0, 22, 11), "svētdiena, 22. novembris");
+        set_language("he", "");
+        assert_eq!(full_date(2026, 4, 23), "23 באפריל 2026");
+        set_language("en", "");
         set_language("en", "");
         assert_eq!(tr("Settings"), "Settings");
     }
@@ -228,7 +330,7 @@ pub const LANGUAGES: &[(&str, &str)] = &[
     ("zh-Hant", "中文（繁體）"),
     ("zh-CN", "中文（简体）"),
     ("zh-TW", "中文（繁體）"),
-    ("zh", "中文"),
+    ("zh", "中文（简体）"),
     ("sw", "Kiswahili"),
     ("af", "Afrikaans"),
     ("sq", "Shqip"),

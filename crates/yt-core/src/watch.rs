@@ -346,41 +346,104 @@ const MONTHS: [&[&str]; 12] = [
 
 /// A date in YouTube's wording, in the language it was asked in: "Published on Nov 10, 2014",
 /// "Veröffentlicht am 23.04.2005", "Közzététel dátuma: 2005. ápr. 23.", "Publicado el 23 abr
-/// 2005", "Дата публикации: 23 апр. 2005 г.": (year, month, day).
+/// 2005", "Дата публикации: 23 апр. 2005 г.", "公開日: 2005/04/23", "2005年4月23日发布",
+/// "Publicēšanas datums: 2005. gada 23. apr.": (year, month, day).
 pub fn parse_date(s: &str) -> Option<(i32, u32, u32)> {
-    let year = |w: &str| w.parse::<i32>().ok().filter(|y| (1990..=2200).contains(y));
-    let day = |w: &str| w.parse::<u32>().ok().filter(|d| (1..=31).contains(d));
-    let month = |w: &str| {
-        let w = w.to_lowercase();
-        if w.chars().count() < 3 {
-            return None;
+    parse_date_in(crate::lang_data::current(), s)
+}
+
+/// [`parse_date`] with `lang`'s month names (and the first interface languages' as a fallback).
+pub fn parse_date_in(lang: &crate::lang_data::Lang, s: &str) -> Option<(i32, u32, u32)> {
+    let s = crate::lang_data::norm(s);
+    let year = |n: u32| (1990..=2200).contains(&n).then_some(n as i32);
+    let day = |n: u32| (1..=31).contains(&n).then_some(n);
+    let mon = |n: u32| (1..=12).contains(&n).then_some(n);
+    let num = |w: &str| w.parse::<u32>().ok();
+    // 2005年4月23日 (Chinese, Japanese).
+    let mut cjk = [None; 3];
+    let mut digits = String::new();
+    for c in s.chars() {
+        match c {
+            '0'..='9' => digits.push(c),
+            '年' | '月' | '日' => {
+                let i = ['年', '月', '日'].iter().position(|x| *x == c).unwrap();
+                cjk[i] = num(&digits);
+                digits.clear();
+            }
+            _ => digits.clear(),
         }
-        // "juin" / "juil" before "jun" / "jul".
-        let four = [("juin", 6), ("juil", 7)].iter().find(|(p, _)| w.starts_with(p)).map(|&(_, m)| m);
-        four.or_else(|| MONTHS.iter().position(|names| names.iter().any(|n| w.starts_with(n))).map(|i| i as u32 + 1))
-    };
-    let words: Vec<&str> = s.split(|c: char| c.is_whitespace() || c == ',').map(|w| w.trim_end_matches('.')).filter(|w| !w.is_empty()).collect();
-    // All in numbers: "23.04.2005".
+    }
+    if let [Some(y), Some(m), Some(d)] = cjk {
+        if let (Some(y), Some(m), Some(d)) = (year(y), mon(m), day(d)) {
+            return Some((y, m, d));
+        }
+    }
+    let words: Vec<&str> = s.split(|c: char| c.is_whitespace() || c == ',' || c == '،').map(|w| w.trim_end_matches(['.', ':'])).filter(|w| !w.is_empty()).collect();
+    // All in numbers in one word: "23.04.2005", "23/04/2005", "2005/04/23", "2005-04-23".
     for w in &words {
-        let n: Vec<&str> = w.split('.').collect();
-        if let [d, m, y] = n[..] {
-            if let (Some(d), Some(m), Some(y)) = (day(d), m.parse::<u32>().ok().filter(|m| (1..=12).contains(m)), year(y)) {
+        let n: Vec<Option<u32>> = w.split(['.', '/', '-']).map(num).collect();
+        if let [Some(a), Some(b), Some(c)] = n[..] {
+            if let (Some(y), Some(m), Some(d)) = (year(a), mon(b), day(c)) {
+                return Some((y, m, d));
+            }
+            if let (Some(d), Some(m), Some(y)) = (day(a), mon(b), year(c)) {
                 return Some((y, m, d));
             }
         }
     }
-    words.windows(3).find_map(|w| {
-        if let (Some(m), Some(d), Some(y)) = (month(w[0]), day(w[1]), year(w[2])) {
-            return Some((y, m, d)); // Nov 10, 2014
+    // Words: numbers (their leading digits: "2005న") and month names; others are skipped
+    // ("de", "gada", "թ.", "thg").
+    #[derive(Clone, Copy)]
+    enum T {
+        N(u32),
+        M(u32),
+    }
+    let toks: Vec<T> = words
+        .iter()
+        .filter_map(|w| {
+            let lead: String = w.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if !lead.is_empty() {
+                return num(&lead).map(T::N);
+            }
+            lang.month(w).or_else(|| old_month(w)).map(T::M)
+        })
+        .collect();
+    let named = |w: &[T]| -> Option<(i32, u32, u32)> {
+        let tries: [Option<(i32, u32, u32)>; 4] = match *w {
+            [T::M(m), T::N(d), T::N(y)] => [year(y).zip(day(d)).map(|(y, d)| (y, m, d)), None, None, None], // Nov 10, 2014
+            [T::N(a), T::M(m), T::N(b)] => [
+                year(b).zip(day(a)).map(|(y, d)| (y, m, d)), // 23 abr 2005
+                year(a).zip(day(b)).map(|(y, d)| (y, m, d)), // 2005. ápr. 23.
+                None,
+                None,
+            ],
+            [T::N(y), T::N(d), T::M(m)] => [year(y).zip(day(d)).map(|(y, d)| (y, m, d)), None, None, None], // 2005. gada 23. apr.
+            _ => [None; 4],
+        };
+        tries.into_iter().flatten().next()
+    };
+    let numeric = |w: &[T]| -> Option<(i32, u32, u32)> {
+        match *w {
+            [T::N(a), T::N(b), T::N(c)] => {
+                // 2005. 4. 23. / 23. 4. 2005
+                let ymd = year(a).and_then(|y| Some((y, mon(b)?, day(c)?)));
+                ymd.or_else(|| Some((year(c)?, mon(b)?, day(a)?)))
+            }
+            _ => None,
         }
-        if let (Some(d), Some(m), Some(y)) = (day(w[0]), month(w[1]), year(w[2])) {
-            return Some((y, m, d)); // 23 abr 2005
-        }
-        if let (Some(y), Some(m), Some(d)) = (year(w[0]), month(w[1]), day(w[2])) {
-            return Some((y, m, d)); // 2005. ápr. 23.
-        }
-        None
-    })
+    };
+    toks.windows(3).find_map(named).or_else(|| toks.windows(3).find_map(numeric))
+}
+
+/// A month by the start of its name in the first interface languages ([`MONTHS`]).
+fn old_month(w: &str) -> Option<u32> {
+    let w = w.to_lowercase();
+    if w.chars().count() < 3 {
+        return None;
+    }
+    // "juin" / "juil" before "jun" / "jul".
+    let four = [("juin", 6), ("juil", 7)].iter().find(|(p, _)| w.starts_with(p)).map(|&(_, m)| m);
+    four.or_else(|| MONTHS.iter().position(|names| names.iter().any(|n| w.starts_with(n))).map(|i| i as u32 + 1))
 }
 
 /// An entity key (base64 of a message whose field 2 is the subject) names exactly this video.
@@ -782,5 +845,62 @@ mod date_language_tests {
         assert_eq!(parse_date("Publiée le 3 juil. 2021"), Some((2021, 7, 3)));
         assert_eq!(parse_date("vor 3 Tagen"), None);
         assert_eq!(parse_date("hace 3 días"), None);
+    }
+
+    /// The "Me at the zoo" date line in every language YouTube is asked in (2026-11 answers).
+    #[test]
+    fn dates_in_every_content_language() {
+        let cases: &[(&str, &str)] = &[
+            ("ar", "تاريخ النشر: 23\u{200f}/04\u{200f}/2005"),
+            ("az", "Yayımlandığı tarixi: 23 apr 2005"),
+            ("bg", "Публикуван на 23.04.2005 г."),
+            ("ca", "Data de publicació: 23 d’abr. 2005"),
+            ("cs", "Publikováno 23. 4. 2005"),
+            ("da", "Udgivet 23. apr. 2005"),
+            ("de", "Veröffentlicht am 23.04.2005"),
+            ("el", "Δημοσιεύτηκε στις 23 Απρ 2005"),
+            ("en", "Published on Apr 23, 2005"),
+            ("es", "Publicado el 23 abr 2005"),
+            ("et", "Avaldati 23. apr 2005"),
+            ("fa", "تاریخ انتشار 23 آوریل 2005"),
+            ("fi", "Julkaistu 23.4.2005"),
+            ("fr", "Publiée le 23 avr. 2005"),
+            ("gl", "Publicado o 23 de abr. de 2005"),
+            ("hi", "23 अप्रैल 2005 को पब्लिश किया गया"),
+            ("hr", "Datum objavljivanja: 23. tra 2005."),
+            ("hu", "Közzététel dátuma: 2005. ápr. 23."),
+            ("hy", "Հրապարակվել է՝ 2005 թ. ապր 23"),
+            ("id", "Dipublikasikan tanggal 23 Apr 2005"),
+            ("it", "Pubblicato il giorno 23 apr 2005"),
+            ("iw", "פורסם בתאריך 23 באפר׳ 2005"),
+            ("ja", "公開日: 2005/04/23"),
+            ("ka", "გამოქვეყნების თარიღია 23 აპრ. 2005"),
+            ("ko", "게시 날짜: 2005. 4. 23."),
+            ("lt", "Paskelbta 2005-04-23"),
+            ("lv", "Publicēšanas datums: 2005. gada 23. apr."),
+            ("ms", "Diterbitkan pada 23 Apr 2005"),
+            ("nl", "Gepubliceerd op 23 apr 2005"),
+            ("no", "Publisert 23. apr. 2005"),
+            ("pl", "Opublikowano 23 kwi 2005"),
+            ("pt", "Publicado em 23 de abr. de 2005"),
+            ("ro", "Publicat pe 23 apr. 2005"),
+            ("ru", "Дата публикации: 23 апр. 2005 г."),
+            ("sk", "Zverejnené: 23. 4. 2005"),
+            ("sl", "Objavljeno: 23. apr. 2005"),
+            ("sq", "Publikuar më 23 pri 2005"),
+            ("sr", "Објављено је 23. 4. 2005."),
+            ("sv", "Publicerades den 23 apr. 2005"),
+            ("te", "23 ఏప్రి, 2005న పబ్లిష్ చేయబడింది"),
+            ("th", "เผยแพร่เมื่อ 23 เม.ย. 2005"),
+            ("tr", "23 Nis 2005 tarihinde yayınlandı"),
+            ("uk", "Опубліковано 23 квіт. 2005 р."),
+            ("vi", "Ngày xuất bản: 23 thg 4, 2005"),
+            ("zh-CN", "2005年4月23日发布"),
+            ("zh-TW", "發布日期：2005年4月23日"),
+        ];
+        for (hl, s) in cases {
+            let lang = crate::lang_data::get(hl).unwrap();
+            assert_eq!(super::parse_date_in(lang, s), Some((2005, 4, 23)), "{hl}: {s}");
+        }
     }
 }

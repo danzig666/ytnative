@@ -1026,7 +1026,7 @@ impl AppRig {
         // not the English translation a channel may have added (#19).
         let hl = crate::i18n::current();
         if self.applied_hl != Some(hl) {
-            yt_core::innertube::set_content_language(hl);
+            yt_core::innertube::set_content_language(crate::i18n::youtube_hl(hl));
             // Another language: the lists reload in it.
             if self.applied_hl.is_some() {
                 self.clear_feeds();

@@ -790,10 +790,11 @@ fn link_icon(c: &Card) -> icon::Kind {
     let t = c.title.to_lowercase();
     const LATER: [&str; 7] = ["watch later", "später ansehen", "megnézendő", "ver más tarde", "à regarder plus tard", "смотреть позже", "guarda più tardi"];
     const LIKED: [&str; 8] = ["liked", "mag ich", "positiv bewertet", "kedvelt", "que me gustan", "vidéos j'aime", "понравившиеся", "piaciuti"];
-    if LATER.iter().any(|w| t.starts_with(w)) {
+    let langs = yt_core::lang_data::all();
+    if LATER.iter().any(|w| t.starts_with(w)) || langs.iter().any(|l| t.starts_with(l.later)) {
         return K::Clock;
     }
-    if LIKED.iter().any(|w| t.starts_with(w) || t.contains(w)) {
+    if LIKED.iter().any(|w| t.starts_with(w) || t.contains(w)) || langs.iter().any(|l| t.starts_with(l.liked)) {
         return K::ThumbUp;
     }
     match id {
