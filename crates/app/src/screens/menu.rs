@@ -30,6 +30,20 @@ const BELL_CHOICES: [(&str, &str); 3] = [
 #[derive(Clone, Debug)]
 enum Act {
     Play(String),
+    /// Show this address as a QR code (url, title).
+    Share(String, String),
+    /// A sidebar section: reload it.
+    SectionRefresh(crate::store::Section),
+    /// A sidebar section: a new name (key, current name).
+    SectionRename(String, String),
+    /// A sidebar section: its own name again.
+    SectionResetName(String),
+    /// A sidebar section: one place up (-1) or down (1) among the shown sections.
+    SectionMove(String, i32),
+    /// A sidebar section: out of the sidebar (back from Settings › Interface).
+    SectionHide(String),
+    /// Mark (`true`) or unmark these videos as watched.
+    MarkWatched(Vec<String>, bool),
     OpenChannel(String),
     OpenPlaylist(String),
     BlockChannel(String),
@@ -243,7 +257,7 @@ const SUB_STYLES: &[&str] = &["outline", "shadow", "box"];
 const SUB_FONTS: &[&str] = &["default", "sans", "serif", "mono", "roboto"];
 
 /// Card-menu item kinds, in the default order, with their settings labels.
-pub const CARD_ITEMS: [(&str, &str); 19] = [
+pub const CARD_ITEMS: [(&str, &str); 21] = [
     ("play", "Card menu: Play"),
     ("play_start", "Card menu: Play from the start"),
     ("play_private", "Card menu: Play without history"),
@@ -256,6 +270,7 @@ pub const CARD_ITEMS: [(&str, &str); 19] = [
     ("pin", "Card menu: Pin to sidebar"),
     ("watch_later", "Card menu: Save to Watch later"),
     ("playlist", "Card menu: Save to playlist"),
+    ("watched", "Card menu: Mark as watched"),
     ("copy_list", "Card menu: Copy a playlist"),
     ("youtube", "Card menu: YouTube's items"),
     ("more_from", "Card menu: More from channel"),
@@ -263,7 +278,35 @@ pub const CARD_ITEMS: [(&str, &str); 19] = [
     ("sponsorblock", "Card menu: SponsorBlock on this channel"),
     ("subscribe", "Card menu: Subscribe / unsubscribe"),
     ("comments", "Card menu: Comments"),
+    ("share", "Card menu: Share"),
 ];
+
+/// Moves section `key` one place up (`d` < 0) or down among the sidebar's sections, past any
+/// key of a section this build does not have.
+pub fn move_section(sections: &mut Vec<String>, key: &str, d: i32) {
+    let Some(i) = sections.iter().position(|k| k == key) else { return };
+    let real = |k: &String| crate::store::Section::from_key(k).is_some();
+    let j = if d < 0 { (0..i).rev().find(|&j| real(&sections[j])) } else { (i + 1..sections.len()).find(|&j| real(&sections[j])) };
+    if let Some(j) = j {
+        sections.swap(i, j);
+    }
+}
+
+/// The videos of channel `name` in the lists loaded now, not marked yet.
+fn channel_videos(name: &str, cx: &Cx<'_, YtHost>) -> Vec<String> {
+    let store = cx.views.store;
+    let mut ids: Vec<String> = Vec::new();
+    for c in store.feeds.values().flat_map(|f| f.cards.iter()) {
+        if c.item.channel.as_deref() == Some(name) {
+            if let Some(v) = c.video_id() {
+                if !store.watched.contains(v) && !ids.iter().any(|x| x == v) {
+                    ids.push(v.to_string());
+                }
+            }
+        }
+    }
+    ids
+}
 
 impl MenuScreen {
     fn make(entry: EntryId, title: String, acts: Vec<(String, Act)>) -> Self {
@@ -279,6 +322,31 @@ impl MenuScreen {
             acts,
             list: VList { entry, group: G, base: BASE, rect: Rect::new(PANEL.x + 24.0, 130.0, PANEL.w - 48.0, 920.0), row_h: 54.0, text_size: 26 },
         }
+    }
+
+    /// A sidebar section's menu (SmartTube's): refresh, rename, move up / down, hide.
+    pub fn section(entry: EntryId, key: &str, cx: &Cx<'_, YtHost>) -> Self {
+        let s = &cx.views.store.settings;
+        let Some(sec) = crate::store::Section::from_key(key) else { return Self::make(entry, tr("Options").to_string(), vec![(tr("Close").to_string(), Act::Close)]) };
+        let name = sec.name(s);
+        let mut acts = vec![(tr("Refresh").to_string(), Act::SectionRefresh(sec))];
+        acts.push((tr("Rename").to_string(), Act::SectionRename(key.to_string(), name.clone())));
+        if s.section_names.iter().any(|(k, _)| k == key) {
+            acts.push((tr("Restore the original name").to_string(), Act::SectionResetName(key.to_string())));
+        }
+        let shown: Vec<&String> = s.sections.iter().filter(|k| crate::store::Section::from_key(k).is_some()).collect();
+        let at = shown.iter().position(|k| *k == key);
+        if at.is_some_and(|i| i > 0) {
+            acts.push((tr("Move up").to_string(), Act::SectionMove(key.to_string(), -1)));
+        }
+        if at.is_some_and(|i| i + 1 < shown.len()) {
+            acts.push((tr("Move down").to_string(), Act::SectionMove(key.to_string(), 1)));
+        }
+        if shown.len() > 1 {
+            acts.push((tr("Hide from the sidebar").to_string(), Act::SectionHide(key.to_string())));
+        }
+        acts.push((tr("Close").to_string(), Act::Close));
+        Self::make(entry, crate::i18n::tr(&name).to_string(), acts)
     }
 
     pub fn card(entry: EntryId, elem: u32, cx: &Cx<'_, YtHost>) -> Self {
@@ -408,6 +476,25 @@ impl MenuScreen {
                 }
             }
             if let Some(v) = card.video_id() {
+                let marked = cx.views.store.watched.contains(v);
+                if marked {
+                    tagged.push(("watched", tr("Mark as unwatched").to_string(), Act::MarkWatched(vec![v.to_string()], false)));
+                } else {
+                    tagged.push(("watched", tr("Mark as watched").to_string(), Act::MarkWatched(vec![v.to_string()], true)));
+                }
+            }
+            // Every loaded video of the channel (the card's, or the channel card itself).
+            let channel = card.item.channel.clone().or_else(|| match &card.item.endpoint {
+                Some(Endpoint::Browse { browse_id, .. }) if browse_id.starts_with("UC") => Some(card.title.clone()),
+                _ => None,
+            });
+            if let Some(ch) = channel.filter(|c| !c.is_empty()) {
+                let ids = channel_videos(&ch, cx);
+                if ids.len() > 1 || (ids.len() == 1 && card.video_id().is_none()) {
+                    tagged.push(("watched", tr("Mark all from {} as watched").replace("{}", &ch), Act::MarkWatched(ids, true)));
+                }
+            }
+            if let Some(v) = card.video_id() {
                 tagged.push(("watch_later", tr("Save to Watch later").to_string(), Act::User(UserAction::WatchLater(v.to_string()))));
                 tagged.push(("playlist", tr("Save to playlist\u{2026}").to_string(), Act::PickPlaylist(card.local_video().unwrap_or_else(|| Video::new(v)))));
             }
@@ -426,6 +513,9 @@ impl MenuScreen {
                 if useful && !m.label.is_empty() {
                     tagged.push(("youtube", tr(&m.label).to_string(), Act::User(UserAction::Menu(m.clone()))));
                 }
+            }
+            if let Some(url) = super::share::link_of(&card.item, card.video_id()).filter(|_| !cx.views.store.settings.child_mode) {
+                tagged.push(("share", tr("Share").to_string(), Act::Share(url, card.title.clone())));
             }
             if let Some(ch) = card.item.channel.as_ref().filter(|_| !cx.views.store.settings.child_mode) {
                 tagged.push(("more_from", tr("More from {}").replace("{}", ch), Act::SearchFor(ch.clone())));
@@ -583,6 +673,9 @@ impl MenuScreen {
             }
             acts.push((tr("Save to Watch later").to_string(), Act::User(UserAction::WatchLater(st.video_id.clone()))));
             acts.push((tr("Save to playlist\u{2026}").to_string(), Act::PickPlaylist(super::player::playing_video(st))));
+            if !cx.views.store.settings.child_mode {
+                acts.push((tr("Share").to_string(), Act::Share(format!("https://youtu.be/{}", st.video_id), st.title.clone())));
+            }
             if !cx.views.store.play_next.is_empty() {
                 acts.push((tr("Save the queue as a playlist on this TV").to_string(), Act::SaveQueue));
             }
@@ -790,6 +883,39 @@ impl MenuScreen {
                 let (t, id, p) = (t.clone(), id.clone(), p.clone());
                 fx.push(Fx::App(YtFx::Toast(tr("Pinned {}").replace("{}", &t))));
                 fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| s.pinned.push((t, id, p))))));
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
+            }
+            Act::Share(url, title) => {
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
+                fx.push(Fx::Nav(NavOp::Push(YtArg::Share(url.clone(), title.clone()))));
+            }
+            Act::SectionRefresh(sec) => {
+                fx.push(Fx::App(YtFx::Load(FeedKey::Section(*sec))));
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
+            }
+            Act::SectionRename(key, name) => {
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
+                let shown = crate::i18n::tr(name).to_string();
+                fx.push(Fx::Nav(NavOp::Push(YtArg::NameEntry(NamePurpose::RenameSection(key.clone(), shown)))));
+            }
+            Act::SectionResetName(key) => {
+                let key = key.clone();
+                fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| s.section_names.retain(|(k, _)| *k != key)))));
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
+            }
+            Act::SectionMove(key, d) => {
+                let (key, d) = (key.clone(), *d);
+                fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| move_section(&mut s.sections, &key, d)))));
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
+            }
+            Act::SectionHide(key) => {
+                let key = key.clone();
+                fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| s.sections.retain(|k| *k != key)))));
+                fx.push(Fx::App(YtFx::Toast(tr("Hidden (Settings \u{203A} Interface brings it back)").to_string())));
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
+            }
+            Act::MarkWatched(ids, watched) => {
+                fx.push(Fx::App(YtFx::MarkWatched(ids.clone(), *watched)));
                 fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
             }
             Act::Unpin(id) => {

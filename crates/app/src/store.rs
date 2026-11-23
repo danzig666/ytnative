@@ -23,15 +23,23 @@ pub enum Section {
     Trending,
     /// The account's notifications inbox (signed in only; `yt_core::notifications`).
     Notifications,
+    /// Shorts of the subscriptions and Home (`Session::shorts`).
+    Shorts,
+    /// The account's own uploads.
+    MyVideos,
+    /// YouTube Kids' home (`yt_core::kids`).
+    Kids,
 }
 
 impl Section {
     pub const ALL: &'static [Section] = &[
         Section::Home,
         Section::Subscriptions,
+        Section::Shorts,
         Section::Channels,
         Section::History,
         Section::Library,
+        Section::MyVideos,
         Section::Music,
         Section::Gaming,
         Section::News,
@@ -40,6 +48,7 @@ impl Section {
         Section::Movies,
         Section::Sports,
         Section::Trending,
+        Section::Kids,
         Section::Notifications,
     ];
 
@@ -59,6 +68,9 @@ impl Section {
             Section::Sports => "sports",
             Section::Trending => "trending",
             Section::Notifications => "notifications",
+            Section::Shorts => "shorts",
+            Section::MyVideos => "my_videos",
+            Section::Kids => "kids",
         }
     }
 
@@ -82,12 +94,21 @@ impl Section {
             Section::Sports => "Sports",
             Section::Trending => "Trending",
             Section::Notifications => "Notifications",
+            Section::Shorts => "Shorts",
+            Section::MyVideos => "My videos",
+            Section::Kids => "Kids",
         }
+    }
+
+    /// The section's name in the sidebar and over its page: the viewer's own name for it
+    /// (the sidebar's "Rename"), else its title (translated where it is drawn).
+    pub fn name(self, s: &crate::settings::Settings) -> String {
+        s.section_names.iter().find(|(k, _)| k == self.key()).map(|(_, n)| n.clone()).unwrap_or_else(|| self.title().to_string())
     }
 
     /// Shown only to a signed-in viewer (the section has nothing without an account).
     pub fn needs_account(self) -> bool {
-        self == Section::Notifications
+        matches!(self, Section::Notifications | Section::MyVideos)
     }
 
     /// Left out in child mode (the inbox shows other people's comment replies).
@@ -126,6 +147,10 @@ impl Section {
             Section::Trending => "FEtrending",
             // Not a browse page: loaded from `notification/get_notification_menu` instead.
             Section::Notifications => "FEnotifications",
+            // Not TV browse pages either: `Session::shorts`, `yt_core::kids::home`.
+            Section::Shorts => "FEshorts",
+            Section::Kids => "FEkids_home",
+            Section::MyVideos => "FEmy_videos",
         }
     }
 }
@@ -275,6 +300,8 @@ pub struct Store {
     pub play_next: Vec<yt_core::local_playlists::Video>,
     /// The playlists on this TV (saved by the Rig after every change).
     pub local: yt_core::local_playlists::Store,
+    /// Videos marked as watched on this TV.
+    pub watched: yt_core::watched::Watched,
     /// Filters of the last search (the filters panel edits these).
     pub search_filters: yt_core::search_filters::Filters,
     pub comments: HashMap<String, Comments>,
@@ -359,6 +386,7 @@ impl Store {
         for (title, items, continuation) in groups {
             let start = fresh.len();
             for it in items {
+                let it = &self.watched.apply(it);
                 if !seen.insert(it.id.clone()) || !filter.keep(it) {
                     continue;
                 }
@@ -423,6 +451,7 @@ impl Store {
         let at = r.range.end;
         let mut fresh = Vec::new();
         for it in items {
+            let it = self.watched.apply(&it);
             if seen.contains(&it.id) || !filter.keep(&it) || fresh.iter().any(|c: &Card| c.item.id == it.id) {
                 continue;
             }
@@ -645,13 +674,20 @@ impl<'a> Filter<'a> {
             || match k {
                 FeedKey::Section(Section::Home) => s.hide_shorts_home,
                 FeedKey::Section(Section::Subscriptions) => s.hide_shorts_subscriptions,
+                FeedKey::Section(Section::History) => s.hide_shorts_history,
+                FeedKey::Section(Section::Trending) => s.hide_shorts_trending,
                 FeedKey::Search { .. } => s.hide_shorts_search,
-                _ => false,
+                _ => channel && s.hide_shorts_channels,
             };
+        let watch_later = matches!(k, FeedKey::Browse { id, .. } if id == "VLWL" || id == "WL");
+        let notifications = *k == FeedKey::Section(Section::Notifications);
         Filter {
             s,
             hide_shorts,
-            hide_watched: (home && s.hide_watched_home) || (subs && s.hide_watched_subscriptions),
+            hide_watched: (home && s.hide_watched_home)
+                || (subs && s.hide_watched_subscriptions)
+                || (notifications && s.hide_watched_notifications)
+                || (watch_later && s.hide_watched_watch_later),
             hide_upcoming: (home && s.hide_upcoming_home) || (subs && s.hide_upcoming_subscriptions) || (channel && s.hide_upcoming_channels),
             hide_streams: subs && s.hide_streams_subscriptions,
             everything: matches!(k, FeedKey::Local(_)),

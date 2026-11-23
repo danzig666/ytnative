@@ -121,6 +121,9 @@ fn section_icon(s: Section) -> ui::icon::Kind {
         Section::Sports => K::Trophy,
         Section::Trending => K::Flame,
         Section::Notifications => K::Bell,
+        Section::Shorts => K::Play,
+        Section::MyVideos => K::User,
+        Section::Kids => K::Star,
     }
 }
 
@@ -434,6 +437,15 @@ impl Machine<YtHost> for BrowseScreen {
                 self.back_at = 0;
                 return Handled::Yes;
             }
+            // Hold OK on a section: its menu (refresh, rename, move, hide), as in SmartTube.
+            ScreenEvent::PressHold(_) if cx.focus.current.is_some_and(|k| k.entry == self.entry && k.elem >= NAV_BASE) => {
+                let e = cx.focus.current.unwrap().elem;
+                if let Some(NavItem::Section(s)) = self.nav.index(e, items.len()).map(|i| items[i].clone()) {
+                    fx.push(Fx::Nav(NavOp::Present(YtArg::SectionMenu(s.key().to_string()))));
+                    return Handled::Yes;
+                }
+                return Handled::No;
+            }
             ScreenEvent::Activate(e) if *e >= NAV_BASE => {
                 if let Some(i) = self.nav.index(*e, items.len()) {
                     let item = items[i].clone();
@@ -670,7 +682,7 @@ impl Screen<YtHost> for BrowseScreen {
         // Sidebar
         // Page title over a header band, after the content: scrolled rows go under it.
         ui::header_band(p, Rect::new(0.0, 0.0, 1920.0, 118.0));
-        ui::text(p, self.section.title(), LEFT, 30.0, 44, ui::WHITE, ui::ALIGN_LEFT, true);
+        ui::text(p, &self.section.name(&cx.views.store.settings), LEFT, 30.0, 44, ui::WHITE, ui::ALIGN_LEFT, true);
         if cx.views.store.settings.clock_on_pages {
             common::clock_block(p, cx, 1824.0, 22.0);
         }
@@ -703,7 +715,7 @@ impl Screen<YtHost> for BrowseScreen {
             .map(|i| {
                 use ui::icon::Kind as K;
                 match i {
-                    NavItem::Section(s) => Row::new(s.title()).active(*s == self.section).icon(section_icon(*s)),
+                    NavItem::Section(s) => Row::new(s.name(&cx.views.store.settings)).active(*s == self.section).icon(section_icon(*s)),
                     NavItem::Search => Row::new("Search").icon(K::Search),
                     NavItem::Pinned(t, ..) => Row::new(t.clone()).icon(K::Star).raw(),
                     NavItem::Group(_, t) => Row::new(t.clone()).icon(K::Folder).raw(),

@@ -52,6 +52,10 @@ pub enum YtArg {
     Menu(u32),
     /// The same menu for one of the playing video's suggestions (by video id).
     SuggestionMenu(String),
+    /// A sidebar section's menu (hold OK on it): refresh, rename, move, hide (by section key).
+    SectionMenu(String),
+    /// "Share": a YouTube address as a QR code (url, title).
+    Share(String, String),
     /// Player options panel.
     PlayerMenu,
     /// The list of playback speeds (the player's speed button, as in SmartTube).
@@ -108,6 +112,8 @@ impl ScreenArg for YtArg {
             YtArg::BellMenu => 34,
             YtArg::NameEntry(_) => 18,
             YtArg::SuggestionMenu(_) => 19,
+            YtArg::SectionMenu(_) => 36,
+            YtArg::Share(..) => 37,
             YtArg::UpdatePrompt => 20,
             YtArg::ProblemReport => 33,
             YtArg::LiveChat => 21,
@@ -152,6 +158,8 @@ pub enum NamePurpose {
     RenameLocal(String, String),
     /// Words to look for among the settings (the search typed before, to change it).
     SettingsSearch(String),
+    /// A new name for a sidebar section: (section key, current name).
+    RenameSection(String, String),
 }
 
 /// Changes to the playlists on this TV (made at once on the main thread, saved in the
@@ -262,6 +270,8 @@ pub enum YtFx {
     VideoRect(Option<[i32; 4]>),
     Suggest(String),
     EditSettings(Box<dyn FnOnce(&mut Settings) + Send>),
+    /// Mark (`true`) or unmark videos as watched on this TV.
+    MarkWatched(Vec<String>, bool),
     SignInStart,
     SignInCancel,
     SignOut,
@@ -344,6 +354,7 @@ impl Mounter<YtHost> for Mount {
             YtArg::SignIn => Box::new(screens::signin::SignInScreen::new(entry)),
             YtArg::Menu(elem) => Box::new(screens::menu::MenuScreen::card(entry, *elem, cx)),
             YtArg::SuggestionMenu(video_id) => Box::new(screens::menu::MenuScreen::suggestion(entry, video_id, cx)),
+            YtArg::SectionMenu(key) => Box::new(screens::menu::MenuScreen::section(entry, key, cx)),
             YtArg::PlayerMenu => Box::new(screens::menu::MenuScreen::player(entry, cx)),
             YtArg::SpeedMenu => Box::new(screens::menu::MenuScreen::speeds(entry, cx)),
             YtArg::BellMenu => Box::new(screens::menu::MenuScreen::bell(entry, cx)),
@@ -358,6 +369,7 @@ impl Mounter<YtHost> for Mount {
             YtArg::NameEntry(p) => Box::new(screens::search::SearchScreen::name(entry, p.clone())),
             YtArg::SearchFilters(q) => Box::new(screens::menu::MenuScreen::filters(entry, q.clone())),
             YtArg::ProblemReport => Box::new(screens::report::ReportScreen::new(entry)),
+            YtArg::Share(url, title) => Box::new(screens::share::ShareScreen::new(entry, url.clone(), title.clone())),
             YtArg::LiveChat => Box::new(screens::live_chat::LiveChatScreen::new(entry)),
         }
     }
@@ -584,6 +596,7 @@ impl AppRig {
             shuffle_pending: None,
         };
         rig.store.local = yt_core::local_playlists::Store::load();
+        rig.store.watched = yt_core::watched::Watched::load();
         rig.local_feeds();
         if rig.store.settings.keep_play_next {
             rig.store.play_next = yt_core::local_playlists::load_queue();
@@ -1429,8 +1442,10 @@ impl AppRig {
         use yt_core::ext::dearrow::FallbackFrame;
         let s = &self.store.settings;
         let (titles, thumbs) = (s.dearrow_titles, s.dearrow_thumbnails);
+        // "Original video titles": what the uploader typed (oEmbed), not YouTube's translation.
+        let original = s.original_titles;
         let fallback = crate::settings::thumbnail_frame(&s.dearrow_fallback);
-        if !titles && !thumbs {
+        if !titles && !thumbs && !original {
             return;
         }
         let cards = self.store.cards(key);
@@ -1445,8 +1460,9 @@ impl AppRig {
         let _ = plx_base::task::spawn("dearrow", move || {
             let mut out = Vec::new();
             for id in ids {
-                let b = crate::player::ext().branding(&id).ok().flatten();
+                let b = if titles || thumbs { crate::player::ext().branding(&id).ok().flatten() } else { None };
                 let title = if titles { b.as_ref().and_then(|b| b.title()) } else { None };
+                let title = title.or_else(|| if original { crate::player::ext().original_title(&id).ok().flatten() } else { None });
                 // No crowd thumbnail: YouTube's frame, if one is chosen.
                 let thumb = if thumbs { b.as_ref().and_then(|b| b.thumbnail_url(&id)).or_else(|| (fallback != FallbackFrame::Default).then(|| fallback.url(&id))) } else { None };
                 if title.is_some() || thumb.is_some() {
@@ -1896,6 +1912,9 @@ pub fn take_reset(g: &mut Option<yt_core::session::Session>) {
 fn load_page(session: &Mutex<Option<yt_core::session::Session>>, epoch: u64, key: &FeedKey, continuation: Option<String>) -> Work {
     let r = with_session(session, |s| match (&continuation, key) {
         (c, FeedKey::Section(Section::Notifications)) => s.notifications(c.as_deref()),
+        // One page each, no continuation.
+        (_, FeedKey::Section(Section::Shorts)) => s.shorts(),
+        (_, FeedKey::Section(Section::Kids)) => yt_core::kids::home(&s.http),
         // A playlist's page goes on past YouTube's first 15 through the playlist panel.
         (Some(c), _) if yt_core::playlist::is_panel_token(c) => s.playlist_page_more(c),
         (Some(c), k) => s.more(k.endpoint(), c),
@@ -2172,6 +2191,23 @@ impl Rig<YtHost> for AppRig {
             YtFx::VideoRect(r) => self.video_target = r.map_or([0.0, 0.0, 1920.0, 1080.0], |r| r.map(|v| v as f32)),
             YtFx::Suggest(prefix) => {
                 self.spawn(from, "suggest", move |s| Work::Suggestions(with_session(s, |s| s.suggestions(&prefix)).unwrap_or_default()));
+            }
+            YtFx::MarkWatched(ids, watched) => {
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                self.store.watched.set(&ids, watched, now);
+                if let Err(e) = self.store.watched.save() {
+                    crate::log(&format!("watched: save failed: {e}"));
+                }
+                // The cards on screen show it at once (a hidden one leaves at the next load).
+                for f in self.store.feeds.values_mut() {
+                    for c in f.cards.iter_mut().filter(|c| ids.contains(&c.item.id)) {
+                        c.item.progress = if watched { Some(100) } else { None };
+                    }
+                    f.gen += 1;
+                }
+                let msg = if watched { "Marked as watched" } else { "Marked as unwatched" };
+                self.store.toast(msg, self.now_ms);
+                _out.invalidate(plx_machine::present::Provenance::Input);
             }
             YtFx::EditSettings(f) => {
                 let kept = self.store.settings.keep_play_next;

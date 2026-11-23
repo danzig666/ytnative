@@ -413,6 +413,11 @@ pub struct Settings {
     pub hide_shorts_home: bool,
     pub hide_shorts_subscriptions: bool,
     pub hide_shorts_search: bool,
+    pub hide_shorts_history: bool,
+    pub hide_shorts_trending: bool,
+    pub hide_shorts_channels: bool,
+    pub hide_watched_notifications: bool,
+    pub hide_watched_watch_later: bool,
     /// Shorts hidden in every list (channel pages, history, trending too).
     pub hide_shorts_everywhere: bool,
     pub hide_watched_home: bool,
@@ -431,6 +436,10 @@ pub struct Settings {
     pub search_history: bool,
     // Interface
     pub sections: Vec<String>,
+    /// Video titles as their uploader wrote them (oEmbed), not YouTube's translation of them.
+    pub original_titles: bool,
+    /// The viewer's own names for sidebar sections: (section key, name).
+    pub section_names: Vec<(String, String)>,
     /// Channels / playlists pinned to the sidebar: (title, browse id, params).
     pub pinned: Vec<(String, String, Option<String>)>,
     pub boot_section: String,
@@ -576,6 +585,11 @@ impl Default for Settings {
             hide_shorts_home: false,
             hide_shorts_subscriptions: false,
             hide_shorts_search: false,
+            hide_shorts_history: false,
+            hide_shorts_trending: false,
+            hide_shorts_channels: false,
+            hide_watched_notifications: false,
+            hide_watched_watch_later: false,
             hide_shorts_everywhere: false,
             hide_watched_home: false,
             hide_watched_subscriptions: false,
@@ -588,10 +602,13 @@ impl Default for Settings {
             watch_history: "auto".into(),
             search_history: true,
             pinned: Vec::new(),
+            section_names: Vec::new(),
+            original_titles: false,
             // Trending is off by default: YouTube retired the page (browse answers HTTP 400).
+            // Shorts, My videos and Kids are offered in the sidebar settings, off at first.
             sections: crate::store::Section::ALL
                 .iter()
-                .filter(|s| !matches!(s, crate::store::Section::Trending))
+                .filter(|s| !matches!(s, crate::store::Section::Trending | crate::store::Section::Shorts | crate::store::Section::MyVideos | crate::store::Section::Kids))
                 .map(|s| s.key().to_string())
                 .collect(),
             boot_section: "home".into(),
@@ -786,7 +803,8 @@ mod tests {
         assert_eq!(pos("play_all"), pos("play_next") + 1);
         assert_eq!(pos("tv_order"), pos("play_all") + 1);
         assert_eq!(pos("tv_manage"), pos("open") + 1);
-        assert_eq!(pos("copy_list"), pos("playlist") + 1);
+        assert_eq!(pos("watched"), pos("playlist") + 1);
+        assert_eq!(pos("copy_list"), pos("watched") + 1);
         assert_eq!(s.card_menu.len(), crate::screens::menu::CARD_ITEMS.len());
         assert!(!s.keep_play_next);
     }

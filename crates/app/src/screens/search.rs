@@ -128,6 +128,7 @@ impl SearchScreen {
             NamePurpose::RenameLocal(_, t) => t.clone(),
             NamePurpose::NewLocal(_) => String::new(),
             NamePurpose::SettingsSearch(q) => q.clone(),
+            NamePurpose::RenameSection(_, n) => n.clone(),
         };
         // A new name starts with a capital letter (the settings are searched in any case).
         s.upper = s.query.is_empty() && !matches!(purpose, NamePurpose::SettingsSearch(_));
@@ -184,6 +185,15 @@ impl SearchScreen {
             NamePurpose::NewLocal(videos) => LocalOp::Create { title, videos: videos.clone() },
             NamePurpose::RenameLocal(id, _) => LocalOp::Rename { list_id: id.clone(), title },
             NamePurpose::SettingsSearch(_) => return,
+            NamePurpose::RenameSection(key, _) => {
+                let key = key.clone();
+                fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| {
+                    s.section_names.retain(|(k, _)| *k != key);
+                    s.section_names.push((key, title));
+                }))));
+                fx.push(Fx::Nav(NavOp::Pop));
+                return;
+            }
         };
         fx.push(Fx::App(YtFx::Local(op)));
         fx.push(Fx::Nav(NavOp::Pop));
@@ -352,6 +362,7 @@ impl Screen<YtHost> for SearchScreen {
             Some(NamePurpose::NewLocal(_)) => "Name of the new playlist on this TV",
             Some(NamePurpose::RenameLocal(..)) => "New name of the playlist",
             Some(NamePurpose::SettingsSearch(_)) => "Search settings",
+            Some(NamePurpose::RenameSection(..)) => "New name of the section",
         };
         ui::text(p, heading, 100.0, 60.0, 46, ui::WHITE, ui::ALIGN_LEFT, true);
         // Query field

@@ -10,6 +10,7 @@ pub mod menu;
 pub mod pin;
 pub mod player;
 pub mod report;
+pub mod share;
 pub mod search;
 pub mod settings;
 pub mod settings_search;

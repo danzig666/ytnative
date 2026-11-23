@@ -87,6 +87,36 @@ impl Session {
         self.browse(feeds::SUBSCRIPTIONS, None)
     }
 
+    /// The Shorts section (SmartTube's): the Shorts of the subscribed channels (signed in) and of
+    /// Home, as one shelf. The TV client has no Shorts page of its own (`FEshorts` is refused).
+    pub fn shorts(&mut self) -> Result<Page> {
+        let mut pages = Vec::new();
+        if self.signed_in() {
+            pages.push(self.subscriptions());
+        }
+        pages.push(self.home());
+        let mut items: Vec<crate::model::Item> = Vec::new();
+        let mut first_err = None;
+        for p in pages {
+            match p {
+                Ok(p) => {
+                    for it in p.shelves.into_iter().flat_map(|s| s.items) {
+                        if it.kind == crate::model::ItemKind::Short && !items.iter().any(|x| x.id == it.id) {
+                            items.push(it);
+                        }
+                    }
+                }
+                Err(e) => first_err = first_err.or(Some(e)),
+            }
+        }
+        if items.is_empty() {
+            if let Some(e) = first_err {
+                return Err(e);
+            }
+        }
+        Ok(Page { shelves: vec![crate::model::Shelf { items, ..Default::default() }], ..Default::default() })
+    }
+
     pub fn history(&mut self) -> Result<Page> {
         self.browse(feeds::HISTORY, None)
     }

@@ -397,9 +397,18 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
             Opt("Hide Shorts on Home", |s| on_off(s.hide_shorts_home), |s, _| s.hide_shorts_home = !s.hide_shorts_home),
             Opt("Hide Shorts in Subscriptions", |s| on_off(s.hide_shorts_subscriptions), |s, _| s.hide_shorts_subscriptions = !s.hide_shorts_subscriptions),
             Opt("Hide Shorts in Search", |s| on_off(s.hide_shorts_search), |s, _| s.hide_shorts_search = !s.hide_shorts_search),
+            Opt("Hide Shorts in History", |s| on_off(s.hide_shorts_history), |s, _| s.hide_shorts_history = !s.hide_shorts_history),
+            Opt("Hide Shorts in Trending", |s| on_off(s.hide_shorts_trending), |s, _| s.hide_shorts_trending = !s.hide_shorts_trending),
+            Opt("Hide Shorts on channel pages", |s| on_off(s.hide_shorts_channels), |s, _| s.hide_shorts_channels = !s.hide_shorts_channels),
             Opt("Hide watched videos on Home", |s| on_off(s.hide_watched_home), |s, _| s.hide_watched_home = !s.hide_watched_home),
             Opt("Hide watched videos in Subscriptions", |s| on_off(s.hide_watched_subscriptions), |s, _| {
                 s.hide_watched_subscriptions = !s.hide_watched_subscriptions
+            }),
+            Opt("Hide watched videos in Notifications", |s| on_off(s.hide_watched_notifications), |s, _| {
+                s.hide_watched_notifications = !s.hide_watched_notifications
+            }),
+            Opt("Hide watched videos in Watch later", |s| on_off(s.hide_watched_watch_later), |s, _| {
+                s.hide_watched_watch_later = !s.hide_watched_watch_later
             }),
             Opt("Hide upcoming streams on Home", |s| on_off(s.hide_upcoming_home), |s, _| s.hide_upcoming_home = !s.hide_upcoming_home),
             Opt("Hide upcoming streams in Subscriptions", |s| on_off(s.hide_upcoming_subscriptions), |s, _| {
@@ -434,6 +443,7 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
                 }),
                 Opt("Screen size", |s| format!("{}%", s.ui_scale), |s, d| s.ui_scale = cycle(&[100u8, 97, 95, 92, 90], s.ui_scale, d)),
                 Opt("Titles under thumbnails", |s| on_off(s.titles_under), |s, _| s.titles_under = !s.titles_under),
+                Opt("Original video titles", |s| on_off(s.original_titles), |s, _| s.original_titles = !s.original_titles),
                 Opt("Card size", |s| match s.card_columns { 3 => "large".into(), 5 => "small".into(), _ => "medium".into() }, |s, d| {
                     s.card_columns = cycle(&[3u8, 4, 5], s.card_columns, d)
                 }),
@@ -485,9 +495,11 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
             v.extend([
                 section_toggle!("Sidebar: Home", Section::Home),
                 section_toggle!("Sidebar: Subscriptions", Section::Subscriptions),
+                section_toggle!("Sidebar: Shorts", Section::Shorts),
                 section_toggle!("Sidebar: Channels", Section::Channels),
                 section_toggle!("Sidebar: History", Section::History),
                 section_toggle!("Sidebar: Library", Section::Library),
+                section_toggle!("Sidebar: My videos", Section::MyVideos),
                 section_toggle!("Sidebar: Music", Section::Music),
                 section_toggle!("Sidebar: Gaming", Section::Gaming),
                 section_toggle!("Sidebar: News", Section::News),
@@ -496,6 +508,7 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
                 section_toggle!("Sidebar: Movies", Section::Movies),
                 section_toggle!("Sidebar: Sports", Section::Sports),
                 section_toggle!("Sidebar: Trending", Section::Trending),
+                section_toggle!("Sidebar: Kids", Section::Kids),
                 section_toggle!("Sidebar: Notifications", Section::Notifications),
             ]);
             v.push(Page("Card menu", SettingsPage::CardMenu));

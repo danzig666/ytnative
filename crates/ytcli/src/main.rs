@@ -324,6 +324,8 @@ fn page_cmd(what: &str, pages: usize) -> Result<()> {
     let mut s = Session::new()?;
     let (endpoint, mut page) = match what {
         "home" => ("browse", s.home()?),
+        "shorts" => ("browse", s.shorts()?),
+        "kids" => ("browse", yt_core::kids::home(&reqwest::blocking::Client::new())?),
         "subs" => ("browse", s.subscriptions()?),
         "history" => ("browse", s.history()?),
         "library" => ("browse", s.browse(feeds::LIBRARY, None)?),
