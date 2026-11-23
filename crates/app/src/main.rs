@@ -286,6 +286,8 @@ fn main() {
         #[cfg(not(windows))]
         voice::start();
         #[cfg(not(windows))]
+        voice::foreground(true, false);
+        #[cfg(not(windows))]
         jail::probe();
         #[cfg(windows)]
         let win = sim_window();
@@ -454,12 +456,18 @@ fn main() {
                     sdl::SDL_APP_WILLENTERBACKGROUND | sdl::SDL_APP_DIDENTERBACKGROUND => {
                         if foreground {
                             log("lifecycle: background");
+                            #[cfg(not(windows))]
+                            voice::foreground(false, false);
                         }
                         foreground = false;
                         wl::release();
                     }
                     sdl::SDL_APP_DIDENTERFOREGROUND => {
                         log("lifecycle: foreground");
+                        #[cfg(not(windows))]
+                        if !foreground {
+                            voice::foreground(true, false);
+                        }
                         foreground = true;
                         viewer_back = true;
                         wl::grab(win);
@@ -836,6 +844,9 @@ fn main() {
             }
         }
         log("ytnative: exit");
+        // The TV's voice language back to its own before leaving.
+        #[cfg(not(windows))]
+        voice::foreground(false, true);
         // On the TV: unload the video, then leave at once. Tearing SDL down crashed every exit
         // (SIGSEGV in libSDL2 on its timer thread while SDL_Quit and the libraries' exit
         // handlers freed what it used); the system releases the window, the bus and the rest

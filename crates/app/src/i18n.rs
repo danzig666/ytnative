@@ -70,6 +70,39 @@ fn sort_key(name: &str) -> String {
         .collect()
 }
 
+/// The TV's voice language spec for the interface language `code`, from voiceconductor's
+/// `getSupportedLanguages` map (locale -> spec), or `None` when it has none or `current` already
+/// is one of that language.
+pub fn voice_language(code: &str, current: &str, supported: &serde_json::Value) -> Option<String> {
+    let lang = |l: &str| l.split('-').next().unwrap_or("").to_ascii_lowercase();
+    let base = match code {
+        "zh" | "zh-TW" => "zh".to_string(),
+        "nb" => "nb".to_string(),
+        c => lang(c),
+    };
+    if base.is_empty() {
+        return None;
+    }
+    // Chinese by script.
+    let script = match code {
+        "zh-TW" => Some("hant"),
+        "zh" => Some("hans"),
+        _ => None,
+    };
+    let fits = |l: &str| lang(l) == base && script.is_none_or(|s| l.to_ascii_lowercase().split('-').any(|p| p == s));
+    if fits(current) {
+        return None;
+    }
+    let specs: Vec<&str> = supported.as_object()?.values().filter_map(|v| v.as_str()).filter(|s| fits(s)).collect();
+    // The language's own country first ("hu-HU", "de-DE", "pt-BR"), else any.
+    let own = |s: &&str| {
+        let mut p = s.split('-');
+        let (l, c) = (p.next().unwrap_or(""), p.next_back().unwrap_or(""));
+        l.eq_ignore_ascii_case(c) || matches!(*s, "pt-BR" | "en-US" | "es-ES" | "zh-Hans-CN" | "zh-Hant-TW" | "nb-NO" | "he-IL" | "ja-JP" | "ko-KR" | "uk-UA" | "cs-CZ" | "da-DK" | "sv-SE" | "el-GR" | "ar-SA" | "ms-MY" | "vi-VN")
+    };
+    specs.iter().copied().find(|s| own(&s)).or(specs.first().copied()).map(|s| s.to_string())
+}
+
 /// The table column for a TV locale ("de-DE" -> "de", "zh-Hant-TW" -> "zh-TW", "nb-NO" /
 /// "no" -> "nb", "iw" -> "he", "in" -> "id").
 fn table_code(locale: &str) -> &str {
@@ -253,6 +286,28 @@ pub fn tr(s: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The C3's `getSupportedLanguages` (a part of it).
+    #[test]
+    fn voice_search_language() {
+        let s = serde_json::json!({ "hu-HU": "hu-HU", "en-GB": "en-GB", "en-US": "en-US", "de-AT": "de-DE", "de-DE": "de-DE",
+            "pt-PT": "pt-PT", "pt-BR": "pt-BR", "zh-Hans-CN": "zh-Hans-CN", "zh-Hant-TW": "zh-Hant-TW", "zh-Hant-HK": "zh-Hant-HK",
+            "nb-NO": "nb-NO", "he-IL": "he-IL", "es-MX": "es-MX", "es-ES": "es-ES" });
+        let pick = |c: &str, cur: &str| super::voice_language(c, cur, &s);
+        assert_eq!(pick("hu", "en-GB").as_deref(), Some("hu-HU"));
+        assert_eq!(pick("hu", "hu-HU"), None, "already Hungarian");
+        assert_eq!(pick("en", "en-GB"), None, "any English will do");
+        assert_eq!(pick("en", "hu-HU").as_deref(), Some("en-US"));
+        assert_eq!(pick("de", "en-GB").as_deref(), Some("de-DE"));
+        assert_eq!(pick("pt", "en-GB").as_deref(), Some("pt-BR"));
+        assert_eq!(pick("zh-TW", "zh-Hans-CN").as_deref(), Some("zh-Hant-TW"));
+        assert_eq!(pick("zh", "en-GB").as_deref(), Some("zh-Hans-CN"));
+        assert_eq!(pick("nb", "en-GB").as_deref(), Some("nb-NO"));
+        assert_eq!(pick("he", "en-GB").as_deref(), Some("he-IL"));
+        assert_eq!(pick("es", "en-GB").as_deref(), Some("es-ES"));
+        assert_eq!(pick("et", "en-GB"), None, "no Estonian recognizer: left alone");
+    }
+
 
     #[test]
     fn table_is_rectangular_and_translates() {
