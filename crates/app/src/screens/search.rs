@@ -38,7 +38,7 @@ enum K {
     Clear,
     /// Capital letters on / off (names only).
     Shift,
-    /// The accented letters in place of the plain ones, and back.
+    /// The next set of letters: plain, the interface language's own alphabet, accented.
     Accents,
     Go,
 }
@@ -49,10 +49,55 @@ const LETTERS: &str = "abcdefghijklmnopqrstuvwxyz";
 /// letters' places.
 const ACCENTED: &str = "áéíóöőúüűäßñçèêàâîôûëïœæãõ";
 
-/// The keys: the letters (plain or accented), digits, marks and the controls. Names also get a
+/// The keyboard's sets of letters: the plain ones, the interface language's own alphabet (Cyrillic,
+/// Greek, Hebrew, Arabic, Armenian, Georgian), the accented Latin ones.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Layout {
+    Latin,
+    Native,
+    Accented,
+}
+
+/// The alphabet of interface language `code` when it is not written in Latin letters and a key
+/// per letter fits the keyboard. (Indic, Thai, Chinese, Japanese and Korean need an input method;
+/// voice search types them.)
+fn native_alphabet(code: &str) -> Option<&'static str> {
+    Some(match code {
+        "ru" => "абвгдеёжзийклмнопрстуфхцчшщъыьэюя",
+        "uk" => "абвгґдеєжзиіїйклмнопрстуфхцчшщьюя",
+        "bg" => "абвгдежзийклмнопрстуфхцчшщъьюя",
+        "sr" => "абвгдђежзијклљмнњопрстћуфхцчџш",
+        "el" => "αβγδεζηθικλμνξοπρστυφχψωάέήίόύώ",
+        "he" => "אבגדהוזחטיכךלמםנןסעפףצץקרשת",
+        "ar" => "ابتثجحخدذرزسشصضطظعغفقكلمنهويءآأؤإئةى",
+        "fa" => "ابپتثجچحخدذرزژسشصضطظعغفقکگلمنوهیآ",
+        "hy" => "աբգդեզէըթժիլխծկհձղճմյնշոչպջռսվտրցւփքօֆ",
+        "ka" => "აბგდევზთიკლმნოპჟრსტუფქღყშჩცძწჭხჯჰ",
+        _ => return None,
+    })
+}
+
+/// The layout after `l` (the interface language's own alphabet only when it has one).
+fn next_layout(l: Layout, native: bool) -> Layout {
+    match l {
+        Layout::Latin if native => Layout::Native,
+        Layout::Latin | Layout::Native => Layout::Accented,
+        Layout::Accented => Layout::Latin,
+    }
+}
+
+fn letters(l: Layout) -> &'static str {
+    match l {
+        Layout::Latin => LETTERS,
+        Layout::Accented => ACCENTED,
+        Layout::Native => native_alphabet(crate::i18n::current()).unwrap_or(LETTERS),
+    }
+}
+
+/// The keys: the letters (of the layout), digits, marks and the controls. Names also get a
 /// Shift key for capital letters.
-fn keys_for(naming: bool, accents: bool) -> Vec<K> {
-    let mut v: Vec<K> = if accents { ACCENTED } else { LETTERS }.chars().chain("1234567890".chars()).map(K::Ch).collect();
+fn keys_for(naming: bool, layout: Layout) -> Vec<K> {
+    let mut v: Vec<K> = letters(layout).chars().chain("1234567890".chars()).map(K::Ch).collect();
     v.extend([K::Ch('-'), K::Ch('\''), K::Space, K::Back, K::Clear, K::Accents]);
     if naming {
         v.push(K::Shift);
@@ -66,7 +111,7 @@ fn capital(c: char) -> String {
     if c == 'ß' { c.to_string() } else { c.to_uppercase().collect() }
 }
 
-fn key_label(k: K, naming: bool, upper: bool, accents: bool) -> String {
+fn key_label(k: K, naming: bool, upper: bool, layout: Layout) -> String {
     match k {
         K::Ch(c) if upper => capital(c),
         K::Ch(c) => c.to_string(),
@@ -76,8 +121,12 @@ fn key_label(k: K, naming: bool, upper: bool, accents: bool) -> String {
         // Shows what the letters become.
         K::Shift if upper => "abc".into(),
         K::Shift => "ABC".into(),
-        K::Accents if accents => "a\u{2013}z".into(),
-        K::Accents => "\u{E1}\u{E9}".into(),
+        // Shows what the letters become.
+        K::Accents => match next_layout(layout, native_alphabet(crate::i18n::current()).is_some()) {
+            Layout::Latin => "a\u{2013}z".into(),
+            Layout::Accented => "\u{E1}\u{E9}".into(),
+            Layout::Native => letters(Layout::Native).chars().take(3).collect(),
+        },
         K::Go if naming => "Save".into(),
         K::Go => "Search".into(),
     }
@@ -99,8 +148,10 @@ pub struct SearchScreen {
     naming: Option<NamePurpose>,
     /// The letters are typed as capitals.
     upper: bool,
-    /// The accented letters are shown in place of the plain ones.
-    accents: bool,
+    /// The set of letters shown.
+    layout: Layout,
+    /// The key the focus goes to on the next frame (the layout key, after the keys changed).
+    focus_req: std::cell::Cell<Option<u32>>,
     query: String,
     recent: Vec<String>,
     sug: VList,
@@ -113,7 +164,8 @@ impl SearchScreen {
             entry,
             naming: None,
             upper: false,
-            accents: false,
+            layout: Layout::Latin,
+            focus_req: std::cell::Cell::new(None),
             query: String::new(),
             recent: yt_core::search_history::SearchHistory::load().list().iter().take(10).cloned().collect(),
             sug: VList { entry, group: G_SUG, base: SUG_BASE, rect: Rect::new(1000.0, 300.0, 820.0, 700.0), row_h: 70.0, text_size: 30 },
@@ -141,7 +193,7 @@ impl SearchScreen {
         self.naming.as_ref().is_some_and(|p| !matches!(p, NamePurpose::SettingsSearch(_)))
     }
     fn keys(&self) -> Vec<K> {
-        keys_for(self.names(), self.accents)
+        keys_for(self.names(), self.layout)
     }
     fn key_rect(i: usize) -> Rect {
         Rect::new(KEYS_X + (i % COLS) as f32 * (KEY_W + KEY_GAP), KEYS_Y + (i / COLS) as f32 * (KEY_H + KEY_GAP), KEY_W, KEY_H)
@@ -207,7 +259,13 @@ impl SearchScreen {
             }
             K::Ch(c) => self.query.push(c),
             K::Shift => self.upper = !self.upper,
-            K::Accents => self.accents = !self.accents,
+            K::Accents => {
+                self.layout = next_layout(self.layout, native_alphabet(crate::i18n::current()).is_some());
+                // The letters' count changed: the focus stays on this key in its new place.
+                if let Some(i) = self.keys().iter().position(|k| *k == K::Accents) {
+                    self.focus_req.set(Some(KEY_BASE + i as u32));
+                }
+            }
             K::Go if self.naming.is_some() => {
                 self.save_name(fx);
                 return;
@@ -315,6 +373,14 @@ impl Focusable<YtHost> for SearchScreen {
         })
     }
     fn reconcile(&self, want: FocusKey<u32>, cx: &Cx<'_, YtHost>) -> FocusKey<u32> {
+        if let Some(e) = self.focus_req.take() {
+            return FocusKey { entry: self.entry, elem: e };
+        }
+        // Fewer keys than before (another layout): the last one.
+        let n = self.keys().len();
+        if (KEY_BASE..SUG_BASE.min(KEY_BASE + 10_000)).contains(&want.elem) && (want.elem - KEY_BASE) as usize >= n {
+            return self.kkey(n - 1);
+        }
         if want.elem >= SUG_BASE && self.sug.index(want.elem, self.suggestions(cx).len()).is_none() {
             return self.kkey(COLS - 1);
         }
@@ -385,9 +451,15 @@ impl Screen<YtHost> for SearchScreen {
             let is_focus = focused == Some(KEY_BASE + i as u32);
             let bg = if is_focus { ui::WHITE } else if k == K::Go { ui::accent() } else { [1.0, 1.0, 1.0, 0.10] };
             ui::fill(p, r, 14.0, bg);
-            let size = if matches!(k, K::Ch(_)) { 36 } else { 22 };
+            let mut size = if matches!(k, K::Ch(_)) { 36 } else { 22 };
             let ink = if is_focus { [0.0, 0.0, 0.0, 1.0] } else { ui::WHITE };
-            ui::text(p, &key_label(k, naming, self.upper, self.accents), r.x + r.w / 2.0, r.y + (r.h - size as f32 * 1.25) / 2.0, size, ink, ui::ALIGN_CENTER, true);
+            // A long word ("Очистить", "Leerzeichen") smaller until it fits its key.
+            let label = key_label(k, naming, self.upper, self.layout);
+            let label = crate::i18n::tr(&label);
+            while size > 14 && ui::text_width(f.measure, label, size, true) > r.w - 12.0 {
+                size -= 1;
+            }
+            ui::text_raw(p, label, r.x + r.w / 2.0, r.y + (r.h - size as f32 * 1.25) / 2.0, size, ink, ui::ALIGN_CENTER, true);
         }
         // Suggestions
         let sugs = self.suggestions(cx);
@@ -414,12 +486,26 @@ mod tests {
     #[test]
     fn accented_layout_keeps_the_grid() {
         assert_eq!(ACCENTED.chars().count(), LETTERS.chars().count());
-        assert_eq!(keys_for(true, true).len(), keys_for(true, false).len());
-        assert_eq!(keys_for(false, true).len(), keys_for(false, false).len());
+        assert_eq!(keys_for(true, Layout::Accented).len(), keys_for(true, Layout::Latin).len());
+        assert_eq!(keys_for(false, Layout::Accented).len(), keys_for(false, Layout::Latin).len());
         let caps: String = "áéíóöőúüűß".chars().map(capital).collect();
         assert_eq!(caps, "ÁÉÍÓÖŐÚÜŰß");
         for c in "áéíóöőúüűäßñçèêà".chars() {
             assert!(ACCENTED.contains(c), "{c} missing");
         }
+    }
+
+    #[test]
+    fn native_alphabets_fit_seven_rows() {
+        for code in ["ru", "uk", "bg", "sr", "el", "he", "ar", "fa", "hy", "ka"] {
+            let n = native_alphabet(code).unwrap().chars().count() + 10 + 8;
+            assert!(n.div_ceil(COLS) <= 7, "{code}: {n} keys");
+        }
+        assert_eq!(native_alphabet("ru").unwrap().chars().count(), 33);
+        assert_eq!(next_layout(Layout::Latin, true), Layout::Native);
+        assert_eq!(next_layout(Layout::Latin, false), Layout::Accented);
+        assert_eq!(next_layout(Layout::Native, true), Layout::Accented);
+        assert_eq!(next_layout(Layout::Accented, true), Layout::Latin);
+        assert_eq!(capital('ж'), "Ж");
     }
 }

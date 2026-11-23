@@ -13,3 +13,5 @@
 - Changed: on 2019 LCD TVs without /dev/rtkmem (#8), the message now also says to delete ytnative and install it again: the app's sandbox is made when the app is installed
 - Fixed: the messages that were still English only (the video errors, the /dev/rtkmem help, backup and restore, the updater's errors) are in every interface language; long ones are no longer cut on the error screen, and toasts in Chinese, Japanese and Korean fit their box
 - Changed: when YouTube's bot check refuses a video to a signed-in viewer, ytnative no longer tells them to sign in, and the Problem report now shows why each way of getting the video failed (#23)
+- New: the search keyboard has the interface language's own alphabet: Russian, Ukrainian, Bulgarian, Serbian, Greek, Hebrew, Arabic, Persian, Armenian and Georgian; the key beside Clear switches between it, a–z and the accented letters (#24)
+- Fixed: long words on the search keyboard's keys ("Очистить") are made smaller to fit their key
