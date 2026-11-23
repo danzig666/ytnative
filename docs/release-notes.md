@@ -15,4 +15,4 @@
 - Changed: when YouTube's bot check refuses a video to a signed-in viewer, ytnative no longer tells them to sign in, and the Problem report now shows why each way of getting the video failed (#23)
 - New: the search keyboard has the interface language's own alphabet: Russian, Ukrainian, Bulgarian, Serbian, Greek, Hebrew, Arabic, Persian, Armenian and Georgian; the key beside Clear switches between it, a–z and the accented letters (#24)
 - Fixed: long words on the search keyboard's keys ("Очистить") are made smaller to fit their key
-- New: Search types with the TV's own keyboard, which opens at once, with every language and input method the TV has (Chinese, Japanese, Korean, Hindi, Thai...); its Enter searches, and a key brings it back after BACK. On a TV without one, ytnative's own keys stay
+- New: Search types with the TV's own keyboard, with every language and input method the TV has (Chinese, Japanese, Korean, Hindi, Thai...): it opens when the search field has the focus (at once, and again with OK on the field), and its Enter searches. On a TV without one, ytnative's own keys stay

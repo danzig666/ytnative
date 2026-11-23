@@ -27,13 +27,16 @@ const KEY_W: f32 = 92.0;
 
 /// Columns of keys: three wide keys when the TV's keyboard types (`crate::textin::exclusive`).
 fn cols() -> usize {
-    if crate::textin::exclusive() { 3 } else { COLS }
+    if crate::textin::exclusive() { 1 } else { COLS }
 }
 
 /// A key's width (wide ones beside the TV's keyboard).
 fn key_w() -> f32 {
-    if crate::textin::exclusive() { 290.0 } else { KEY_W }
+    if crate::textin::exclusive() { FIELD.w } else { KEY_W }
 }
+
+/// The search field.
+const FIELD: Rect = Rect::new(100.0, 150.0, 1720.0, 100.0);
 const KEY_H: f32 = 84.0;
 /// The space between two keys.
 const KEY_GAP: f32 = 12.0;
@@ -50,8 +53,9 @@ enum K {
     Shift,
     /// The next set of letters: plain, the interface language's own alphabet, accented.
     Accents,
-    /// The TV's own keyboard (every language the TV has, with its input methods).
-    TvKeyboard,
+    /// The search field itself, when the TV's keyboard types: focused or pressed, it opens that
+    /// keyboard.
+    Field,
     Go,
 }
 
@@ -109,12 +113,12 @@ fn letters(l: Layout) -> &'static str {
 /// The keys: the letters (of the layout), digits, marks and the controls. Names also get a
 /// Shift key for capital letters.
 fn keys_for(naming: bool, layout: Layout) -> Vec<K> {
-    // The TV's keyboard types: here only a key to bring it back, Clear and the search / save key.
+    // The TV's keyboard types: the field is the one thing to focus (its Enter searches / saves).
     if crate::textin::exclusive() {
-        return vec![K::TvKeyboard, K::Clear, K::Go];
+        return vec![K::Field];
     }
     let mut v: Vec<K> = letters(layout).chars().chain("1234567890".chars()).map(K::Ch).collect();
-    v.extend([K::Ch('-'), K::Ch('\''), K::Space, K::Back, K::Clear, K::Accents, K::TvKeyboard]);
+    v.extend([K::Ch('-'), K::Ch('\''), K::Space, K::Back, K::Clear, K::Accents]);
     if naming {
         v.push(K::Shift);
     }
@@ -143,7 +147,7 @@ fn key_label(k: K, naming: bool, upper: bool, layout: Layout) -> String {
             Layout::Accented => "\u{E1}\u{E9}".into(),
             Layout::Native => letters(Layout::Native).chars().take(3).collect(),
         },
-        K::TvKeyboard => "TV keyboard".into(),
+        K::Field => String::new(),
         K::Go if naming => "Save".into(),
         K::Go => "Search".into(),
     }
@@ -213,6 +217,9 @@ impl SearchScreen {
         keys_for(self.names(), self.layout)
     }
     fn key_rect(i: usize) -> Rect {
+        if crate::textin::exclusive() {
+            return FIELD;
+        }
         Rect::new(KEYS_X + (i % cols()) as f32 * (key_w() + KEY_GAP), KEYS_Y + (i / cols()) as f32 * (KEY_H + KEY_GAP), key_w(), KEY_H)
     }
     fn kkey(&self, i: usize) -> FocusKey<u32> {
@@ -279,7 +286,7 @@ impl SearchScreen {
             }
             K::Ch(c) => self.query.push(c),
             K::Shift => self.upper = !self.upper,
-            K::TvKeyboard => crate::textin::show(),
+            K::Field => crate::textin::show(),
             K::Accents => {
                 self.layout = next_layout(self.layout, native_alphabet(crate::i18n::current()).is_some());
                 // The letters' count changed: the focus stays on this key in its new place.
@@ -353,6 +360,11 @@ impl Machine<YtHost> for SearchScreen {
                 fx.invalidate(plx_machine::present::Provenance::Input);
                 Handled::Yes
             }
+            ScreenEvent::FocusMoved { to, .. } if crate::textin::exclusive() && to.entry == self.entry && to.elem == KEY_BASE => {
+                crate::textin::show();
+                fx.invalidate(plx_machine::present::Provenance::Input);
+                Handled::Yes
+            }
             ScreenEvent::Mount if crate::textin::exclusive() => {
                 crate::textin::show();
                 Handled::Yes
@@ -393,9 +405,16 @@ impl Focusable<YtHost> for SearchScreen {
         let sugs = self.suggestions(cx).len();
         if key.elem >= SUG_BASE {
             if dir == Dir::Left {
-                return Step::Move(self.kkey(cols() - 1));
+                return Step::Move(self.kkey((cols() - 1).min(self.keys().len() - 1)));
+            }
+            // Up from the first suggestion: the field.
+            if crate::textin::exclusive() && dir == Dir::Up && self.sug.index(key.elem, sugs) == Some(0) {
+                return Step::Move(self.kkey(0));
             }
             return self.sug.neighbour(key, dir, sugs);
+        }
+        if crate::textin::exclusive() {
+            return if matches!(dir, Dir::Right | Dir::Down) && sugs > 0 { Step::Move(self.sug.key(0)) } else { Step::Edge };
         }
         let n = self.keys().len();
         let i = (key.elem - KEY_BASE) as usize;
@@ -432,7 +451,7 @@ impl Focusable<YtHost> for SearchScreen {
             return self.kkey(n - 1);
         }
         if want.elem >= SUG_BASE && self.sug.index(want.elem, self.suggestions(cx).len()).is_none() {
-            return self.kkey(cols() - 1);
+            return self.kkey((cols() - 1).min(n - 1));
         }
         if want.elem < KEY_BASE {
             return self.kkey(0);
@@ -482,12 +501,24 @@ impl Screen<YtHost> for SearchScreen {
         };
         ui::text(p, heading, 100.0, 60.0, 46, ui::WHITE, ui::ALIGN_LEFT, true);
         // Query field
-        let field = Rect::new(100.0, 150.0, 1720.0, 100.0);
-        ui::fill(p, field, 18.0, [1.0, 1.0, 1.0, 0.08]);
+        let field = FIELD;
+        let field_focus = crate::textin::exclusive() && cx.focus.current.is_some_and(|k| k.entry == self.entry && k.elem == KEY_BASE);
+        if field_focus {
+            ui::fill(p, Rect::new(field.x - 4.0, field.y - 4.0, field.w + 8.0, field.h + 8.0), 22.0, ui::WHITE);
+            ui::fill(p, field, 18.0, [0.13, 0.13, 0.15, 1.0]);
+        } else {
+            ui::fill(p, field, 18.0, [1.0, 1.0, 1.0, 0.08]);
+        }
         // The query as typed (its end, with the cursor, when it is longer than the field).
         let room = field.w - 72.0;
         if self.query.is_empty() {
-            let hint = crate::i18n::tr(if self.names() { "Type the name with the keyboard below\u{2026}" } else { "Type with the keyboard below\u{2026}" });
+            let hint = crate::i18n::tr(if crate::textin::exclusive() {
+                "Press OK to type"
+            } else if self.names() {
+                "Type the name with the keyboard below\u{2026}"
+            } else {
+                "Type with the keyboard below\u{2026}"
+            });
             ui::text_cut(p, f.measure, hint, field.x + 36.0, field.y + 26.0, room, 40, ui::FAINT, ui::ALIGN_LEFT, false);
         } else {
             // Longer than the field: its start fades out at the left edge.
@@ -497,6 +528,9 @@ impl Screen<YtHost> for SearchScreen {
         let focused = cx.focus.current.filter(|k| k.entry == self.entry).map(|k| k.elem);
         let naming = self.names();
         for (i, k) in self.keys().into_iter().enumerate() {
+            if k == K::Field {
+                continue; // drawn above, as the field
+            }
             let r = Self::key_rect(i);
             let is_focus = focused == Some(KEY_BASE + i as u32);
             let bg = if is_focus { ui::WHITE } else if k == K::Go { ui::accent() } else { [1.0, 1.0, 1.0, 0.10] };
