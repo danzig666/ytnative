@@ -23,6 +23,11 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     })();
     if let Err(e) = written {
         let _ = std::fs::remove_file(&tmp);
+        // A folder the app may no longer add files to (webOS 26 after a restart, issue #13), but
+        // whose file is still the app's own: write over it in place, not atomic but not lost.
+        if e.kind() == std::io::ErrorKind::PermissionDenied && path.is_file() {
+            return write_in_place(path, bytes).with_context(|| format!("writing {} (in place)", path.display()));
+        }
         return Err(e).with_context(|| format!("writing {}", tmp.display()));
     }
     if let Err(e) = std::fs::rename(&tmp, path) {
@@ -30,6 +35,13 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         return Err(e).with_context(|| format!("renaming to {}", path.display()));
     }
     Ok(())
+}
+
+fn write_in_place(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new().write(true).truncate(true).open(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()
 }
 
 /// Serializes `v` as pretty JSON and writes it atomically.
@@ -147,6 +159,26 @@ mod tests {
         assert!(v.is_empty());
         assert!(!p.exists());
         assert_eq!(std::fs::read(d.join("x.json.bad")).unwrap(), b"{not json");
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    /// Issue #13: a folder that no longer takes new files still saves over the app's own file.
+    #[cfg(unix)]
+    #[test]
+    fn a_closed_folder_saves_in_place() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = temp_dir("fsutil-closed");
+        let p = d.join("accounts.json");
+        save_json(&p, &vec![1]).unwrap();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let closed = std::fs::File::create(d.join("new")).is_err(); // false when run as root
+        let r = save_json(&p, &vec![2]);
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if closed {
+            r.unwrap();
+            let v: Vec<i32> = load_json_or_default(&p);
+            assert_eq!(v, [2]);
+        }
         std::fs::remove_dir_all(d).unwrap();
     }
 }

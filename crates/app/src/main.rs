@@ -16,6 +16,8 @@ mod host;
 mod images;
 mod input;
 mod i18n;
+#[cfg_attr(windows, allow(dead_code))] // the simulator has no jail; built for the tests
+mod jail;
 mod live_chat;
 #[cfg(not(windows))]
 mod relaunch;
@@ -74,19 +76,69 @@ fn data_dir() -> std::path::PathBuf {
     // jail user, which cannot write there; the package ships a writable `data` folder in the app's
     // own folder instead, which survives restarts and updates. /tmp is the last resort: it is
     // cleared at every restart, which signed the viewer out (Settings warns about it).
+    //
+    // A folder counts only if a new file can be made in it (saves write a new temp file and rename
+    // it). webOS 26 (G5, issue #13) takes the app's write access to `data` back after a restart,
+    // while the files the app made there stay its own: a folder like that is still used, with
+    // saves written over those files in place (yt_core::fsutil::write_atomic), rather than losing
+    // the sign-in to a fresh folder.
     let own = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("data")));
-    let candidates = [Some(std::path::PathBuf::from(format!("/media/developer/{id}-data"))), own, Some(std::path::PathBuf::from(format!("/media/internal/.{id}")))];
-    for p in candidates.into_iter().flatten() {
-        if std::fs::create_dir_all(&p).is_ok() && std::fs::write(p.join(".probe"), b"ok").is_ok() {
+    let candidates: Vec<std::path::PathBuf> =
+        [Some(std::path::PathBuf::from(format!("/media/developer/{id}-data"))), own, Some(std::path::PathBuf::from(format!("/media/internal/.{id}")))]
+            .into_iter()
+            .flatten()
+            .collect();
+    let mut kept: Option<&std::path::PathBuf> = None;
+    for p in &candidates {
+        if std::fs::create_dir_all(p).is_ok() && can_create_in(p) {
+            if let Some(old) = kept {
+                copy_missing(old, p);
+            }
             log(&format!("data: {}", p.display()));
-            return p;
+            return p.clone();
         }
+        if kept.is_none() && owns_files_in(p) {
+            kept = Some(p);
+        }
+    }
+    if let Some(p) = kept {
+        log(&format!("data: {} (no new files: saves overwrite the existing ones)", p.display()));
+        return p.clone();
     }
     DATA_TEMPORARY.store(true, std::sync::atomic::Ordering::Relaxed);
     let p = std::path::PathBuf::from("/tmp/ytnative/data");
     let p = if std::fs::create_dir_all(&p).is_ok() { p } else { std::path::PathBuf::from("/tmp") };
     log(&format!("data: {} (temporary: sign-in and settings are lost at restart)", p.display()));
     p
+}
+
+/// A new file can be made in `dir` (and is removed again).
+#[cfg(not(windows))]
+fn can_create_in(dir: &std::path::Path) -> bool {
+    let probe = dir.join(format!(".probe.{}", std::process::id()));
+    let ok = std::fs::OpenOptions::new().write(true).create_new(true).open(&probe).is_ok();
+    let _ = std::fs::remove_file(&probe);
+    let _ = std::fs::remove_file(dir.join(".probe")); // the old check's file
+    ok
+}
+
+/// `dir` holds the sign-in and the app may still write over it.
+#[cfg(not(windows))]
+fn owns_files_in(dir: &std::path::Path) -> bool {
+    ["accounts.json", "token.json"].iter().any(|f| std::fs::OpenOptions::new().append(true).open(dir.join(f)).is_ok())
+}
+
+/// Copies the files of `from` that `to` lacks, so moving to another folder keeps the sign-in.
+#[cfg(not(windows))]
+fn copy_missing(from: &std::path::Path, to: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(from) else { return };
+    for e in entries.flatten() {
+        let dest = to.join(e.file_name());
+        if e.file_type().is_ok_and(|t| t.is_file()) && !dest.exists() {
+            let r = std::fs::copy(e.path(), &dest);
+            log(&format!("data: copied {} -> {} ({})", e.path().display(), dest.display(), if r.is_ok() { "ok" } else { "failed" }));
+        }
+    }
 }
 
 /// The app's data (sign-in, settings) lives in /tmp, which a restart clears.
@@ -232,6 +284,8 @@ fn main() {
         relaunch::install();
         #[cfg(not(windows))]
         voice::start();
+        #[cfg(not(windows))]
+        jail::probe();
         #[cfg(windows)]
         let win = sim_window();
         #[cfg(not(windows))]

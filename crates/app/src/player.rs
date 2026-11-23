@@ -257,6 +257,12 @@ impl Player {
         // The video is known from the start (the phone's queue updates, history, a restart of the
         // same video compare against it), not only once it is resolved.
         *self.status.lock().unwrap() = Status { phase: Phase::Resolving, rate: 1.0, video_id: video_id.clone(), ..Default::default() };
+        // 2019 Realtek TVs whose jail lacks /dev/rtkmem: the video path would abort the app.
+        #[cfg(not(windows))]
+        if let Some(why) = crate::jail::blocks_video() {
+            self.fail(why);
+            return;
+        }
         let window_id = match sdl_sym::<CreateFn>("SDL_webOSCreateExportedWindow") {
             Some(create) => {
                 let wid = unsafe { create(0) };
