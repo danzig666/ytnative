@@ -100,11 +100,13 @@ pub fn blocks_video() -> Option<&'static str> {
 
 const UNPLUG_TEXT: &str = "One more step so videos can play on this TV: ytnative installed LG's own sandbox settings for \
     Developer Mode apps, which add the device video needs (/dev/rtkmem). They take effect after a full restart: turn the TV off, \
-    unplug it for 15 seconds, plug it back in and turn it on.";
+    unplug it for 15 seconds, plug it back in and turn it on. If videos still do not play, delete ytnative and install it again \
+    the way you installed it before: the app's sandbox is made when the app is installed.";
 
 const UNPLUG_AGAIN_TEXT: &str = "Videos cannot play yet: LG's sandbox settings for Developer Mode apps are installed, but this \
-    app's sandbox still lacks /dev/rtkmem. Turn the TV off, unplug it for 15 seconds and turn it on again. If videos still do not \
-    play after that, please report it in issue #8 on ytnative's GitHub page.";
+    app's sandbox still lacks /dev/rtkmem. The sandbox is made when the app is installed: delete ytnative and install it again \
+    the way you installed it before. If that does not help, turn the TV off, unplug it for 15 seconds and turn it on again. If \
+    videos still do not play, please report it in issue #8 on ytnative's GitHub page.";
 
 const NO_FIX_TEXT: &str = "Videos cannot play on this TV yet: its sandbox lacks /dev/rtkmem, which video needs, and ytnative \
     could not add it last time (no root, and LG's sandbox settings could not be downloaded). ytnative is trying again: open the \
