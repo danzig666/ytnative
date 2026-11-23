@@ -160,7 +160,7 @@ Everything SmartTube users expect, rebuilt for webOS:
 
 - **YouTube API:** a pure-Rust InnerTube client (`crates/yt-core`). It signs in with the TV device
   flow, uses the TV client for your personal feeds and a JS-less client profile for stream URLs.
-  The client profiles live in [`clients.json`](clients.json), which the app refreshes at runtime,
+  The client profiles live in [`config/clients.json`](config/clients.json), which the app refreshes at runtime,
   so a YouTube change can usually be fixed without a new release.
 - **UI:** plx-native's GLES2 renderer, focus engine and widgets, driven by SDL2 on the TV.
 - **Video:** either a generated DASH manifest played by LG's media service, or demuxed MP4/WebM

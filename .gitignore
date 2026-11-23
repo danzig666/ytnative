@@ -39,3 +39,6 @@ mp4url.txt
 web_comments.json
 # Cached preprocessed player scripts (yt-core jsc; tests use the repo as the data dir)
 player-*.json
+
+# ytcli caches the fetched client profiles here when run from the repository root
+/clients.json
