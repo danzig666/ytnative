@@ -145,13 +145,23 @@ impl Player {
     fn prepare(http: &reqwest::blocking::Client, url: &str) -> Result<Player> {
         let full = if url.starts_with("http") { url.to_string() } else { format!("https://www.youtube.com{url}") };
         let t0 = std::time::Instant::now();
-        let script = http
-            .get(&full)
-            .header("User-Agent", crate::bootstrap::TV_UA)
-            .send()?
-            .error_for_status()?
-            .text()
-            .context("downloading the player script")?;
+        // Up to three tries: one dropped download would otherwise fail the signed-in route for this
+        // video (as SmartTube found, 2026-11-22). A failure is never cached (`load`).
+        let get = || -> Result<String> {
+            Ok(http.get(&full).header("User-Agent", crate::bootstrap::TV_UA).send()?.error_for_status()?.text()?)
+        };
+        let mut script = get();
+        for wait in [500, 1500] {
+            if script.is_ok() {
+                break;
+            }
+            if let Err(e) = &script {
+                eprintln!("[jsc] player script download failed, trying again: {e:#}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(wait));
+            script = get();
+        }
+        let script = script.context("downloading the player script")?;
         let input = json!({
             "type": "player",
             "player": script,
