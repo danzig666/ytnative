@@ -43,16 +43,15 @@ pub fn set_language(pref: &str, system: &str) {
     CURRENT.store(map, Ordering::Relaxed);
 }
 
-/// The interface language setting's values in the order the picker shows them: English, then
-/// every translation by its own name in alphabetical order (accents folded, so "Čeština" sits
-/// with C; Latin script first, then Greek, Cyrillic and the others in Unicode's script order),
-/// then "system" (the TV's language).
+/// The interface language setting's values in the order the picker shows them: "system" (the
+/// TV's language), English, then every translation by its own name in alphabetical order (accents
+/// folded, so "Čeština" sits with C; Latin script first, then Greek, Cyrillic and the others in
+/// Unicode's script order).
 pub fn picker_languages() -> Vec<&'static str> {
     let mut l = languages();
     l.sort_by_cached_key(|c| sort_key(&language_name(c)));
-    let mut out = vec!["en"];
+    let mut out = vec!["system", "en"];
     out.extend(l);
-    out.push("system");
     out
 }
 
@@ -278,7 +277,7 @@ mod tests {
         assert_eq!(youtube_hl("zh"), "zh-CN");
         let p = picker_languages();
         assert_eq!(p.len(), languages().len() + 2);
-        assert_eq!((p[0], *p.last().unwrap()), ("en", "system"));
+        assert_eq!((p[0], p[1]), ("system", "en"));
         let names: Vec<String> = p.iter().map(|c| language_name(c)).collect();
         let pos = |n: &str| names.iter().position(|x| x == n).unwrap();
         assert!(pos("Català") < pos("Čeština") && pos("Čeština") < pos("Dansk"));
