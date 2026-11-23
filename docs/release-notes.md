@@ -1,4 +1,1 @@
-- Fixed: Videos made for kids (Baby Shark, Cocomelon and other nursery rhymes) said "This video is not available"; they now play, from the YouTube Kids app's version of YouTube
-- New: Voice search: hold the Magic Remote's microphone button while ytnative is open and say what you are looking for; ytnative searches it instead of LG opening its own results
-- Fixed: 2019 TVs such as the UM7100 and UM7600 closed ytnative when a video started; on a rooted TV ytnative now repairs its sandbox (it lacked /dev/rtkmem) the first time a video is opened, and the video plays when opened again (#8)
-- Fixed: Developer Mode on webOS 26 (G5): "Couldn't load this page… Permission denied" after a restart, until ytnative was reinstalled; the sign-in and settings are now saved over the existing files (#13)
+- Changed: UM7100, UM7600 and other 2019 TVs whose sandbox lacks /dev/rtkmem: without root, the player now says plainly that videos need a rooted TV on this model, instead of asking to try again (#8)

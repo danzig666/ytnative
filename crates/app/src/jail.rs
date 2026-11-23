@@ -6,7 +6,9 @@
 //! webosbrew/webos-homebrew-channel PR #202.
 //!
 //! The check runs at boot (log line `devjail: soc=… rtkmem=…`); a video on a TV that lacks the
-//! device does not start but repairs the jail first (rooted TVs only) and tells the viewer.
+//! device does not start but repairs the jail first (rooted TVs only) and tells the viewer. Without
+//! root (no Homebrew Channel, or its exec not root) nothing can add the device: the app stops
+//! trying and says that videos need a rooted TV here.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -18,6 +20,7 @@ const UNKNOWN: u8 = 0;
 const FINE: u8 = 1; // not an affected TV, or the device is there
 const MISSING: u8 = 2;
 const REPAIRING: u8 = 3;
+const NO_ROOT: u8 = 4; // the repair cannot run here: no video for this run of the app
 
 static STATE: AtomicU8 = AtomicU8::new(UNKNOWN);
 
@@ -55,7 +58,7 @@ pub fn blocks_video() -> Option<&'static str> {
             let started = plx_base::task::spawn("jail-repair", || {
                 let r = repair();
                 crate::log(&format!("devjail: repair -> {r:?}"));
-                STATE.store(if r.is_ok() { FINE } else { MISSING }, Ordering::SeqCst);
+                STATE.store(after(&r), Ordering::SeqCst);
                 plx_machine::present::wake_from_worker();
             });
             if started.is_none() {
@@ -63,12 +66,25 @@ pub fn blocks_video() -> Option<&'static str> {
             }
             Some(
                 "This TV's sandbox does not give ytnative /dev/rtkmem, which its video needs, so the video would close the app. \
-                 ytnative is repairing it now (rooted TVs with Homebrew Channel): open the video again in a few seconds. \
-                 Without root, see issue #8 on ytnative's GitHub page.",
+                 ytnative is trying to repair it (this needs a rooted TV with Homebrew Channel): open the video again in a few seconds.",
             )
         }
         REPAIRING => Some("Repairing ytnative's sandbox so videos can play: open the video again in a few seconds."),
+        NO_ROOT => Some(NO_ROOT_TEXT),
         _ => None,
+    }
+}
+
+const NO_ROOT_TEXT: &str = "Videos cannot play on this TV without root. LG's Developer Mode sandbox on this model lacks \
+    /dev/rtkmem, which the video player needs, and only a rooted TV with Homebrew Channel can add it. \
+    Browsing and search still work. See issue #8 on ytnative's GitHub page.";
+
+/// The state a finished repair leaves: playable, never (no root here), or worth another try.
+fn after(r: &Result<(), Failure>) -> u8 {
+    match r {
+        Ok(()) => FINE,
+        Err(Failure::NotRoot | Failure::NoHomebrewChannel | Failure::Unsupported) => NO_ROOT,
+        Err(Failure::Failed(_)) => MISSING,
     }
 }
 
@@ -142,5 +158,13 @@ mod tests {
         let absent = serde_json::json!({ "returnValue": false, "errorText": "Service does not exist: org.webosbrew.hbchannel.service." }).to_string();
         assert!(matches!(outcome(&absent), Err(Failure::NoHomebrewChannel)));
         assert!(outcome("<timeout>").is_err());
+    }
+
+    #[test]
+    fn without_root_it_stops_trying() {
+        assert_eq!(after(&Ok(())), FINE);
+        assert_eq!(after(&Err(Failure::NotRoot)), NO_ROOT);
+        assert_eq!(after(&Err(Failure::NoHomebrewChannel)), NO_ROOT);
+        assert_eq!(after(&Err(Failure::Failed("<timeout>".into()))), MISSING);
     }
 }

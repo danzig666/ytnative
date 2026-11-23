@@ -53,7 +53,7 @@ and install it with LG's CLI:
 ares-install --device <tv> io.github.danzig666.ytnative_<version>_arm.ipk
 ```
 
-Root is not required.
+Root is not required, except on the 2019 TVs below.
 
 ### Requirements
 
@@ -62,6 +62,12 @@ Root is not required.
   [2esq](https://github.com/2esq)). On webOS 4 video plays through the 4K engine only: no HDR yet, the
   picture stays full screen beside the comments, and speeds other than normal are not available.
   webOS 3 is not supported.
+- **Some 2019 LG LCD TVs need root to play videos at all.** On TVs with a Realtek chip of the
+  k5lp or k3lp family, such as the **UM7100** and **UM7600**, LG's Developer Mode sandbox lacks a
+  device the video player needs (`/dev/rtkmem`). On a rooted TV with Homebrew Channel, ytnative
+  repairs the sandbox itself the first time a video is opened. Without root, nothing an app can do
+  fixes it: ytnative opens and you can browse and search, but no video plays, and the player
+  says so. See [issue #8](https://github.com/danzig666/ytnative/issues/8).
 - Any GPU: the app links only the generic `libGLESv2`, loads EGL at runtime and falls back where
   an extension or shader precision is missing (developed on Mali; other GPUs are untested).
 - A Google account is optional: sign in with a code from **Settings > Account & about** to get
