@@ -73,6 +73,10 @@ pub fn full_date(year: i32, month: u32, day: u32) -> String {
             let d = if day == 1 { "1er".to_string() } else { day.to_string() };
             format!("{d} {} {year}", M[m])
         }
+        "it" => {
+            const M: [&str; 12] = ["gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno", "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre"];
+            format!("{day} {} {year}", M[m])
+        }
         "ru" => {
             const M: [&str; 12] = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"];
             format!("{day} {} {year}", M[m])
@@ -106,6 +110,11 @@ pub fn date_words(weekday: usize, day: u32, month: usize) -> String {
         "fr" => {
             const W: [&str; 7] = ["dimanche", "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi"];
             const M: [&str; 12] = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"];
+            format!("{} {day} {}", W[w], M[m])
+        }
+        "it" => {
+            const W: [&str; 7] = ["domenica", "lunedì", "martedì", "mercoledì", "giovedì", "venerdì", "sabato"];
+            const M: [&str; 12] = ["gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno", "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre"];
             format!("{} {day} {}", W[w], M[m])
         }
         "ru" => {
@@ -145,6 +154,10 @@ mod tests {
         assert!(languages().contains(&"hu"));
         set_language("system", "de-DE");
         assert_eq!(tr("Settings"), "Einstellungen");
+        set_language("it", "");
+        assert_eq!(tr("Settings"), "Impostazioni");
+        assert_eq!(date_words(0, 22, 11), "domenica 22 novembre");
+        assert_eq!(full_date(2026, 11, 22), "22 novembre 2026");
         assert_eq!(tr("Some video title"), "Some video title");
         set_language("en", "");
         assert_eq!(tr("Settings"), "Settings");

@@ -502,6 +502,10 @@ pub struct Settings {
     pub ambient_mode: bool,
     /// Play a muted preview inside the focused video card's thumbnail (`preview.rs`).
     pub video_previews: bool,
+    /// Publish the newest Subscriptions videos as cards in the TV's home "Recommended" row
+    /// (`recommended.rs`), which LG Home and the third-party homes read from the application
+    /// manager.
+    pub home_recommendations: bool,
 }
 
 impl Default for Settings {
@@ -624,6 +628,7 @@ impl Default for Settings {
             same_volume: true,
             ambient_mode: true,
             video_previews: false,
+            home_recommendations: false,
         }
     }
 }
