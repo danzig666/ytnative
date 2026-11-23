@@ -41,6 +41,9 @@ pub enum SettingsPage {
 pub enum YtArg {
     Browse,
     Feed(FeedKey),
+    /// A pinned channel / playlist or a channel group opened from the sidebar: Left from its
+    /// leftmost card goes back to the sidebar, as it does from a section.
+    SidebarFeed(FeedKey),
     Search,
     Player { video_id: String, playlist: Option<String> },
     Settings(SettingsPage),
@@ -86,6 +89,7 @@ impl ScreenArg for YtArg {
         ScreenId(match self {
             YtArg::Browse => 1,
             YtArg::Feed(_) => 2,
+            YtArg::SidebarFeed(_) => 35,
             YtArg::Search => 3,
             YtArg::Player { .. } => 4,
             YtArg::Settings(_) => 5,
@@ -331,6 +335,7 @@ impl Mounter<YtHost> for Mount {
         match arg {
             YtArg::Browse => Box::new(screens::browse::BrowseScreen::new(entry, cx)),
             YtArg::Feed(k) => Box::new(screens::feed::FeedScreen::new(entry, k.clone())),
+            YtArg::SidebarFeed(k) => Box::new(screens::feed::FeedScreen::new(entry, k.clone()).from_sidebar()),
             YtArg::Search => Box::new(screens::search::SearchScreen::new(entry)),
             YtArg::Player { video_id, playlist } => {
                 Box::new(screens::player::PlayerScreen::new(entry, video_id.clone(), playlist.clone()))
@@ -1280,7 +1285,10 @@ impl AppRig {
                     }
                     out.push((addr, YtMsg::Acted));
                 }
-                Work::Playlists(v, opts) => {
+                Work::Playlists(v, mut opts) => {
+                    // The playlists that hold the video first (in YouTube's order otherwise), as
+                    // SmartTube lists them: removing the video is then the first thing in reach.
+                    opts.sort_by_key(|o| !o.contains);
                     self.store.playlist_options.insert(v, opts);
                     out.push((addr, YtMsg::Acted));
                 }

@@ -1,7 +1,8 @@
 //! The root screen: a sidebar of sections (SmartTube style) and a grid of the selected section's
-//! cards. OK (or a click) on a sidebar section switches to it: moving through the sidebar with
-//! the keys or the pointer only moves the selection. OK on a card opens it; holding OK
-//! opens the card's menu; the grid pages in more cards as you scroll.
+//! cards. Moving onto a sidebar section with the keys switches to it once the focus rests there
+//! (`NAV_SETTLE_MS`), so Right goes straight into its cards; OK (or a click) switches at once and
+//! reloads it. The pointer only moves the selection. OK on a card opens it; holding OK opens the
+//! card's menu; the grid pages in more cards as you scroll.
 
 use super::common;
 use crate::host::{YtArg, YtFx, YtHost, YtMsg};
@@ -33,6 +34,13 @@ const G_NAV: GroupId = GroupId(1);
 const G_GRID: GroupId = GroupId(2);
 const NAV_BASE: u32 = 0x4000_0000;
 const T_BACK: plx_machine::machine::TimerId = plx_machine::machine::TimerId(32);
+/// Set by a page opened from the sidebar that Left took back to it (`FeedScreen::from_sidebar`):
+/// the sidebar opens again when this screen is uncovered, on the row the page was opened from.
+pub static REOPEN_SIDEBAR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+const T_NAV: plx_machine::machine::TimerId = plx_machine::machine::TimerId(33);
+/// How long the focus rests on a sidebar section before it is switched to: moving through the
+/// sidebar with the keys loads only the section stopped at.
+const NAV_SETTLE_MS: u32 = 250;
 /// Two BACK presses this close together on the sidebar exit the app.
 const BACK_TWICE_MS: u32 = 700;
 /// Shelf rows (Home, topics): 16:9 cards starting right of the sidebar.
@@ -264,8 +272,8 @@ impl BrowseScreen {
                 fx.push(Fx::App(YtFx::Load(self.key())));
             }
             NavItem::Search => fx.push(Fx::Nav(NavOp::Push(YtArg::Search))),
-            NavItem::Group(id, _) => fx.push(Fx::Nav(NavOp::Push(YtArg::Feed(FeedKey::Group(id.clone()))))),
-            NavItem::Pinned(_, id, params) => fx.push(Fx::Nav(NavOp::Push(YtArg::Feed(FeedKey::browse(id, params.clone()))))),
+            NavItem::Group(id, _) => fx.push(Fx::Nav(NavOp::Push(YtArg::SidebarFeed(FeedKey::Group(id.clone()))))),
+            NavItem::Pinned(_, id, params) => fx.push(Fx::Nav(NavOp::Push(YtArg::SidebarFeed(FeedKey::browse(id, params.clone()))))),
             NavItem::Settings => {
                 let locked = !cx.views.store.settings.settings_pin.is_empty();
                 fx.push(Fx::Nav(NavOp::Push(if locked {
@@ -372,6 +380,10 @@ impl Machine<YtHost> for BrowseScreen {
             }
             ScreenEvent::Uncover => {
                 self.leave_missing_section(cx, fx);
+                if REOPEN_SIDEBAR.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                    self.nav_open.set(true);
+                    self.focus_req.set(Some(self.nav_last.get()));
+                }
                 // The rows changed while covered (a playlist on this TV made, renamed or copied
                 // from another screen): the scroll kept for the old rows would put the focused
                 // row's heading under the title band, so the focused row is revealed again, over the
@@ -396,10 +408,21 @@ impl Machine<YtHost> for BrowseScreen {
                 self.leave_missing_section(cx, fx);
                 fx.invalidate(plx_machine::present::Provenance::Lifecycle);
             }
-            // Moving through the sidebar (keys or pointer) only moves the selection: a section is
-            // switched to by OK or a click (`Activate`).
-            ScreenEvent::FocusMoved { to, .. } if to.elem >= NAV_BASE => {
+            // Moving through the sidebar with the keys switches to the section the focus rests on
+            // (`T_NAV`); the pointer only moves the selection, and a click switches.
+            ScreenEvent::FocusMoved { to, by, .. } if to.elem >= NAV_BASE => {
+                fx.push(Fx::CancelTimer(T_NAV));
+                if *by == plx_machine::machine::By::Dir {
+                    fx.push(Fx::Timer { id: T_NAV, after_ms: NAV_SETTLE_MS });
+                }
                 fx.invalidate(plx_machine::present::Provenance::Input);
+            }
+            ScreenEvent::Timer(T_NAV) => {
+                let on = cx.focus.current.filter(|k| k.entry == self.entry && k.elem >= NAV_BASE);
+                if let Some(NavItem::Section(s)) = on.and_then(|k| self.nav.index(k.elem, items.len())).map(|i| items[i].clone()) {
+                    self.switch(s, cx, fx);
+                }
+                return Handled::Yes;
             }
             ScreenEvent::Timer(T_BACK) => {
                 let on_nav = cx.focus.current.is_some_and(|k| k.entry == self.entry && k.elem >= NAV_BASE);

@@ -62,12 +62,29 @@ pub struct FeedScreen {
     key: FeedKey,
     grid: Grid,
     state: State,
+    /// Opened from the sidebar (a pinned item or a channel group): Left from the leftmost card or
+    /// button goes back to it.
+    sidebar: bool,
 }
 
 impl FeedScreen {
     pub fn new(entry: EntryId, key: FeedKey) -> Self {
         let top = grid_top(&key);
-        FeedScreen { entry, state: State(format!("{key:?}")), key, grid: Grid::new(entry, spec(top)) }
+        FeedScreen { entry, state: State(format!("{key:?}")), key, grid: Grid::new(entry, spec(top)), sidebar: false }
+    }
+    pub fn from_sidebar(mut self) -> Self {
+        self.sidebar = true;
+        self
+    }
+    /// Left with the focus at the page's left edge (or nothing to focus yet).
+    fn at_left_edge(&self, cx: &Cx<'_, YtHost>) -> bool {
+        let Some(k) = cx.focus.current.filter(|k| k.entry == self.entry) else { return true };
+        let buttons = self.buttons(cx);
+        if let Some(i) = buttons.iter().position(|b| b.0 == k.elem) {
+            return i == 0;
+        }
+        let src = self.src(cx);
+        !src.cards.iter().any(|c| c.elem == k.elem) || matches!(self.grid.neighbour(&src, k, Dir::Left), Step::Edge)
     }
     fn src<'a>(&self, cx: &Cx<'a, YtHost>) -> CardsSrc<'a> {
         let f = cx.views.store.feed(&self.key);
@@ -217,6 +234,19 @@ impl Machine<YtHost> for FeedScreen {
             }
             ScreenEvent::Async(..) => fx.invalidate(plx_machine::present::Provenance::Lifecycle),
             _ => {}
+        }
+        // Left from the left edge of a page opened from the sidebar goes back to the sidebar, when
+        // Left opens the sidebar on the sections too.
+        if let ScreenEvent::Input(plx_machine::machine::InputEvent {
+            kind: plx_machine::machine::InputKind::Key { key: plx_machine::machine::Key::Left, edge: plx_machine::machine::Edge::Down, .. },
+            ..
+        }) = ev
+        {
+            if self.sidebar && cx.views.store.settings.left_opens_sidebar && self.at_left_edge(cx) {
+                super::browse::REOPEN_SIDEBAR.store(true, std::sync::atomic::Ordering::Relaxed);
+                fx.push(Fx::Nav(NavOp::Pop));
+                return Handled::Yes;
+            }
         }
         // Up from the top row of search results opens the filters panel.
         if let (FeedKey::Search { query, .. }, ScreenEvent::Input(plx_machine::machine::InputEvent {

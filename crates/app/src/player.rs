@@ -75,6 +75,8 @@ pub struct Extras {
     pub cues: Vec<yt_core::captions::Cue>,
     pub caption_label: Option<String>,
     pub levels: Vec<yt_core::storyboard::Level>,
+    /// The video is in one of the account's YouTube playlists (signed in; None until known).
+    pub in_playlist: Option<bool>,
 }
 
 /// Settings the extras fetch depends on (a snapshot, taken on the main thread).
@@ -848,6 +850,17 @@ pub(crate) fn load_extras(video_id: &str, session: &Mutex<Option<yt_core::sessio
         ex.votes = ext().votes(video_id).ok().flatten();
     }
     publish(&ex);
+    // Whether a playlist of the account holds the video: the player's Save to playlist button is
+    // filled then, as the like button is for a liked video.
+    if ex.watch.is_some() && crate::host::with_session(session, |s| Ok(s.signed_in())).unwrap_or(false) {
+        match crate::host::with_session(session, |s| s.playlists_for(video_id)) {
+            Ok(opts) => {
+                ex.in_playlist = Some(opts.iter().any(|o| o.contains));
+                publish(&ex);
+            }
+            Err(e) => crate::log(&format!("playlists of the video: {e:#}")),
+        }
+    }
     let _ = tracks;
     // The channel's remembered subtitles ("" = off) win over the global setting.
     let (mut subtitles, mut language) = (prefs.subtitles, prefs.language.clone());

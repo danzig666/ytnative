@@ -1310,6 +1310,7 @@ impl Screen<YtHost> for PlayerScreen {
         let liked = matches!(rated, Some(yt_core::watch::LikeStatus::Like));
         let disliked = matches!(rated, Some(yt_core::watch::LikeStatus::Dislike));
         let subscribed = subscribed_now(cx);
+        let saved = in_playlist(cx);
         use ui::icon::Kind;
         let play = if matches!(st.phase, Phase::Paused | Phase::Ended) { Kind::Play } else { Kind::Pause };
         let repeat_icon = match s.playback_mode {
@@ -1352,6 +1353,7 @@ impl Screen<YtHost> for PlayerScreen {
                 OSD_LIKE => liked,
                 OSD_DISLIKE => disliked,
                 OSD_SUBSCRIBE => subscribed,
+                OSD_SAVE => saved,
                 OSD_SB => s.sponsorblock,
                 OSD_SPEED => (st.rate - 1.0).abs() > 0.01 && st.rate > 0.0,
                 OSD_REPEAT => s.playback_mode != PlaybackMode::PlayNext,
@@ -1380,11 +1382,12 @@ impl Screen<YtHost> for PlayerScreen {
                 tex != 0
             });
             if !drawn {
-                let filled = i <= OSD_NEXT || (on && (i == OSD_LIKE || i == OSD_DISLIKE));
+                let filled = i <= OSD_NEXT || (on && (i == OSD_LIKE || i == OSD_DISLIKE || i == OSD_SAVE));
                 ui::icon::draw(p, *k, ir, ink, filled);
             }
             // The focused button's name under it (a tooltip, as SmartTube shows).
-            let name = if i == OSD_COMMENTS && super::live_chat::available(cx).is_some() { crate::i18n::tr("Live chat") } else { osd_name(i) };
+            let name = if i == OSD_COMMENTS && super::live_chat::available(cx).is_some() { crate::i18n::tr("Live chat").to_string() } else { osd_label(i, cx) };
+            let name = name.as_str();
             if self.osd_sel == Some(i) && i >= OSD_ROW_B {
                 ui::text(p, name, b.x + b.w / 2.0, b.y + b.h + 6.0, 22, ui::WHITE, ui::ALIGN_CENTER, false);
             } else if self.osd_sel == Some(i) {
@@ -1414,6 +1417,15 @@ impl Screen<YtHost> for PlayerScreen {
 pub fn rating(cx: &Cx<'_, YtHost>) -> Option<yt_core::watch::LikeStatus> {
     let st = cx.views.player;
     cx.views.store.rated.get(&st.video_id).copied().or_else(|| st.extras.watch.as_ref().map(|w| w.like_status))
+}
+
+/// The playing video is in a playlist: one of the account's (what the playlist picker last showed,
+/// else what YouTube said when the video opened) or one on this TV.
+pub(crate) fn in_playlist(cx: &Cx<'_, YtHost>) -> bool {
+    let st = cx.views.player;
+    let store = cx.views.store;
+    let youtube = store.playlist_options.get(&st.video_id).map(|l| l.iter().any(|o| o.contains)).or(st.extras.in_playlist).unwrap_or(false);
+    youtube || store.local.lists.iter().any(|l| l.contains(&st.video_id))
 }
 
 /// Subscribed to the playing video's channel: what the viewer last pressed, else what YouTube said.
@@ -1661,7 +1673,7 @@ impl PlayerScreen {
             (OSD_LIKE, Kind::ThumbUp, liked),
             (OSD_DISLIKE, Kind::ThumbDown, disliked),
             (OSD_COMMENTS, Kind::Chat, false),
-            (OSD_SAVE, Kind::ListPlus, false),
+            (OSD_SAVE, Kind::ListPlus, in_playlist(cx)),
         ]
         .into_iter()
         .filter(|(i, _, _)| !(child && *i == OSD_COMMENTS))
@@ -1684,7 +1696,7 @@ impl PlayerScreen {
         }
         // The focused icon button's name under it (the play button and the worded pills need none).
         if let Some((i, r)) = label.filter(|(i, _)| *i != OSD_PLAY && (![OSD_INFO, OSD_SUBSCRIBE].contains(i) || subscribed)) {
-            ui::text(p, crate::i18n::tr(osd_name(i)), r.x + r.w / 2.0, cy + B / 2.0 + 12.0, 22, ui::WHITE, ui::ALIGN_CENTER, false);
+            ui::text(p, &osd_label(i, cx), r.x + r.w / 2.0, cy + B / 2.0 + 12.0, 22, ui::WHITE, ui::ALIGN_CENTER, false);
         }
 
         // The first row (the playlist, else the suggestions): peeking in at the bottom, or brought
@@ -1947,6 +1959,22 @@ fn playing_col(cx: &Cx<'_, YtHost>, current: &str) -> Option<usize> {
 /// Next video when one ends: the next playlist item (or the first when repeating the list),
 /// else the watch page's autoplay pick.
 /// What each OSD button does, in words (its tooltip).
+/// A button's name under or over it, translated; the like and dislike buttons add their count, as
+/// SmartTube's do ("Like  6,992").
+fn osd_label(i: usize, cx: &Cx<'_, YtHost>) -> String {
+    let name = crate::i18n::tr(osd_name(i)).to_string();
+    let ex = &cx.views.player.extras;
+    let count = match i {
+        OSD_LIKE => ex.votes.as_ref().map(|v| ui::full_count(v.likes)).or_else(|| ex.watch.as_ref().and_then(|w| w.like_count_text.clone())),
+        OSD_DISLIKE => ex.votes.as_ref().map(|v| ui::full_count(v.dislikes)),
+        _ => None,
+    };
+    match count {
+        Some(c) => format!("{name}  {c}"),
+        None => name,
+    }
+}
+
 fn osd_name(i: usize) -> &'static str {
     crate::i18n::tr(match i {
         OSD_PLAY => "Play / pause",

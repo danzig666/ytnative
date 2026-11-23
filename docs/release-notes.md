@@ -2,3 +2,8 @@
 - New: the newest videos of your subscriptions as cards in the TV's home Recommended row (Settings > Interface, off by default, never in child mode); thanks to cchrkk (#12, #14)
 - New: Italian interface; thanks to cchrkk (#15)
 - Changed: Settings > Interface > Card menu is now a page of its own that says what the card menu is (the menu you get by holding OK on a video, channel or playlist), lists its items in their real order with a switch each, and moves an item with Right, then Up / Down; with a reset
+- Changed: moving through the sidebar opens the section the focus stops on, so Right goes straight into its videos; OK still reloads it (#21)
+- Fixed: Left from a pinned playlist or channel, or a channel group, goes back to the sidebar, as it does from Home (#16)
+- Fixed: the player's Save to playlist button is filled when the video is in one of your playlists (#17)
+- Fixed: Save to playlist opens at the top of the list, with the playlists that already hold the video first (#18)
+- New: the player's like and dislike buttons show their counts when focused (#20)

@@ -1051,7 +1051,10 @@ impl MenuScreen {
         }
         // The row under focus, by label: it must stay under focus when rows are inserted above
         // it (an OK right then must not hit a different playlist).
-        let focused_label = self.list.focused(cx, self.acts.len()).and_then(|i| self.acts.get(i)).map(|a| a.0.clone());
+        // While YouTube's playlists were loading, focus waited on the first row below them; once
+        // they are in, it starts at the top (the playlists that hold the video come first).
+        let loading = self.acts.iter().any(|a| matches!(a.1, Act::Note));
+        let focused_label = self.list.focused(cx, self.acts.len()).and_then(|i| self.acts.get(i)).map(|a| a.0.clone()).filter(|_| !loading);
         self.acts = fresh.acts;
         match focused_label.and_then(|l| self.acts.iter().position(|a| a.0 == l)) {
             Some(i) => self.refocus.set(Some(i)),
