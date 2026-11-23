@@ -29,6 +29,7 @@ mod play_queue;
 mod playback_rules;
 mod problem_report;
 mod preview;
+mod recommended;
 // The Windows desktop simulator swaps the TV-only modules (LS2 bus, Wayland surface, FIFO remote)
 // for stand-ins under `sim/`; see `sim/mod.rs`.
 #[cfg_attr(windows, path = "sim/ls2.rs")]
@@ -297,6 +298,7 @@ fn main() {
         // The simulator would register a second "TV" for phone casting on the signed-in account;
         // opt in with YTNATIVE_SIM_LOUNGE=1.
         update::start_auto_check();
+        recommended::start(rig.store.settings.home_recommendations, sdl::SDL_GetTicks());
         let lounge_on = rig.store.settings.lounge_enabled && (!cfg!(windows) || std::env::var_os("YTNATIVE_SIM_LOUNGE").is_some());
         let mut lounge = if lounge_on {
             match lounge::Lounge::start(&rig.store.settings.device_name, rig.store.settings.dial_enabled) {
@@ -326,6 +328,7 @@ fn main() {
             let dt = if prev == 0 { 0.016 } else { ((now - prev) as f32 / 1000.0).min(0.05) };
             prev = now;
             let tick = Tick { ms: now, dt_us: (dt * 1e6) as u32 };
+            recommended::tick(now);
 
             let mut inputs = Vec::new();
             while sdl::SDL_PollEvent(ev.as_mut_ptr().cast()) != 0 {

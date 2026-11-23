@@ -129,6 +129,9 @@ Everything SmartTube users expect, rebuilt for webOS:
   open, pick the TV from the YouTube app's cast menu (DIAL).
 - Remote colour buttons can be mapped to actions; Magic Remote pointer, wheel and edge scrolling
   everywhere.
+- **Recommendations on the TV's Home** (off by default): the newest videos of the Subscriptions
+  feed as cards in LG Home's Recommended row, which opens them in the app — the row the stock
+  streaming apps fill, also read by third-party homes.
 - Interface in English, Hungarian, German, Spanish, French and Russian.
 - Settings backup and restore (USB or app storage).
 - **Problem report** (Settings > Account & about): the app's logs on screen, and a QR code to
