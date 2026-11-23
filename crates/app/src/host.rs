@@ -32,6 +32,8 @@ pub enum SettingsPage {
     Blocked,
     /// SponsorBlock's seek-bar markers, per category.
     Markers,
+    /// The card menu's items: shown or hidden, and their order.
+    CardMenu,
 }
 
 /// What a navigation entry shows.

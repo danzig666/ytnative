@@ -44,6 +44,7 @@ fn category_of(page: SettingsPage) -> usize {
     let p = match page {
         SettingsPage::Blocked => SettingsPage::Content,
         SettingsPage::Markers => SettingsPage::SponsorBlock,
+        SettingsPage::CardMenu => SettingsPage::Interface,
         p => p,
     };
     CATS.iter().position(|c| c.0 == p).unwrap_or(0)
@@ -69,13 +70,14 @@ fn row_of_slot(slot: usize) -> usize {
 
 /// The pages a settings search looks through, in the order their results are listed (a sub-page
 /// right after the category that opens it). The blocked channels are content, not options.
-const SEARCHED: [SettingsPage; 8] = [
+const SEARCHED: [SettingsPage; 9] = [
     SettingsPage::Playback,
     SettingsPage::Subtitles,
     SettingsPage::SponsorBlock,
     SettingsPage::Markers,
     SettingsPage::Content,
     SettingsPage::Interface,
+    SettingsPage::CardMenu,
     SettingsPage::Remote,
     SettingsPage::About,
 ];
@@ -89,10 +91,7 @@ fn find(query: &str, s: &Settings) -> Vec<Hit> {
     let mut out = Vec::new();
     for page in SEARCHED {
         for (i, it) in items(page, s).iter().enumerate() {
-            let l = match it {
-                Item::Opt(l, ..) | Item::Page(l, _) | Item::Action(l, _) | Item::Info(l, _) => *l,
-                Item::Blocked(_) | Item::Hit(..) => continue,
-            };
+            let Some(l) = label_of(it, s) else { continue };
             if super::settings_search::matches(&words, crate::i18n::tr(l), l) {
                 out.push((page, i, l));
             }
@@ -121,6 +120,10 @@ const RIGHT_ROWS: f32 = 13.0;
 const TEXT: i32 = 28;
 const SWITCH_W: f32 = 66.0;
 const SWITCH_H: f32 = 36.0;
+/// What the "Card menu" page says above its rows.
+const CARD_MENU_NOTE: &str = "The card menu opens when you hold OK on a video, channel or playlist. Here you choose what it offers and in what order: OK shows or hides an item; to move one, press Right, then Up or Down, then OK.";
+/// The "Card menu" page: room above its rows for what a card menu is and how to edit it.
+const NOTE_H: f32 = 104.0;
 
 type Get = fn(&Settings) -> String;
 type Change = fn(&mut Settings, i32);
@@ -134,6 +137,18 @@ enum Item {
     Blocked(usize),
     /// A settings search result ([`Hit`]): OK goes to the option.
     Hit(SettingsPage, usize, &'static str),
+    /// A card-menu item (by its place in `Settings::card_menu`): OK shows or hides it, Right
+    /// picks it up to move with Up / Down.
+    CardItem(usize),
+}
+
+/// The label a row is found by (in a settings search, and again when going to it).
+fn label_of(it: &Item, s: &Settings) -> Option<&'static str> {
+    match it {
+        Item::Opt(l, ..) | Item::Page(l, _) | Item::Action(l, _) | Item::Info(l, _) => Some(*l),
+        Item::CardItem(i) => s.card_menu.get(*i).and_then(|k| card_label(k)),
+        Item::Blocked(_) | Item::Hit(..) => None,
+    }
 }
 
 fn cycle_key(k: &mut String, d: i32) {
@@ -142,31 +157,41 @@ fn cycle_key(k: &mut String, d: i32) {
     *k = A[((i + d).rem_euclid(A.len() as i32)) as usize].into();
 }
 
-/// Card-menu row value: its position, or hidden.
-fn card_item_status(s: &Settings, key: &str) -> String {
-    if s.card_menu_hidden.iter().any(|h| h == key) {
-        return "hidden".into();
-    }
-    match s.card_menu.iter().position(|k| k == key) {
-        Some(i) => crate::i18n::tr("position {}").replace("{}", &(i + 1).to_string()),
-        None => "shown".into(),
-    }
+/// A card-menu item's settings label ("Card menu: Play"): what a settings search finds.
+fn card_label(key: &str) -> Option<&'static str> {
+    super::menu::CARD_ITEMS.iter().find(|(k, _)| *k == key).map(|(_, l)| *l)
 }
 
-/// LEFT moves the item one place up; OK / RIGHT shows or hides it.
-fn card_item_edit(s: &mut Settings, key: &str, d: i32) {
-    if !s.card_menu.iter().any(|k| k == key) {
-        s.card_menu.push(key.to_string());
+/// A card-menu item's name on the "Card menu" page: its label without "Card menu: ", translated.
+fn card_name(key: &str) -> String {
+    let Some(label) = card_label(key) else { return key.to_string() };
+    let bare = label.trim_start_matches("Card menu: ");
+    let t = crate::i18n::tr(bare);
+    if t != bare || crate::i18n::tr(label) == label {
+        return t.to_string();
     }
-    if d < 0 {
-        if let Some(i) = s.card_menu.iter().position(|k| k == key).filter(|i| *i > 0) {
-            s.card_menu.swap(i, i - 1);
-        }
-    } else if let Some(i) = s.card_menu_hidden.iter().position(|h| h == key) {
+    // Translated only with the prefix: the translation's own prefix comes off.
+    without_prefix(crate::i18n::tr(label))
+}
+
+/// "Kártyamenü: Lejátszás" -> "Lejátszás" ("Menu de la carte : Lire" -> "Lire").
+fn without_prefix(label: &str) -> String {
+    label.split_once(':').map_or(label, |(_, rest)| rest).trim().to_string()
+}
+
+/// Shows or hides the card-menu item `key`.
+fn card_toggle(s: &mut Settings, key: &str) {
+    if let Some(i) = s.card_menu_hidden.iter().position(|h| h == key) {
         s.card_menu_hidden.remove(i);
     } else {
         s.card_menu_hidden.push(key.to_string());
     }
+}
+
+/// Swaps the card-menu items `a` and `b` (by name: the order may have changed since).
+fn card_swap(s: &mut Settings, a: &str, b: &str) {
+    let (Some(i), Some(j)) = (s.card_menu.iter().position(|k| k == a), s.card_menu.iter().position(|k| k == b)) else { return };
+    s.card_menu.swap(i, j);
 }
 
 fn language_name(code: &str) -> String {
@@ -211,6 +236,18 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
     match page {
         SettingsPage::Blocked if s.blocked_channels.is_empty() => vec![Info("No blocked channels", |_| String::new())],
         SettingsPage::Blocked => (0..s.blocked_channels.len()).map(Blocked).collect(),
+        SettingsPage::CardMenu => {
+            let mut v: Vec<Item> = (0..s.card_menu.len()).map(CardItem).collect();
+            v.push(Action("Reset the card menu", |fx| {
+                fx.push(Fx::App(YtFx::EditSettings(Box::new(|s| {
+                    let d = Settings::default();
+                    s.card_menu = d.card_menu;
+                    s.card_menu_hidden = d.card_menu_hidden;
+                }))));
+                fx.push(Fx::App(YtFx::Toast(crate::i18n::tr("Card menu reset").into())));
+            }));
+            v
+        }
         SettingsPage::Markers => {
             macro_rules! marker {
                 ($label:expr, $cat:expr) => {
@@ -462,34 +499,7 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
                 section_toggle!("Sidebar: Trending", Section::Trending),
                 section_toggle!("Sidebar: Notifications", Section::Notifications),
             ]);
-            macro_rules! card_item {
-                ($i:expr) => {
-                    Opt(super::menu::CARD_ITEMS[$i].1, |s| card_item_status(s, super::menu::CARD_ITEMS[$i].0), |s, d| {
-                        card_item_edit(s, super::menu::CARD_ITEMS[$i].0, d)
-                    })
-                };
-            }
-            v.extend([
-                card_item!(0),
-                card_item!(1),
-                card_item!(2),
-                card_item!(3),
-                card_item!(4),
-                card_item!(5),
-                card_item!(6),
-                card_item!(7),
-                card_item!(8),
-                card_item!(9),
-                card_item!(10),
-                card_item!(11),
-                card_item!(12),
-                card_item!(13),
-                card_item!(14),
-                card_item!(15),
-                card_item!(16),
-                card_item!(17),
-                card_item!(18),
-            ]);
+            v.push(Page("Card menu", SettingsPage::CardMenu));
             v
         }
         SettingsPage::Remote => vec![
@@ -570,6 +580,7 @@ fn title(page: SettingsPage) -> &'static str {
         SettingsPage::About => "Account & about",
         SettingsPage::Blocked => "Blocked channels",
         SettingsPage::Markers => "Segment markers",
+        SettingsPage::CardMenu => "Card menu",
     }
 }
 
@@ -614,6 +625,8 @@ pub struct SettingsScreen {
     back_to: std::cell::Cell<Option<usize>>,
     /// The row a sub-page starts on (the option a search result led to).
     start: usize,
+    /// The card-menu item picked up to move (Right on it): Up / Down move it, OK puts it down.
+    moving: Option<String>,
     state: State,
 }
 
@@ -624,7 +637,11 @@ impl SettingsScreen {
             entry,
             group: G_RIGHT,
             base: RIGHT_BASE,
-            rect: Rect::new(RIGHT_X, LIST_Y, RIGHT_W, RIGHT_ROW_H * RIGHT_ROWS),
+            rect: if page == SettingsPage::CardMenu {
+                Rect::new(RIGHT_X, LIST_Y + NOTE_H, RIGHT_W, RIGHT_ROW_H * (RIGHT_ROWS - 2.0))
+            } else {
+                Rect::new(RIGHT_X, LIST_Y, RIGHT_W, RIGHT_ROW_H * RIGHT_ROWS)
+            },
             row_h: RIGHT_ROW_H,
             text_size: TEXT,
         };
@@ -650,6 +667,7 @@ impl SettingsScreen {
             hits: Vec::new(),
             back_to: std::cell::Cell::new(None),
             start: start.unwrap_or(0),
+            moving: None,
             state: State(format!("{page:?}")),
         }
     }
@@ -697,7 +715,7 @@ impl SettingsScreen {
     fn go_to(&self, page: SettingsPage, row: usize, label: &'static str, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
         let s = &cx.views.store.settings;
         // Found again by its label: rows may have come or gone since the search (an update found).
-        let row = items(page, s).iter().position(|it| matches!(it, Item::Opt(l, ..) | Item::Page(l, _) | Item::Action(l, _) | Item::Info(l, _) if *l == label)).unwrap_or(row);
+        let row = items(page, s).iter().position(|it| label_of(it, s) == Some(label)).unwrap_or(row);
         let c = category_of(page);
         let target = if CATS[c].0 == page {
             row
@@ -743,6 +761,12 @@ impl SettingsScreen {
                 fx.invalidate(plx_machine::present::Provenance::Input);
             }
             Some(Item::Action(_, act)) if dir >= 0 => act(fx),
+            Some(Item::CardItem(c)) => {
+                if let Some(key) = cx.views.store.settings.card_menu.get(*c).cloned() {
+                    fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| card_toggle(s, &key)))));
+                    fx.invalidate(plx_machine::present::Provenance::Input);
+                }
+            }
             Some(Item::Hit(page, row, label)) if dir >= 0 => self.go_to(*page, *row, label, cx, fx),
             _ => {}
         }
@@ -778,6 +802,63 @@ impl SettingsScreen {
     fn focus(&self, elem: u32, fx: &mut Effects<'_, YtHost>) {
         self.focus_req.set(Some(elem));
         fx.invalidate(plx_machine::present::Provenance::Input);
+    }
+}
+
+impl SettingsScreen {
+    /// The "Card menu" page's moving: Right on an item picks it up, Up / Down then move it one
+    /// place, and OK, Left, Right or BACK put it down. `None`: the event is not about moving.
+    fn step_moving(&mut self, ev: &ScreenEvent<YtHost>, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) -> Option<Handled> {
+        if self.page != SettingsPage::CardMenu || self.choice.is_some() {
+            return None;
+        }
+        let order = &cx.views.store.settings.card_menu;
+        let focused = self.list.focused(cx, self.rows(cx).len()).filter(|i| *i < order.len());
+        // The focus went elsewhere (the pointer, a click): the item is put down where it is.
+        if self.moving.is_some() && (focused.is_none() || focused.map(|i| &order[i]) != self.moving.as_ref()) {
+            self.moving = None;
+            fx.invalidate(plx_machine::present::Provenance::Input);
+        }
+        let key = |ev: &ScreenEvent<YtHost>| match ev {
+            ScreenEvent::Input(InputEvent { kind: InputKind::Key { key, edge, .. }, .. }) => Some((*key, *edge)),
+            _ => None,
+        };
+        match (&self.moving, ev) {
+            (Some(_), ScreenEvent::Activate(_)) => {
+                self.moving = None;
+                fx.invalidate(plx_machine::present::Provenance::Input);
+                Some(Handled::Yes)
+            }
+            (Some(m), _) => match key(ev)? {
+                (Key::Up | Key::Down, Edge::Down | Edge::Repeat) => {
+                    let i = focused?;
+                    let j = if key(ev)?.0 == Key::Up { i.checked_sub(1) } else { Some(i + 1).filter(|j| *j < order.len()) };
+                    if let Some(j) = j {
+                        let (a, b) = (m.clone(), order[j].clone());
+                        fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| card_swap(s, &a, &b)))));
+                        self.focus(self.list.elem(j), fx);
+                    }
+                    Some(Handled::Yes)
+                }
+                (Key::Left | Key::Right | Key::Back, edge) => {
+                    if edge == Edge::Down {
+                        self.moving = None;
+                        fx.invalidate(plx_machine::present::Provenance::Input);
+                    }
+                    Some(Handled::Yes)
+                }
+                (Key::Up | Key::Down, _) => Some(Handled::Yes),
+                _ => None,
+            },
+            (None, _) => match key(ev)? {
+                (Key::Right, Edge::Down) => {
+                    self.moving = Some(order[focused?].clone());
+                    fx.invalidate(plx_machine::present::Provenance::Input);
+                    Some(Handled::Yes)
+                }
+                _ => None,
+            },
+        }
     }
 }
 
@@ -832,6 +913,9 @@ impl Machine<YtHost> for SettingsScreen {
             return self.step(&a, cx, fx);
         }
         let n = self.rows(cx).len();
+        if let Some(h) = self.step_moving(ev, cx, fx) {
+            return h;
+        }
         match ev {
             ScreenEvent::Activate(e) if self.choice.as_ref().is_some_and(|c| c.owns(*e)) => {
                 let c = self.choice.take().unwrap();
@@ -1124,13 +1208,24 @@ impl SettingsScreen {
             ui::icon::draw(p, icon, Rect::new(RIGHT_X + 28.0, 40.0, 26.0, 26.0), ui::DIM, false);
             ui::text(p, title(top_page), RIGHT_X + 66.0, 38.0, 24, ui::DIM, ui::ALIGN_LEFT, false);
             ui::text(p, title(self.page), RIGHT_X + 28.0, 82.0, 46, ui::WHITE, ui::ALIGN_LEFT, true);
+            if self.page == SettingsPage::CardMenu {
+                let note = crate::i18n::tr(CARD_MENU_NOTE);
+                for (k, line) in ui::wrap_lines(m, note, RIGHT_W - 56.0, 24, false, 3).iter().enumerate() {
+                    ui::text_raw(p, line, RIGHT_X + 28.0, LIST_Y - 8.0 + 34.0 * k as f32, 24, ui::DIM, ui::ALIGN_LEFT, false);
+                }
+            }
         }
         let n = rows.len();
         let vis = self.list.rows_visible();
         for (i, item) in rows.iter().enumerate().skip(top).take(vis) {
             let r = self.list.row_rect(i, top);
             let focused = focus == Some(i);
-            if focused {
+            let moving = matches!(item, Item::CardItem(c) if s.card_menu.get(*c).is_some_and(|k| Some(k) == self.moving.as_ref()));
+            if moving {
+                // Picked up: lifted in the accent colour while Up / Down move it.
+                let a = ui::accent();
+                ui::fill(p, r, 12.0, [a[0], a[1], a[2], 0.45]);
+            } else if focused {
                 ui::fill(p, r, 12.0, ui::ROW_FOCUS);
             }
             let ty = r.y + (r.h - TEXT as f32 * 1.3) / 2.0;
@@ -1154,16 +1249,25 @@ impl SettingsScreen {
                 Item::Info(_, get) => value(p, m, &get(cx), right, ty, r.w, if focused { ui::WHITE } else { [1.0, 1.0, 1.0, 0.8] }),
                 Item::Blocked(_) => value(p, m, crate::i18n::tr("Unblock"), right, ty, r.w, if focused { ui::WHITE } else { ui::FAINT }),
                 Item::Action(..) => 0.0,
+                Item::CardItem(_) if moving => value(p, m, crate::i18n::tr("Up / Down to move, OK to place"), right, ty, r.w, ui::WHITE),
+                Item::CardItem(c) => {
+                    let shown = s.card_menu.get(*c).is_some_and(|k| !s.card_menu_hidden.contains(k));
+                    switch(p, right - SWITCH_W, r.y + (r.h - SWITCH_H) / 2.0, shown, focused);
+                    SWITCH_W
+                }
             };
             let lx = r.x + 28.0;
             let room = (right - lx - if used > 0.0 { used + 28.0 } else { 0.0 }).max(40.0);
             let label = match item {
                 // A channel's name: shown as it is.
                 Item::Blocked(b) => s.blocked_channels.get(*b).cloned().unwrap_or_default(),
+                Item::CardItem(c) => s.card_menu.get(*c).map(|k| card_name(k)).unwrap_or_default(),
                 Item::Opt(l, ..) | Item::Page(l, _) | Item::Action(l, _) | Item::Info(l, _) | Item::Hit(_, _, l) => crate::i18n::tr(l).to_string(),
             };
             let label_ink = match item {
-                _ if focused => ui::WHITE,
+                _ if focused || moving => ui::WHITE,
+                // A hidden card-menu item: dimmed beside the shown ones.
+                Item::CardItem(c) if s.card_menu.get(*c).is_some_and(|k| s.card_menu_hidden.contains(k)) => ui::FAINT,
                 Item::Info(..) => ui::DIM,
                 _ => [1.0, 1.0, 1.0, 0.84],
             };
@@ -1286,6 +1390,33 @@ mod search_tests {
         assert!(find("s\u{e9}ek st\u{e9}p", &s).iter().any(|h| h.2 == "Seek step"));
         assert!(find("  ", &s).is_empty());
         assert!(find("no option is called this", &s).is_empty());
+    }
+
+    #[test]
+    fn the_card_menu_page_lists_the_items_in_their_order() {
+        let mut s = Settings::default();
+        s.card_menu.swap(0, 1);
+        let rows = items(SettingsPage::CardMenu, &s);
+        assert_eq!(rows.len(), super::super::menu::CARD_ITEMS.len() + 1);
+        assert!(matches!(rows[0], Item::CardItem(0)));
+        assert_eq!(s.card_menu[0], "play_start");
+        assert!(matches!(rows.last(), Some(Item::Action("Reset the card menu", _))));
+        // Moved by name and hidden / shown again.
+        card_swap(&mut s, "play", "play_start");
+        assert_eq!(s.card_menu[..2], ["play", "play_start"]);
+        card_toggle(&mut s, "comments");
+        assert_eq!(s.card_menu_hidden, ["comments"]);
+        card_toggle(&mut s, "comments");
+        assert!(s.card_menu_hidden.is_empty());
+        // Still found by a settings search, on its page.
+        let hits = find("card menu comments", &s);
+        assert!(hits.iter().any(|h| h.0 == SettingsPage::CardMenu), "{hits:?}");
+    }
+
+    #[test]
+    fn card_items_are_named_without_the_prefix() {
+        assert_eq!(without_prefix("Kártyamenü: Összes lejátszása és keverés"), "Összes lejátszása és keverés");
+        assert_eq!(without_prefix("Menu de la carte : S'abonner / se désabonner"), "S'abonner / se désabonner");
     }
 
     #[test]
