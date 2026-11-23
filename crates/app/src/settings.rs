@@ -597,7 +597,7 @@ impl Default for Settings {
             ff_keys: KeyPair::Seek,
             seek_confirm: false,
             audio_delay_ms: 0,
-            chapter_notification: true,
+            chapter_notification: false,
             player_style: PlayerStyle::SmartTube,
             screen_off_dimming: 100,
             screen_off_timeout_secs: 0,

@@ -8,5 +8,5 @@
 - New: more content filters: Shorts in History, Trending and on channel pages; watched videos in Notifications and Watch later
 - New: what the CH+ / CH- and fast-forward / rewind buttons do in the player (previous / next video, seek, speed, chapter), in Settings > Playback
 - New: Confirm seeking with OK (Settings > Playback, off by default): seeking moves a marker on the seek bar, OK jumps there, BACK cancels
-- New: the chapter's name shows when playback enters a new chapter (Settings > Playback, "Show the chapter's name")
+- New: Show the chapter's name (Settings > Playback, off by default): the chapter's name when playback enters a new chapter
 - New: Audio delay (Settings > Playback) for lip-sync with a soundbar or Bluetooth audio; while it is set, the 4K / VP9 / AV1 engine plays every video it can
