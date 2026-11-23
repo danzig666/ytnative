@@ -1,5 +1,6 @@
 - New: the interface in 39 more languages, the ones SmartTube has: Polish, Portuguese, Dutch, Turkish, Ukrainian, Czech, Slovak, Slovenian, Croatian, Serbian, Romanian, Bulgarian, Greek, Lithuanian, Latvian, Estonian, Finnish, Swedish, Norwegian, Danish, Catalan, Galician, Albanian, Azerbaijani, Armenian, Georgian, Arabic, Hebrew, Persian, Hindi, Telugu, Thai, Vietnamese, Indonesian, Malay, Japanese, Korean and Chinese (Simplified and Traditional); with "System" ytnative follows the TV's language, and YouTube is asked in it too, so sorting by date, hiding past streams and video dates work in every one of them
 - Changed: comments and search suggestions come in the interface language too (they were always in English)
+- New: Search types with the TV's own keyboard, with every language and input method the TV has (Chinese, Japanese, Korean, Hindi, Thai...): it opens when the search field has the focus (at once, and again with OK on the field); its Enter searches, its arrows move the cursor and Clear All empties the field. On a TV without one, ytnative's own keys stay, now with the interface language's own alphabet (Russian, Ukrainian, Bulgarian, Serbian, Greek, Hebrew, Arabic, Persian, Armenian, Georgian) and labels that fit their keys (#24)
 - New: Mark as watched / unwatched in the card menu, and "Mark all from <channel> as watched": the cards show a full progress bar and the "Hide watched" filters hide them
 - New: Shorts, My videos and Kids (YouTube Kids) sections; turn them on in Settings > Interface
 - New: hold OK on a sidebar section for its menu: Refresh, Rename, Move up / down, Hide from the sidebar
@@ -10,9 +11,7 @@
 - New: Confirm seeking with OK (Settings > Playback, off by default): seeking moves a marker on the seek bar, OK jumps there, BACK cancels
 - New: Show the chapter's name (Settings > Playback, off by default): the chapter's name when playback enters a new chapter
 - New: Audio delay (Settings > Playback) for lip-sync with a soundbar or Bluetooth audio; while it is set, the 4K / VP9 / AV1 engine plays every video it can
+- Changed: when YouTube's bot check refuses a video to a signed-in viewer, ytnative no longer tells them to sign in, and the Problem report now shows why each way of getting the video failed (#23)
+- Fixed: signed-in playback no longer fails a video when the download of YouTube's player script drops once (up to three tries, as in SmartTube)
 - Changed: on 2019 LCD TVs without /dev/rtkmem (#8), the message now also says to delete ytnative and install it again: the app's sandbox is made when the app is installed
 - Fixed: the messages that were still English only (the video errors, the /dev/rtkmem help, backup and restore, the updater's errors) are in every interface language; long ones are no longer cut on the error screen, and toasts in Chinese, Japanese and Korean fit their box
-- Changed: when YouTube's bot check refuses a video to a signed-in viewer, ytnative no longer tells them to sign in, and the Problem report now shows why each way of getting the video failed (#23)
-- New: the search keyboard has the interface language's own alphabet: Russian, Ukrainian, Bulgarian, Serbian, Greek, Hebrew, Arabic, Persian, Armenian and Georgian; the key beside Clear switches between it, a–z and the accented letters (#24)
-- Fixed: long words on the search keyboard's keys ("Очистить") are made smaller to fit their key
-- New: Search types with the TV's own keyboard, with every language and input method the TV has (Chinese, Japanese, Korean, Hindi, Thai...): it opens when the search field has the focus (at once, and again with OK on the field), and its Enter searches. On a TV without one, ytnative's own keys stay
