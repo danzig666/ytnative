@@ -1019,7 +1019,7 @@ impl AppRig {
         plx_base::surface::set_ui_scale(self.store.settings.ui_scale.clamp(80, 100) as f32 / 100.0);
         if self.store.settings.ui_language != self.applied_language {
             self.applied_language = self.store.settings.ui_language.clone();
-            crate::i18n::set_language(&self.applied_language, plx_platform::i18n::current().format_locale());
+            crate::i18n::set_language(&self.applied_language, plx_platform::i18n::current().system_language());
         }
         // YouTube is asked in the interface language: titles come back as the website shows them
         // to that viewer (the original, or the channel's own translation into that language),

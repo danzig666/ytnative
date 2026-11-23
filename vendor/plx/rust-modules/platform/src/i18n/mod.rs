@@ -57,6 +57,9 @@ pub struct LocaleContext {
     preference: Preference,
     language: Language,
     format_locale: String,
+    /// ytnative: the television's menu language (`localeInfo.locales.UI`, else the environment),
+    /// whatever the preference: an app with its own language list resolves "System" from it.
+    system_language: String,
     clock: Clock,
     time: icu_datetime::NoCalendarFormatter<icu_datetime::fieldsets::T>,
     plural: PluralRules,
@@ -86,10 +89,9 @@ impl LocaleContext {
         clock: Option<&str>,
         env: Option<&str>,
     ) -> Self {
+        let system_language = ui.and_then(normalize).or_else(|| env.and_then(normalize)).unwrap_or_else(|| "en".into());
         let selected = if preference == Preference::System {
-            ui.and_then(normalize)
-                .or_else(|| env.and_then(normalize))
-                .unwrap_or_else(|| "en".into())
+            system_language.clone()
         } else {
             preference.tag().into()
         };
@@ -171,6 +173,7 @@ impl LocaleContext {
             preference,
             language,
             format_locale,
+            system_language,
             clock,
             time,
             plural,
@@ -187,6 +190,10 @@ impl LocaleContext {
     }
     pub fn format_locale(&self) -> &str {
         &self.format_locale
+    }
+    /// ytnative: the television's menu language ("de-DE", "zh-Hant-TW"); see the field.
+    pub fn system_language(&self) -> &str {
+        &self.system_language
     }
     pub fn clock(&self) -> Clock {
         self.clock
