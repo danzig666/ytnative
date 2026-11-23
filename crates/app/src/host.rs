@@ -2220,12 +2220,24 @@ impl Rig<YtHost> for AppRig {
                 if let Err(e) = self.store.watched.save() {
                     crate::log(&format!("watched: save failed: {e}"));
                 }
-                // The cards on screen show it at once (a hidden one leaves at the next load).
-                for f in self.store.feeds.values_mut() {
+                // The cards on screen show it at once (a hidden one leaves at the next load);
+                // unmarked, they get YouTube's own progress back.
+                let store = &mut self.store;
+                for f in store.feeds.values_mut() {
                     for c in f.cards.iter_mut().filter(|c| ids.contains(&c.item.id)) {
-                        c.item.progress = if watched { Some(100) } else { None };
+                        if watched {
+                            store.youtube_progress.entry(c.item.id.clone()).or_insert(c.item.progress);
+                            c.item.progress = Some(100);
+                        } else {
+                            c.item.progress = store.youtube_progress.get(&c.item.id).copied().flatten();
+                        }
                     }
                     f.gen += 1;
+                }
+                if !watched {
+                    for id in &ids {
+                        store.youtube_progress.remove(id);
+                    }
                 }
                 let msg = if watched { "Marked as watched" } else { "Marked as unwatched" };
                 self.store.toast(msg, self.now_ms);

@@ -110,7 +110,14 @@ pub fn foreground(front: bool, wait: bool) {
     FRONT.store(front, Ordering::SeqCst);
     let f = move || if front { apply() } else { restore() };
     if wait {
-        f();
+        // At quit: a slow settings service must not hold the exit for long (a file left behind is
+        // put right at the next start).
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            f();
+            let _ = tx.send(());
+        });
+        let _ = rx.recv_timeout(std::time::Duration::from_secs(3));
     } else {
         std::thread::spawn(f);
     }
@@ -141,36 +148,59 @@ fn set_stt(luna: &Luna, mut info: serde_json::Value, stt: &str, nlp: &str) -> bo
 #[cfg(unix)]
 fn apply() {
     let _one = SWITCH.lock().unwrap();
+    // ytnative left the front after this was asked (a restore may have run already): not now.
+    if !FRONT.load(Ordering::SeqCst) {
+        return;
+    }
     let code = WANTED.lock().unwrap().clone();
+    if code.is_empty() {
+        return;
+    }
     let Some(luna) = settings_bus() else { return };
     let Some(info) = locale_info(luna) else { return crate::log("voice: no localeInfo") };
     let (stt, nlp) = (info["locales"]["STT"].as_str().unwrap_or("").to_string(), info["locales"]["NLP"].as_str().unwrap_or("").to_string());
-    let r = luna.call("luna://com.webos.service.voiceconductor/getSupportedLanguages", "{}");
-    let supported = serde_json::from_str::<serde_json::Value>(&r).ok().map(|v| v["voiceLanguages"].clone()).unwrap_or_default();
     let saved_path = yt_core::paths::data_file(SAVED);
     let saved: Option<serde_json::Value> = std::fs::read_to_string(&saved_path).ok().and_then(|s| serde_json::from_str(&s).ok());
-    let Some(target) = crate::i18n::voice_language(&code, &stt, &supported) else {
-        return;
-    };
-    // The TV's own values, kept from the first switch (not overwritten by a later one of ours).
-    if saved.is_none() {
-        let keep = serde_json::json!({ "STT": stt, "NLP": nlp, "set": target });
-        if std::fs::write(&saved_path, keep.to_string()).is_err() {
-            return crate::log("voice: cannot save the TV's voice language; not switching");
+    // A voice language of the TV's own since our last switch (the menu language changed): that
+    // is the TV's now, and the saved one is stale.
+    let saved = saved.filter(|s| s["set"].as_str() == Some(stt.as_str()));
+    // The TV's own voice language: kept from our first switch, else the current one.
+    let own = saved.as_ref().and_then(|s| s["STT"].as_str()).map(str::to_string).unwrap_or_else(|| stt.clone());
+    let r = luna.call("luna://com.webos.service.voiceconductor/getSupportedLanguages", "{}");
+    let supported = serde_json::from_str::<serde_json::Value>(&r).ok().map(|v| v["voiceLanguages"].clone()).unwrap_or_default();
+    // None: the TV's own language is the interface's, or LG has no recognizer for it.
+    match crate::i18n::voice_language(&code, &own, &supported) {
+        None => restore_locked(luna),
+        Some(target) if target == stt => {}
+        Some(target) => {
+            let keep = match saved {
+                Some(mut s) => {
+                    s["set"] = serde_json::json!(target);
+                    s
+                }
+                None => serde_json::json!({ "STT": stt, "NLP": nlp, "set": target }),
+            };
+            if std::fs::write(&saved_path, keep.to_string()).is_err() {
+                return crate::log("voice: cannot save the TV's voice language; not switching");
+            }
+            set_stt(luna, info, &target, &target);
         }
-    } else if let Some(mut s) = saved {
-        s["set"] = serde_json::json!(target);
-        let _ = std::fs::write(&saved_path, s.to_string());
     }
-    set_stt(luna, info, &target, &target);
 }
 
 #[cfg(unix)]
 fn restore() {
     let _one = SWITCH.lock().unwrap();
+    if let Some(luna) = settings_bus() {
+        restore_locked(luna);
+    }
+}
+
+/// Puts the TV's own voice language back (with [`SWITCH`] held).
+#[cfg(unix)]
+fn restore_locked(luna: &Luna) {
     let saved_path = yt_core::paths::data_file(SAVED);
     let Some(saved) = std::fs::read_to_string(&saved_path).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()) else { return };
-    let Some(luna) = settings_bus() else { return };
     let Some(info) = locale_info(luna) else { return };
     let (stt, nlp) = (saved["STT"].as_str().unwrap_or(""), saved["NLP"].as_str().unwrap_or(""));
     // Put back only what is still ours: if the menu language was changed meanwhile, the TV has

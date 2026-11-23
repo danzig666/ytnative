@@ -200,8 +200,9 @@ fn wants_feed(resolved: &yt_core::streams::Resolved, prefs: &crate::feed::Prefs,
     }
     match crate::feed::FeedPlayer::choose(resolved, prefs) {
         Some(_) if acb || resolved.is_live => true,
-        // "Audio delay" is applied by engine B only: it takes every video it can play then.
-        Some(_) if prefer && crate::settings::AUDIO_DELAY_MS.load(std::sync::atomic::Ordering::Relaxed) != 0 => true,
+        // "Audio delay" is applied by engine B only: it takes every video it can play then,
+        // whatever the engine setting (the system player has no way to shift the sound).
+        Some(_) if crate::settings::AUDIO_DELAY_MS.load(std::sync::atomic::Ordering::Relaxed) != 0 => true,
         Some(c) => prefer && (c.video_codec != crate::feed::VideoCodec::H264 || c.video["height"].as_u64().unwrap_or(0) > 1080),
         None => false,
     }

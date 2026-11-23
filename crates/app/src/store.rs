@@ -302,6 +302,8 @@ pub struct Store {
     pub local: yt_core::local_playlists::Store,
     /// Videos marked as watched on this TV.
     pub watched: yt_core::watched::Watched,
+    /// YouTube's own progress of the marked videos' cards, put back by "Mark as unwatched".
+    pub youtube_progress: HashMap<String, Option<u8>>,
     /// Filters of the last search (the filters panel edits these).
     pub search_filters: yt_core::search_filters::Filters,
     pub comments: HashMap<String, Comments>,
@@ -386,7 +388,11 @@ impl Store {
         for (title, items, continuation) in groups {
             let start = fresh.len();
             for it in items {
+                let raw = it.progress;
                 let it = &self.watched.apply(it);
+                if it.progress != raw {
+                    self.youtube_progress.entry(it.id.clone()).or_insert(raw);
+                }
                 if !seen.insert(it.id.clone()) || !filter.keep(it) {
                     continue;
                 }
@@ -451,7 +457,11 @@ impl Store {
         let at = r.range.end;
         let mut fresh = Vec::new();
         for it in items {
+            let raw = it.progress;
             let it = self.watched.apply(&it);
+            if it.progress != raw {
+                self.youtube_progress.entry(it.id.clone()).or_insert(raw);
+            }
             if seen.contains(&it.id) || !filter.keep(&it) || fresh.iter().any(|c: &Card| c.item.id == it.id) {
                 continue;
             }
@@ -670,7 +680,9 @@ impl<'a> Filter<'a> {
         let home = *k == FeedKey::Section(Section::Home);
         let subs = *k == FeedKey::Section(Section::Subscriptions);
         let channel = matches!(k, FeedKey::Browse { id, .. } if id.starts_with("UC"));
-        let hide_shorts = s.hide_shorts_everywhere
+        let shorts_page = *k == FeedKey::Section(Section::Shorts);
+        let hide_shorts = !shorts_page
+            && (s.hide_shorts_everywhere
             || match k {
                 FeedKey::Section(Section::Home) => s.hide_shorts_home,
                 FeedKey::Section(Section::Subscriptions) => s.hide_shorts_subscriptions,
@@ -678,7 +690,7 @@ impl<'a> Filter<'a> {
                 FeedKey::Section(Section::Trending) => s.hide_shorts_trending,
                 FeedKey::Search { .. } => s.hide_shorts_search,
                 _ => channel && s.hide_shorts_channels,
-            };
+            });
         let watch_later = matches!(k, FeedKey::Browse { id, .. } if id == "VLWL" || id == "WL");
         let notifications = *k == FeedKey::Section(Section::Notifications);
         Filter {

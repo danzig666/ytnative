@@ -493,9 +493,7 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
                         if let Some(i) = s.sections.iter().position(|x| *x == k) {
                             s.sections.remove(i);
                         } else {
-                            let order: Vec<&str> = Section::ALL.iter().map(|x| x.key()).collect();
-                            s.sections.push(k);
-                            s.sections.sort_by_key(|x| order.iter().position(|o| o == x).unwrap_or(99));
+                            crate::settings::show_section(&mut s.sections, &k);
                         }
                     })
                 };

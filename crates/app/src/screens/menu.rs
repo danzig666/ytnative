@@ -283,13 +283,18 @@ pub const CARD_ITEMS: [(&str, &str); 21] = [
 
 /// Moves section `key` one place up (`d` < 0) or down among the sidebar's sections, past any
 /// key of a section this build does not have.
-pub fn move_section(sections: &mut Vec<String>, key: &str, d: i32) {
+pub fn move_section(sections: &mut Vec<String>, key: &str, d: i32, signed_in: bool, child_mode: bool) {
     let Some(i) = sections.iter().position(|k| k == key) else { return };
-    let real = |k: &String| crate::store::Section::from_key(k).is_some();
+    let real = |k: &String| shown_section(k, signed_in, child_mode);
     let j = if d < 0 { (0..i).rev().find(|&j| real(&sections[j])) } else { (i + 1..sections.len()).find(|&j| real(&sections[j])) };
     if let Some(j) = j {
         sections.swap(i, j);
     }
+}
+
+/// Section key `k` is in the sidebar for this viewer (a known section, allowed now).
+fn shown_section(k: &str, signed_in: bool, child_mode: bool) -> bool {
+    crate::store::Section::from_key(k).is_some_and(|s| s.allowed(signed_in, child_mode))
 }
 
 /// The videos of channel `name` in the lists loaded now, not marked yet.
@@ -334,7 +339,8 @@ impl MenuScreen {
         if s.section_names.iter().any(|(k, _)| k == key) {
             acts.push((tr("Restore the original name").to_string(), Act::SectionResetName(key.to_string())));
         }
-        let shown: Vec<&String> = s.sections.iter().filter(|k| crate::store::Section::from_key(k).is_some()).collect();
+        let signed_in = cx.views.store.signed_in;
+        let shown: Vec<&String> = s.sections.iter().filter(|k| shown_section(k, signed_in, s.child_mode)).collect();
         let at = shown.iter().position(|k| *k == key);
         if at.is_some_and(|i| i > 0) {
             acts.push((tr("Move up").to_string(), Act::SectionMove(key.to_string(), -1)));
@@ -904,8 +910,11 @@ impl MenuScreen {
                 fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
             }
             Act::SectionMove(key, d) => {
-                let (key, d) = (key.clone(), *d);
-                fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| move_section(&mut s.sections, &key, d)))));
+                let (key, d, signed_in) = (key.clone(), *d, cx.views.store.signed_in);
+                fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| {
+                    let child = s.child_mode;
+                    move_section(&mut s.sections, &key, d, signed_in, child)
+                }))));
                 fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
             }
             Act::SectionHide(key) => {

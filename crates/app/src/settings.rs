@@ -150,6 +150,18 @@ impl KeyPair {
     }
 }
 
+/// Puts section `key` back in the sidebar: after the nearest section before it in the default
+/// order that is there, so an order the viewer set (the section menu's Move up / down) stays.
+pub fn show_section(sections: &mut Vec<String>, key: &str) {
+    if sections.iter().any(|k| k == key) {
+        return;
+    }
+    let all: Vec<&str> = crate::store::Section::ALL.iter().map(|s| s.key()).collect();
+    let me = all.iter().position(|k| *k == key).unwrap_or(all.len());
+    let after = all[..me].iter().rev().find_map(|prev| sections.iter().position(|k| k == prev));
+    sections.insert(after.map_or(0, |i| i + 1), key.to_string());
+}
+
 /// "Audio delay" in ms, for the playback engine's feeding thread (set from the settings each frame).
 pub static AUDIO_DELAY_MS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
@@ -850,6 +862,11 @@ mod tests {
         assert_eq!(pos("tv_order"), pos("play_all") + 1);
         assert_eq!(pos("tv_manage"), pos("open") + 1);
         assert_eq!(pos("watched"), pos("playlist") + 1);
+        let mut secs: Vec<String> = ["library", "home", "subscriptions"].iter().map(|s| s.to_string()).collect();
+        show_section(&mut secs, "shorts");
+        assert_eq!(secs, ["library", "home", "subscriptions", "shorts"], "the viewer's order stays");
+        show_section(&mut secs, "my_videos");
+        assert_eq!(secs[1], "my_videos", "after Library, its default neighbour");
         assert_eq!(pos("copy_list"), pos("watched") + 1);
         assert_eq!(s.card_menu.len(), crate::screens::menu::CARD_ITEMS.len());
         assert!(!s.keep_play_next);
