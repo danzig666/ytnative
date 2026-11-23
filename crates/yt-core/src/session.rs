@@ -153,12 +153,15 @@ impl Session {
     /// Search suggestions (the same endpoint SmartTube uses for the TV keyboard).
     pub fn suggestions(&self, prefix: &str) -> Result<Vec<String>> {
         let url = "https://suggestqueries-clients6.youtube.com/complete/search";
+        // In the interface language and content country, as the searches themselves.
+        let hl = crate::innertube::content_language().unwrap_or_else(|| "en".into());
+        let gl = crate::innertube::content_country().unwrap_or_else(|| "US".into());
         let txt = self
             .http
             .get(url)
             // The answer in UTF-8: by default it comes in Latin-1 (accented queries came back as
             // broken letters).
-            .query(&[("client", "youtube-lr"), ("ds", "yt"), ("hl", "en"), ("ie", "utf-8"), ("oe", "utf-8"), ("q", prefix)])
+            .query(&[("client", "youtube-lr"), ("ds", "yt"), ("hl", hl.as_str()), ("gl", gl.as_str()), ("ie", "utf-8"), ("oe", "utf-8"), ("q", prefix)])
             .send()?
             .text()?;
         // JSONP-ish: window.google.ac.h(["q",[["s1",0,[..]],...],...])

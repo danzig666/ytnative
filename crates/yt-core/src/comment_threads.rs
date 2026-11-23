@@ -112,8 +112,12 @@ pub(crate) fn context(http: &reqwest::blocking::Client, fresh: bool) -> Result<V
     Ok(client(&version, &config))
 }
 
+/// In the interface language and content country, like every other request (the comments' own
+/// texts and "3 days ago" come back in it; nothing here reads YouTube's wording).
 fn client(version: &Value, config: &Value) -> Value {
-    json!({ "client": { "clientName": "WEB", "clientVersion": version, "hl": "en", "gl": "US", "configInfo": config } })
+    let hl = crate::innertube::content_language().unwrap_or_else(|| "en".into());
+    let gl = crate::innertube::content_country().unwrap_or_else(|| "US".into());
+    json!({ "client": { "clientName": "WEB", "clientVersion": version, "hl": hl, "gl": gl, "configInfo": config } })
 }
 
 /// The video and channel a web replies continuation is about (for its replies' own tokens).
@@ -381,6 +385,23 @@ mod tests {
         assert_eq!(a.replies_continuation, Some(format!("{PREFIX}{}", reply_token("vid", "UCchan", "P.a"))));
         assert_eq!(p.comments[1].replies_continuation, None, "no replies, nothing to open");
         assert_eq!(p.next.as_deref(), Some("web:MORE"));
+    }
+
+    /// Live: comments come in the interface language, replies included.
+    #[test]
+    #[ignore]
+    fn live_comments_in_another_language() {
+        crate::paths::set_data_dir(std::env::temp_dir().join("ytnative-web-comments-test"));
+        crate::innertube::set_content_language("de");
+        let mut s = crate::session::Session::new().unwrap();
+        let w = s.watch("dQw4w9WgXcQ", None).unwrap();
+        let p = s.comments(w.comments_continuation.as_deref().unwrap()).unwrap();
+        crate::innertube::set_content_language("");
+        assert!(p.comments.len() > 5, "{} comments", p.comments.len());
+        eprintln!("{:?}", p.comments.iter().take(3).map(|c| &c.published_text).collect::<Vec<_>>());
+        assert!(p.comments.iter().any(|c| c.published_text.starts_with("vor ")), "German ages");
+        let top = p.comments.iter().find(|c| c.replies_continuation.is_some()).unwrap();
+        assert!(!s.comments(top.replies_continuation.as_deref().unwrap()).unwrap().comments.is_empty());
     }
 
     /// Live: a reply with replies on a real video opens them.
