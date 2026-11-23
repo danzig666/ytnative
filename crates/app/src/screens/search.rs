@@ -229,6 +229,8 @@ impl SearchScreen {
         }
     }
     fn search(&self, q: &str, record: bool, fx: &mut Effects<'_, YtHost>) {
+        // The TV's keyboard goes with the search (a suggestion picked as well as its Enter).
+        crate::textin::hide();
         if !q.trim().is_empty() {
             if record {
                 let _ = yt_core::search_history::record(q.trim());
@@ -239,6 +241,7 @@ impl SearchScreen {
     /// Save: the typed name goes to its purpose and the keyboard closes. A blank name does
     /// nothing but say so.
     fn save_name(&self, fx: &mut Effects<'_, YtHost>) {
+        crate::textin::hide();
         let Some(purpose) = &self.naming else { return };
         if matches!(purpose, NamePurpose::SettingsSearch(_)) {
             super::settings_search::submit(&self.query);
@@ -354,7 +357,8 @@ impl Machine<YtHost> for SearchScreen {
                 crate::textin::show();
                 Handled::Yes
             }
-            ScreenEvent::Unmount => {
+            // Left, or covered by the results: the TV's keyboard goes.
+            ScreenEvent::Unmount | ScreenEvent::Cover => {
                 crate::textin::hide();
                 Handled::Yes
             }
