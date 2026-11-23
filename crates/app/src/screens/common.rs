@@ -163,10 +163,18 @@ pub fn toast(p: Painter, cx: &Cx<'_, YtHost>) {
 /// [`toast`] with its top at `y` (the player raises it above its controls).
 pub fn toast_at(p: Painter, cx: &Cx<'_, YtHost>, y: f32) {
     let Some((msg, _)) = &cx.views.store.toast else { return };
-    let w = 22.0 * crate::i18n::tr(msg).chars().count() as f32 * 0.62 + 80.0;
+    let w = toast_width(crate::i18n::tr(msg));
     let r = Rect::new((1920.0 - w) / 2.0, y, w, 70.0);
     ui::fill(p, r, 35.0, [0.08, 0.08, 0.1, 0.94]);
     ui::text(p, msg, 960.0, r.y + 19.0, 28, ui::WHITE, ui::ALIGN_CENTER, false);
+}
+
+/// A toast's pill width for `text` at 28 px: Latin-like letters about 14 px, the full-width ones
+/// of Chinese, Japanese and Korean about 28 px; at most the screen.
+fn toast_width(text: &str) -> f32 {
+    let wide = |c: char| matches!(c as u32, 0x1100..=0x115F | 0x2E80..=0xA4CF | 0xAC00..=0xD7A3 | 0xF900..=0xFAFF | 0xFE30..=0xFE4F | 0xFF00..=0xFF60 | 0xFFE0..=0xFFE6);
+    let w: f32 = text.chars().map(|c| if wide(c) { 28.0 } else { 13.64 }).sum();
+    (w + 80.0).min(1840.0)
 }
 
 /// The time with the date under it, right-aligned at `right` (SmartTube's corner clock).

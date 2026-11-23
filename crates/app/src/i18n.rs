@@ -239,6 +239,16 @@ fn cldr_format(pat: &str, year: Option<i32>, month_name: &str, month: u32, day: 
     out.trim().to_string()
 }
 
+/// A message translated whole when the table has it, else each part between ": " on its own
+/// ("engine B: timed out waiting for media" keeps the name, translates the reason).
+pub fn tr_parts(s: &str) -> String {
+    let whole = tr(s);
+    if whole != s || !s.contains(": ") {
+        return whole.to_string();
+    }
+    s.split(": ").map(tr).collect::<Vec<_>>().join(": ")
+}
+
 /// The translation of `s`, or `s` itself.
 pub fn tr(s: &str) -> &str {
     let p = CURRENT.load(Ordering::Relaxed);
@@ -277,6 +287,10 @@ mod tests {
         assert_eq!(table_code("pt-BR"), "pt");
         assert_eq!(table_code("xx-YY"), "en");
         assert_eq!(youtube_hl("zh"), "zh-CN");
+        set_language("de", "");
+        assert_eq!(tr_parts("engine B: Search"), "engine B: Suche");
+        assert_eq!(tr_parts("Settings"), "Einstellungen");
+        set_language("en", "");
         let p = picker_languages();
         assert_eq!(p.len(), languages().len() + 2);
         assert_eq!((p[0], p[1]), ("system", "en"));

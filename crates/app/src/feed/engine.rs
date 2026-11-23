@@ -178,14 +178,14 @@ impl Pipe {
         if !sys::load(payload, epoch) {
             sys::teardown(Duration::from_secs(3), || {});
             sys::unroute(epoch);
-            return Err(if sys::blocked() { "Starfish is quarantined (restart the app)".into() } else { "Starfish refused the Load".into() });
+            return Err(if sys::blocked() { "The TV's video player stopped responding. Restart ytnative.".into() } else { "The TV's video player refused this video".into() });
         }
         crate::log(&format!("feed: Load returned after {} ms", t0.elapsed().as_millis()));
         while !(ev.load_completed.load(Relaxed) || sys::is_load_completed()) {
             if let Some((num, s)) = ev.error.lock().unwrap().clone() {
                 let p = Pipe { epoch, ev: ev.clone() };
                 p.close(sh);
-                return Err(format!("pipeline refused the stream (error {num}: {})", s.chars().take(120).collect::<String>()));
+                return Err(format!("The TV's video player refused this video: error {num} {}", s.chars().take(120).collect::<String>()));
             }
             if t0.elapsed() > max_wait {
                 crate::log(&format!("feed: no loadCompleted after {} ms; feeding anyway", max_wait.as_millis()));
@@ -288,7 +288,7 @@ fn feed_lane(lane: &Lane, lf: &mut LaneFeed, es: i32, shift: i64, delay: i64, fl
             FeedReply::Error => {
                 lf.errors += 1;
                 if lf.errors > 100 {
-                    return Err("Feed keeps failing".into());
+                    return Err("The TV's video player kept refusing the video's data".into());
                 }
                 lf.pending = Some(u);
                 break;
@@ -388,8 +388,8 @@ fn spawn_fetchers(plan: &Plan, video: &Arc<Lane>, audio: &Arc<Lane>, ctl: &Arc<S
         let body = move || {
             if std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err() {
                 crate::log(&format!("feed: {n} panicked"));
-                v.fail(format!("{n} stopped unexpectedly"));
-                a.fail(format!("{n} stopped unexpectedly"));
+                v.fail("The video's download stopped unexpectedly".into());
+                a.fail("The video's download stopped unexpectedly".into());
             }
         };
         if std::thread::Builder::new().name(name.into()).stack_size(512 << 10).spawn(body).is_err() {
@@ -698,7 +698,7 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
         let pres = pipe.ev.pres_fed_ns.load(Relaxed);
         if let Some((num, s)) = pipe.ev.error.lock().unwrap().take() {
             if pipe.ev.frames.load(Relaxed) == 0 {
-                break Err(format!("pipeline refused the stream (error {num}: {})", s.chars().take(120).collect::<String>()));
+                break Err(format!("The TV's video player refused this video: error {num} {}", s.chars().take(120).collect::<String>()));
             }
             if num == DECODER_REVOKED {
                 sh.status.lock().unwrap().decoder_revoked = true;

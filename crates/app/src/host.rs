@@ -1777,14 +1777,14 @@ fn run_action(session: &Mutex<Option<yt_core::session::Session>>, a: &UserAction
             let dir = yt_core::backup::usb_dirs().into_iter().next().unwrap_or_else(|| yt_core::paths::data_file("backups"));
             std::fs::create_dir_all(&dir)?;
             let path = yt_core::backup::auto_backup(&dir, 5, Default::default())?;
-            Ok::<_, anyhow::Error>(format!("Backed up to {}", path.display()))
+            Ok::<_, anyhow::Error>(crate::i18n::tr("Backed up to {}").replace("{}", &path.display().to_string()))
         })(),
         UserAction::Restore => (|| {
             let mut dirs = yt_core::backup::usb_dirs();
             dirs.push(yt_core::paths::data_file("backups"));
             let latest = dirs.iter().flat_map(|d| yt_core::backup::list_backups(d)).next().ok_or_else(|| anyhow::anyhow!("no backup found"))?;
             let r = yt_core::backup::restore_from(&latest.path, Default::default())?;
-            Ok::<_, anyhow::Error>(format!("Restored {} files from {} (restart the app)", r.restored.len(), latest.name))
+            Ok::<_, anyhow::Error>(crate::i18n::tr("Restored {} files from {} (restart the app)").replacen("{}", &r.restored.len().to_string(), 1).replacen("{}", &latest.name, 1))
         })(),
         UserAction::ClearSearchHistory => yt_core::search_history::clear().map(|_| "Search history cleared".to_string()),
         UserAction::SwitchAccount(id) => {
@@ -1796,7 +1796,7 @@ fn run_action(session: &Mutex<Option<yt_core::session::Session>>, a: &UserAction
         UserAction::RemoveAccount(id) => {
             return match yt_core::accounts::remove(id) {
                 Ok(_) => ("Account removed".into(), true),
-                Err(e) => (format!("Couldn't remove: {e}"), false),
+                Err(e) => (crate::i18n::tr("Couldn't remove: {}").replace("{}", &e.to_string()), false),
             }
         }
     };
