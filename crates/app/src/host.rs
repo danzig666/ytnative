@@ -424,6 +424,8 @@ pub struct AppRig {
     subs_global: Option<(bool, String)>,
     /// `ui_language` the translations were last switched to.
     applied_language: String,
+    /// The language YouTube's lists were last asked in (None: not yet).
+    applied_hl: Option<&'static str>,
     /// `content_country` YouTube's requests were last switched to (None: not yet).
     applied_country: Option<String>,
     mounter: Mount,
@@ -532,6 +534,7 @@ impl AppRig {
             subs_seen: (false, String::new()),
             subs_global: None,
             applied_language: String::new(),
+            applied_hl: None,
             applied_country: None,
             mounter: Mount,
             store,
@@ -1017,6 +1020,18 @@ impl AppRig {
         if self.store.settings.ui_language != self.applied_language {
             self.applied_language = self.store.settings.ui_language.clone();
             crate::i18n::set_language(&self.applied_language, plx_platform::i18n::current().format_locale());
+        }
+        // YouTube is asked in the interface language: titles come back as the website shows them
+        // to that viewer (the original, or the channel's own translation into that language),
+        // not the English translation a channel may have added (#19).
+        let hl = crate::i18n::current();
+        if self.applied_hl != Some(hl) {
+            yt_core::innertube::set_content_language(hl);
+            // Another language: the lists reload in it.
+            if self.applied_hl.is_some() {
+                self.clear_feeds();
+            }
+            self.applied_hl = Some(hl);
         }
         if self.applied_country.as_deref() != Some(self.store.settings.content_country.as_str()) {
             yt_core::innertube::set_content_country(&self.store.settings.content_country);

@@ -18,6 +18,22 @@ pub fn content_country() -> Option<String> {
     (!g.is_empty()).then(|| g.clone())
 }
 
+static CONTENT_LANGUAGE: std::sync::RwLock<String> = std::sync::RwLock::new(String::new());
+
+/// Language of the content YouTube returns (InnerTube `hl`: "de", "hu"...); "" = English. Titles
+/// come back in it (a channel's own translation of a title when it has one for that language, else
+/// the original), and so do the lines under them ("vor 3 Tagen"). Stream requests (`player`) stay
+/// in English: their refusals are read by their wording (`streams::is_age_refusal`).
+pub fn set_content_language(hl: &str) {
+    *CONTENT_LANGUAGE.write().unwrap() = hl.trim().to_string();
+}
+
+/// The content language set with [`set_content_language`], if any.
+pub fn content_language() -> Option<String> {
+    let l = CONTENT_LANGUAGE.read().unwrap();
+    (!l.is_empty() && l.as_str() != "en").then(|| l.clone())
+}
+
 /// Client profiles. VISIONOS returns direct (un-ciphered, no "n" challenge, no PO token) HTTPS
 /// URLs, so no JavaScript engine is needed. TVHTML5 is the logged-in TV client.
 /// `Profile` calls with a data-driven profile from `crate::clients` (what `streams::resolve` uses).
@@ -129,6 +145,9 @@ impl Api<'_> {
         body["context"] = json!({ "client": ctx });
         if let Some(gl) = content_country() {
             body["context"]["client"]["gl"] = json!(gl);
+        }
+        if let Some(hl) = content_language().filter(|_| endpoint != "player") {
+            body["context"]["client"]["hl"] = json!(hl);
         }
         let mut req = self
             .http

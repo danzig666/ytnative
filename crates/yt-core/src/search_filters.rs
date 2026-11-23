@@ -190,32 +190,51 @@ pub fn newest_first(params: &str) -> bool {
     decode_base64(params).is_some_and(|b| b.starts_with(&[0x08, 0x02]))
 }
 
+/// The words that make a card line an age, in the interface languages YouTube is asked in
+/// ("3 days ago", "vor 3 Tagen", "3 nappal ezelőtt", "hace 3 días", "il y a 3 jours",
+/// "3 дня назад", "3 giorni fa"); lower case, the line padded with a space at each end.
+const AGO: [&str; 7] = [" ago ", " vor ", " ezelőtt ", " hace ", " il y a ", " назад ", " fa "];
+
+/// Time units by the start of their word in the same languages (lower case).
+const UNITS: [(&[&str], u64); 7] = [
+    (&["second", "sekunde", "másodperc", "segundo", "seconde", "секунд"], 1),
+    (&["minute", "minut", "perc", "минут"], 60),
+    (&["hour", "stunde", "óra", "órá", "hora", "heure", "час", "ora", "ore"], 3600),
+    (&["day", "tag", "nap", "día", "dia", "jour", "дн", "день", "giorn"], 86_400),
+    (&["week", "woche", "hét", "hete", "semana", "semaine", "недел", "settiman"], 7 * 86_400),
+    (&["month", "monat", "hónap", "mes", "mois", "месяц"], 30 * 86_400),
+    (&["year", "jahr", "év", "año", "an", "год", "лет"], 365 * 86_400),
+];
+
+/// The viewers of a live stream ("1.2K watching", "1234 Zuschauer", ...): a live card's line.
+const WATCHING: [&str; 8] = ["watching", "zuschauer", "néz", "espectador", "spectateur", "смотр", "зрител", "spettator"];
+
+/// A card line of a past live stream ("Streamed 2 days ago", "vor 2 Tagen gestreamt", ...).
+pub fn was_streamed(line: &str) -> bool {
+    ["Streamed ", "gestreamt", "Streamelve", "Emitido", "Diffusé", "Трансляция", "Trasmesso"].iter().any(|w| line.contains(w))
+}
+
 /// How long ago a video was published, from its card's lines ("1.2K views • 3 days ago",
 /// "Streamed 5 hours ago"), in seconds; live streams count as now. `None` for cards without an age
-/// (channels, playlists). YouTube answers this app in English (`hl=en`).
+/// (channels, playlists). The lines are in the language YouTube was asked in
+/// (`innertube::set_content_language`).
 pub fn age_secs(lines: &[String]) -> Option<u64> {
     for line in lines {
-        if line.contains("watching") {
+        let low = line.to_lowercase();
+        if WATCHING.iter().any(|w| low.contains(w)) {
             return Some(0);
         }
-        for part in line.split('\u{2022}') {
-            let words: Vec<&str> = part.split_whitespace().collect();
-            let Some(i) = words.iter().position(|w| *w == "ago") else { continue };
-            if i < 2 {
+        for part in low.split('\u{2022}') {
+            if !AGO.iter().any(|a| format!(" {} ", part.trim()).contains(a)) {
                 continue;
             }
-            let Ok(n) = words[i - 2].parse::<u64>() else { continue };
-            let unit = match words[i - 1].trim_end_matches('s') {
-                "second" => 1,
-                "minute" => 60,
-                "hour" => 3600,
-                "day" => 86_400,
-                "week" => 7 * 86_400,
-                "month" => 30 * 86_400,
-                "year" => 365 * 86_400,
-                _ => continue,
-            };
-            return Some(n * unit);
+            let words: Vec<&str> = part.split_whitespace().collect();
+            for w in words.windows(2) {
+                let Ok(n) = w[0].parse::<u64>() else { continue };
+                if let Some((_, unit)) = UNITS.iter().find(|(stems, _)| stems.iter().any(|st| w[1].starts_with(st))) {
+                    return Some(n * unit);
+                }
+            }
         }
     }
     None
@@ -388,3 +407,50 @@ mod tests {
     }
 }
 
+
+/// Card lines as YouTube words them in each interface language (2026-11 answers).
+#[cfg(test)]
+mod language_tests {
+    use super::{age_secs, was_streamed};
+    fn age(s: &str) -> Option<u64> {
+        age_secs(&[s.to_string()])
+    }
+    const D: u64 = 86_400;
+
+    #[test]
+    fn ages_in_every_interface_language() {
+        assert_eq!(age("1.2K views \u{2022} 3 days ago"), Some(3 * D));
+        assert_eq!(age("76.911 Aufrufe \u{2022} vor 13 Tagen"), Some(13 * D));
+        assert_eq!(age("vor 2 Wochen gestreamt"), Some(14 * D));
+        assert_eq!(age("vor 1 Jahr"), Some(365 * D));
+        assert_eq!(age("76 E megtekintés \u{2022} 21 órával ezelőtt"), Some(21 * 3600));
+        assert_eq!(age("Streamelve 2 héttel ezelőtt"), Some(14 * D));
+        assert_eq!(age("3 évvel ezelőtt"), Some(3 * 365 * D));
+        assert_eq!(age("hace 46 minutos"), Some(46 * 60));
+        assert_eq!(age("Emitido hace 3 meses"), Some(90 * D));
+        assert_eq!(age("il y a 1 an"), Some(365 * D));
+        assert_eq!(age("Diffusé il y a 2 semaines"), Some(14 * D));
+        assert_eq!(age("13 дней назад"), Some(13 * D));
+        assert_eq!(age("Трансляция закончилась 2 месяца назад"), Some(60 * D));
+        assert_eq!(age("5 лет назад"), Some(5 * 365 * D));
+        assert_eq!(age("21 ore fa"), Some(21 * 3600));
+        assert_eq!(age("Trasmesso in streaming 7 mesi fa"), Some(210 * D));
+        assert_eq!(age("6 anni fa"), Some(6 * 365 * D));
+    }
+
+    #[test]
+    fn view_counts_and_names_are_not_ages() {
+        assert_eq!(age("347 930 megtekintés"), None);
+        assert_eq!(age("1,2 Mio. Aufrufe"), None);
+        assert_eq!(age("@channel \u{2022} 2 Mio. Abonnenten"), None);
+        assert_eq!(age("63 videó"), None);
+    }
+
+    #[test]
+    fn past_streams_in_every_interface_language() {
+        for l in ["Streamed 2 days ago", "vor 2 Tagen gestreamt", "Streamelve 8 nappal ezelőtt", "Emitido hace 2 días", "Diffusé il y a 1 mois", "Трансляция закончилась 2 дня назад", "Trasmesso in streaming 2 mesi fa"] {
+            assert!(was_streamed(l), "{l}");
+        }
+        assert!(!was_streamed("vor 2 Tagen"));
+    }
+}

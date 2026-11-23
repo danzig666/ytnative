@@ -327,16 +327,59 @@ pub fn parse_watch(resp: &Value) -> WatchInfo {
     w
 }
 
-/// A date in YouTube's English wording ("Published on Nov 10, 2014", "Premiered Jul 1, 2020",
-/// "Streamed live on Mar 3, 2021"): (year, month, day).
+/// Month names by their start, in the interface languages YouTube is asked in (lower case;
+/// "juin" / "juil" need four letters).
+const MONTHS: [&[&str]; 12] = [
+    &["jan", "ene", "gen", "янв"],
+    &["feb", "fév", "фев"],
+    &["mar", "mär", "már", "мар"],
+    &["apr", "ápr", "abr", "avr", "апр"],
+    &["may", "máj", "mai", "mag", "мая", "май"],
+    &["jun", "jún", "juin", "giu", "июн"],
+    &["jul", "júl", "juil", "lug", "июл"],
+    &["aug", "ago", "aoû", "авг"],
+    &["sep", "sze", "set", "сен"],
+    &["oct", "okt", "ott", "окт"],
+    &["nov", "ноя"],
+    &["dec", "dez", "dic", "déc", "дек"],
+];
+
+/// A date in YouTube's wording, in the language it was asked in: "Published on Nov 10, 2014",
+/// "Veröffentlicht am 23.04.2005", "Közzététel dátuma: 2005. ápr. 23.", "Publicado el 23 abr
+/// 2005", "Дата публикации: 23 апр. 2005 г.": (year, month, day).
 pub fn parse_date(s: &str) -> Option<(i32, u32, u32)> {
-    const MONTHS: [&str; 12] = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
-    let words: Vec<&str> = s.split(|c: char| c.is_whitespace() || c == ',').filter(|w| !w.is_empty()).collect();
+    let year = |w: &str| w.parse::<i32>().ok().filter(|y| (1990..=2200).contains(y));
+    let day = |w: &str| w.parse::<u32>().ok().filter(|d| (1..=31).contains(d));
+    let month = |w: &str| {
+        let w = w.to_lowercase();
+        if w.chars().count() < 3 {
+            return None;
+        }
+        // "juin" / "juil" before "jun" / "jul".
+        let four = [("juin", 6), ("juil", 7)].iter().find(|(p, _)| w.starts_with(p)).map(|&(_, m)| m);
+        four.or_else(|| MONTHS.iter().position(|names| names.iter().any(|n| w.starts_with(n))).map(|i| i as u32 + 1))
+    };
+    let words: Vec<&str> = s.split(|c: char| c.is_whitespace() || c == ',').map(|w| w.trim_end_matches('.')).filter(|w| !w.is_empty()).collect();
+    // All in numbers: "23.04.2005".
+    for w in &words {
+        let n: Vec<&str> = w.split('.').collect();
+        if let [d, m, y] = n[..] {
+            if let (Some(d), Some(m), Some(y)) = (day(d), m.parse::<u32>().ok().filter(|m| (1..=12).contains(m)), year(y)) {
+                return Some((y, m, d));
+            }
+        }
+    }
     words.windows(3).find_map(|w| {
-        let m = MONTHS.iter().position(|m| w[0].len() >= 3 && w[0][..3].eq_ignore_ascii_case(m))? as u32 + 1;
-        let d: u32 = w[1].parse().ok().filter(|d| (1..=31).contains(d))?;
-        let y: i32 = w[2].parse().ok().filter(|y| (1990..=2200).contains(y))?;
-        Some((y, m, d))
+        if let (Some(m), Some(d), Some(y)) = (month(w[0]), day(w[1]), year(w[2])) {
+            return Some((y, m, d)); // Nov 10, 2014
+        }
+        if let (Some(d), Some(m), Some(y)) = (day(w[0]), month(w[1]), year(w[2])) {
+            return Some((y, m, d)); // 23 abr 2005
+        }
+        if let (Some(y), Some(m), Some(d)) = (year(w[0]), month(w[1]), day(w[2])) {
+            return Some((y, m, d)); // 2005. ápr. 23.
+        }
+        None
     })
 }
 
@@ -717,5 +760,27 @@ mod like_entity_tests {
         assert!(!entity_is_video(&key("gPNiuyYirfw_ai_summaries"), "gPNiuyYirfw"));
         let w = parse_watch(&resp);
         assert_eq!(w.like_status, LikeStatus::Like);
+    }
+}
+
+#[cfg(test)]
+mod date_language_tests {
+    use super::parse_date;
+
+    /// "Published on" as YouTube words it in each interface language (2026-11 answers).
+    #[test]
+    fn dates_in_every_interface_language() {
+        let d = Some((2005, 4, 23));
+        assert_eq!(parse_date("Published on Apr 23, 2005"), d);
+        assert_eq!(parse_date("Veröffentlicht am 23.04.2005"), d);
+        assert_eq!(parse_date("Közzététel dátuma: 2005. ápr. 23."), d);
+        assert_eq!(parse_date("Publicado el 23 abr 2005"), d);
+        assert_eq!(parse_date("Publiée le 23 avr. 2005"), d);
+        assert_eq!(parse_date("Дата публикации: 23 апр. 2005 г."), d);
+        assert_eq!(parse_date("Pubblicato il giorno 23 apr 2005"), d);
+        assert_eq!(parse_date("Publiée le 3 juin 2021"), Some((2021, 6, 3)));
+        assert_eq!(parse_date("Publiée le 3 juil. 2021"), Some((2021, 7, 3)));
+        assert_eq!(parse_date("vor 3 Tagen"), None);
+        assert_eq!(parse_date("hace 3 días"), None);
     }
 }

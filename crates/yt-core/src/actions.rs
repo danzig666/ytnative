@@ -398,12 +398,20 @@ fn classify(label: &str, cmd: &MenuCommand, raw: &Value) -> MenuKind {
         MenuCommand::Panel { .. } => MenuKind::More,
         MenuCommand::Feedback { .. } => {
             let s = raw.to_string();
+            // By the label in English; in other languages by what the command does (2026-11):
+            // "Don't recommend channel" removes the channel's cards, "Show fewer Shorts" dismisses
+            // the shelf, "Remove from watch history" hides the card with a toast, and "Not
+            // interested" only hides it.
             if l.contains("history") {
                 MenuKind::RemoveFromHistory
             } else if l.contains("recommend channel") || s.contains("removeItemAction") {
                 MenuKind::DontRecommendChannel
             } else if l.contains("not interested") || s.contains("DISMISSAL_FOLLOW_UP") {
                 MenuKind::NotInterested
+            } else if s.contains("DISMISS_SELECTED_SHELF") {
+                MenuKind::Feedback
+            } else if s.contains("hideEnclosingContainer") {
+                if s.contains("openPopupAction") { MenuKind::RemoveFromHistory } else { MenuKind::NotInterested }
             } else {
                 MenuKind::Feedback
             }
@@ -1126,5 +1134,33 @@ mod live_bell {
         let o = info.notifications.iter().find(|o| want.as_deref().map_or(o.selected, |w| o.state == w)).expect("an option");
         println!("setting {} ({})", o.state, o.label);
         println!("{:?}", s.set_notifications(&o.params));
+    }
+}
+
+#[cfg(test)]
+mod language_tests {
+    use super::{menu_actions, MenuKind};
+    use serde_json::json;
+
+    /// A Home or History tile's feedback items as the TV client sends them in Hungarian (2026-11):
+    /// the kinds come from what each command does, not from its English label.
+    #[test]
+    fn feedback_items_are_told_apart_in_any_language() {
+        let item = |label: &str, ep: serde_json::Value| json!({"menuServiceItemRenderer": {"text": {"runs": [{"text": label}]}, "serviceEndpoint": ep}});
+        let tile = json!({"tileRenderer": {"menu": {"menuRenderer": {"items": [
+            item("Nem érdekel", json!({"feedbackEndpoint": {"feedbackToken": "A", "uiActions": {"hideEnclosingContainer": true}}})),
+            item("Eltávolítás a megtekintési előzmények közül", json!({"feedbackEndpoint": {"feedbackToken": "B", "actions": [
+                {"openPopupAction": {"popup": {"overlayMessageRenderer": {"title": {"runs": [{"text": "Eltávolítva"}]}}}, "popupType": "TOAST"}}
+            ], "uiActions": {"hideEnclosingContainer": true}}})),
+            item("Kevesebb rövid videó megjelenítése", json!({"feedbackEndpoint": {"feedbackToken": "C", "actions": [
+                {"signalAction": {"signal": "DISMISS_SELECTED_SHELF"}},
+                {"openPopupAction": {"popup": {"overlayToastRenderer": {"title": {"simpleText": "Rendben"}}}, "popupType": "TOAST"}}
+            ]}})),
+            item("Ne javasold ezt a csatornát", json!({"openPopupAction": {"popup": {"overlaySectionRenderer": {"overlay": {"items": [
+                {"compactLinkRenderer": {"serviceEndpoint": {"commandExecutorCommand": {"commands": [{"feedbackEndpoint": {"feedbackToken": "D", "actions": [{"removeItemAction": {"childId": "x"}}], "uiActions": {"hideEnclosingContainer": true}}}]}}}}
+            ]}}}}})),
+        ]}}}});
+        let kinds: Vec<MenuKind> = menu_actions(&tile).iter().map(|a| a.kind).collect();
+        assert_eq!(kinds, [MenuKind::NotInterested, MenuKind::RemoveFromHistory, MenuKind::Feedback, MenuKind::DontRecommendChannel]);
     }
 }

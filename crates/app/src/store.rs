@@ -669,7 +669,7 @@ impl<'a> Filter<'a> {
             return false;
         }
         // Live now, or a past live stream ("Streamed 2 days ago"; requests are made in English).
-        if self.hide_streams && (it.kind == ItemKind::Live || it.lines.iter().any(|l| l.contains("Streamed "))) {
+        if self.hide_streams && (it.kind == ItemKind::Live || it.lines.iter().any(|l| yt_core::search_filters::was_streamed(l))) {
             return false;
         }
         if self.s.hide_mixes && it.kind == ItemKind::Mix {

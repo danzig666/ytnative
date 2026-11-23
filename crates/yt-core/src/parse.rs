@@ -231,12 +231,22 @@ fn lockup(l: &Value) -> Option<Item> {
     let img = if img.is_null() { &l["contentImage"]["collectionThumbnailViewModel"]["primaryThumbnail"]["thumbnailViewModel"] } else { img };
     let mut badge = None;
     let mut progress = None;
+    // Live and mix badges are told by their style and icon: their text is in the request's
+    // language ("LIVE", "ÉLŐ"; "Mix", "Egyveleg").
+    let (mut live, mut mix) = (false, false);
+    let mut seen = |b: &Value| {
+        let icon = |name: &str| b["icon"]["sources"].as_array().into_iter().flatten().any(|s| s["clientResource"]["imageName"].as_str() == Some(name));
+        live |= b["badgeStyle"].as_str() == Some("THUMBNAIL_OVERLAY_BADGE_STYLE_LIVE") || icon("LIVE");
+        mix |= icon("MIX");
+    };
     for o in img["overlays"].as_array().into_iter().flatten() {
         for b in o["thumbnailBottomOverlayViewModel"]["badges"].as_array().into_iter().flatten() {
+            seen(&b["thumbnailBadgeViewModel"]);
             if let Some(t) = b["thumbnailBadgeViewModel"]["text"].as_str() {
                 badge = Some(t.to_string());
             }
         }
+        seen(&o["thumbnailOverlayBadgeViewModel"]["thumbnailBadges"][0]["thumbnailBadgeViewModel"]);
         if let Some(t) = o["thumbnailOverlayBadgeViewModel"]["thumbnailBadges"][0]["thumbnailBadgeViewModel"]["text"].as_str() {
             badge = Some(t.to_string());
         }
@@ -253,10 +263,10 @@ fn lockup(l: &Value) -> Option<Item> {
         "LOCKUP_CONTENT_TYPE_CHANNEL" => ItemKind::Channel,
         _ => ItemKind::Unknown,
     };
-    if badge.as_deref().is_some_and(|b| b.eq_ignore_ascii_case("live")) {
+    if live || badge.as_deref().is_some_and(|b| b.eq_ignore_ascii_case("live")) {
         kind = ItemKind::Live;
     }
-    if badge.as_deref().is_some_and(|b| b.to_ascii_lowercase().contains("mix")) {
+    if mix || badge.as_deref().is_some_and(|b| b.to_ascii_lowercase().contains("mix")) {
         kind = ItemKind::Mix;
     }
     let cmd = &l["rendererContext"]["commandContext"]["onTap"]["innertubeCommand"];
@@ -464,5 +474,30 @@ mod members_only_tests {
         let tile = json!({"metadata": {"badge": {"metadataBadgeRenderer": {"style": "BADGE_STYLE_TYPE_PROMOTED"}}},
             "menu": {"text": "BADGE_STYLE_TYPE_MEMBERS_ONLY"}});
         assert!(!members_only(&tile));
+    }
+}
+
+#[cfg(test)]
+mod language_tests {
+    use crate::model::ItemKind;
+    use serde_json::json;
+
+    /// A search result's badge as the TV client sends it in Hungarian (2026-11): live and mix by
+    /// style and icon, whatever the text.
+    fn lockup(content_type: &str, id: &str, text: &str, style: &str, icon: &str) -> serde_json::Value {
+        json!({"contentId": id, "contentType": content_type,
+            "contentImage": {"thumbnailViewModel": {"overlays": [{"thumbnailOverlayBadgeViewModel": {"thumbnailBadges": [{"thumbnailBadgeViewModel":
+                {"text": text, "badgeStyle": style, "icon": {"sources": [{"clientResource": {"imageName": icon}}]}}}]}}]}},
+            "metadata": {"lockupMetadataViewModel": {"title": {"content": "x"}}}})
+    }
+
+    #[test]
+    fn live_and_mix_badges_in_any_language() {
+        let live = lockup("LOCKUP_CONTENT_TYPE_VIDEO", "v1", "ÉLŐ", "THUMBNAIL_OVERLAY_BADGE_STYLE_LIVE", "LIVE");
+        assert_eq!(super::lockup(&live).unwrap().kind, ItemKind::Live);
+        let mix = lockup("LOCKUP_CONTENT_TYPE_PLAYLIST", "RDx", "Egyveleg", "THUMBNAIL_OVERLAY_BADGE_STYLE_DEFAULT", "MIX");
+        assert_eq!(super::lockup(&mix).unwrap().kind, ItemKind::Mix);
+        let list = lockup("LOCKUP_CONTENT_TYPE_PLAYLIST", "PLx", "63 videó", "THUMBNAIL_OVERLAY_BADGE_STYLE_DEFAULT", "PLAYLISTS");
+        assert_eq!(super::lockup(&list).unwrap().kind, ItemKind::Playlist);
     }
 }

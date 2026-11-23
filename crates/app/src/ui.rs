@@ -785,12 +785,15 @@ fn link_icon(c: &Card) -> icon::Kind {
         Some(yt_core::model::Endpoint::Browse { browse_id, .. }) => browse_id.as_str(),
         _ => "",
     };
-    // By title first where YouTube points several links at the same page (requests are in English).
-    let t = c.title.to_ascii_lowercase();
-    if t == "watch later" {
+    // By title first where YouTube points several links at the same page (the titles are in the
+    // language YouTube is asked in: the interface's).
+    let t = c.title.to_lowercase();
+    const LATER: [&str; 7] = ["watch later", "später ansehen", "megnézendő", "ver más tarde", "à regarder plus tard", "смотреть позже", "guarda più tardi"];
+    const LIKED: [&str; 8] = ["liked", "mag ich", "positiv bewertet", "kedvelt", "que me gustan", "vidéos j'aime", "понравившиеся", "piaciuti"];
+    if LATER.iter().any(|w| t.starts_with(w)) {
         return K::Clock;
     }
-    if t.starts_with("liked") {
+    if LIKED.iter().any(|w| t.starts_with(w) || t.contains(w)) {
         return K::ThumbUp;
     }
     match id {

@@ -44,6 +44,10 @@ fn run() -> Result<()> {
         if cfg.scraped { "scraped" } else { "fallback" },
         if cfg.visitor_data.is_some() { "yes" } else { "no" },
     );
+    // YTCLI_HL=de: ask YouTube in another language, as the app does for its interface language.
+    if let Ok(hl) = std::env::var("YTCLI_HL") {
+        yt_core::innertube::set_content_language(&hl);
+    }
     let api = Api { http: &http, cfg: &cfg };
 
     match args.first().map(String::as_str) {

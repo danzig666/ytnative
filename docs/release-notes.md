@@ -7,3 +7,4 @@
 - Fixed: the player's Save to playlist button is filled when the video is in one of your playlists (#17)
 - Fixed: Save to playlist opens at the top of the list, with the playlists that already hold the video first (#18)
 - New: the player's like and dislike buttons show their counts when focused (#20)
+- Fixed: titles in the lists are the ones YouTube shows you on its website: YouTube is now asked in the interface language, so a channel's English translation of its titles no longer replaces the original for other languages; the lines under the titles ("3 days ago", views) and YouTube's row names are in the interface language too (#19)
