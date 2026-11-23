@@ -34,7 +34,13 @@ fn launch_point() -> String {
     format!("{}_default", plx_base::paths::app_id())
 }
 
-/// At start: arms the first publish when the setting is on.
+/// The cards are wanted: the setting is on and child mode is off (the cards would show the
+/// account's own subscriptions to whoever is at the TV, outside the app's child mode).
+pub fn wanted(s: &crate::settings::Settings) -> bool {
+    s.home_recommendations && !s.child_mode
+}
+
+/// At start: arms the first publish when the cards are [`wanted`].
 pub fn start(enabled: bool, now_ms: u32) {
     ENABLED.store(enabled, Ordering::SeqCst);
     if enabled {
@@ -56,12 +62,17 @@ pub fn tick(now_ms: u32) {
     let started = plx_base::task::spawn("home recommendations", || {
         match cards() {
             Ok(items) if !items.is_empty() => {
-                if let Err(e) = publish(&items) {
+                match publish(&items) {
                     // A TV that refuses the call refuses it every time: say so once and stop.
-                    GAVE_UP.store(true, Ordering::SeqCst);
-                    crate::log(&format!("recommendations: the TV refused the card list, not retrying: {e}"));
-                } else {
-                    crate::log(&format!("recommendations: {} cards published", items.len()));
+                    Err(e) if refused(&e) => {
+                        GAVE_UP.store(true, Ordering::SeqCst);
+                        crate::log(&format!("recommendations: the TV refused the card list, not retrying: {e}"));
+                    }
+                    // Anything else (no bus yet, a timeout) is tried again at the next half hour.
+                    Err(e) => crate::log(&format!("recommendations: the card list was not published this time: {e}")),
+                    // Switched off while this ran: `set_enabled`'s removal may have come first.
+                    Ok(()) if !ENABLED.load(Ordering::SeqCst) => clear(),
+                    Ok(()) => crate::log(&format!("recommendations: {} cards published", items.len())),
                 }
             }
             Ok(_) => crate::log("recommendations: nothing to publish (no videos in the feed)"),
@@ -74,7 +85,7 @@ pub fn tick(now_ms: u32) {
     }
 }
 
-/// The setting changed: on publishes at once, off removes the cards.
+/// [`wanted`] changed: on publishes at once, off removes the cards.
 pub fn set_enabled(enabled: bool, now_ms: u32) {
     let was = ENABLED.swap(enabled, Ordering::SeqCst);
     if enabled {
@@ -243,6 +254,22 @@ mod tests {
         assert_eq!(card["onClick"]["targetAppId"], plx_base::paths::app_id());
         assert_eq!(card["image"]["width"], 480);
         assert!(card.to_string().to_lowercase().find("token").is_none());
+    }
+
+    #[test]
+    fn no_cards_in_child_mode() {
+        let mut s = crate::settings::Settings { home_recommendations: true, ..Default::default() };
+        assert!(wanted(&s));
+        s.child_mode = true;
+        assert!(!wanted(&s));
+        s = crate::settings::Settings::default();
+        assert!(!wanted(&s));
+    }
+
+    #[test]
+    fn only_a_refusal_stops_the_publishing() {
+        assert!(refused("Not permitted to send to com.webos.service.applicationManager"));
+        assert!(!refused("no bus: timed out"));
     }
 
     #[test]

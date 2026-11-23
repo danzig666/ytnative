@@ -1,1 +1,3 @@
 - Fixed: UM7100, UM7600 and other 2019 LCD TVs whose sandbox lacks /dev/rtkmem, without root: ytnative now installs LG's own sandbox settings for Developer Mode apps, which add the device; after unplugging the TV once, videos should play (#8)
+- New: the newest videos of your subscriptions as cards in the TV's home Recommended row (Settings > Interface, off by default, never in child mode); thanks to cchrkk (#12, #14)
+- New: Italian interface; thanks to cchrkk (#15)

@@ -352,7 +352,7 @@ fn main() {
         // The simulator would register a second "TV" for phone casting on the signed-in account;
         // opt in with YTNATIVE_SIM_LOUNGE=1.
         update::start_auto_check();
-        recommended::start(rig.store.settings.home_recommendations, sdl::SDL_GetTicks());
+        recommended::start(recommended::wanted(&rig.store.settings), sdl::SDL_GetTicks());
         let lounge_on = rig.store.settings.lounge_enabled && (!cfg!(windows) || std::env::var_os("YTNATIVE_SIM_LOUNGE").is_some());
         let mut lounge = if lounge_on {
             match lounge::Lounge::start(&rig.store.settings.device_name, rig.store.settings.dial_enabled) {

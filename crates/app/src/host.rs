@@ -2149,7 +2149,7 @@ impl Rig<YtHost> for AppRig {
                 let kept = self.store.settings.keep_play_next;
                 let searches = self.store.settings.search_history;
                 let audio_only = self.store.settings.audio_only;
-                let recommendations = self.store.settings.home_recommendations;
+                let recommendations = crate::recommended::wanted(&self.store.settings);
                 f(&mut self.store.settings);
                 self.save_settings();
                 // "Search history" switched off forgets the searches made so far. (Done here, not
@@ -2171,10 +2171,11 @@ impl Rig<YtHost> for AppRig {
                 {
                     self.player.same_volume = self.store.settings.same_volume;
                 }
-                // "Recommendations on the TV's Home": switched on publishes the cards at once,
-                // switched off takes them away again (`recommended.rs`).
-                if self.store.settings.home_recommendations != recommendations {
-                    crate::recommended::set_enabled(self.store.settings.home_recommendations, self.now_ms);
+                // "Recommendations on the TV's Home" (or child mode) switched: on publishes the
+                // cards at once, off takes them away again (`recommended.rs`).
+                let wanted = crate::recommended::wanted(&self.store.settings);
+                if wanted != recommendations {
+                    crate::recommended::set_enabled(wanted, self.now_ms);
                 }
             }
             YtFx::SignInStart => {
