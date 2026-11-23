@@ -98,6 +98,17 @@ fn run() -> Result<()> {
             println!("{endpoint} -> {out} ({} KiB)", std::fs::metadata(out)?.len() / 1024);
             Ok(())
         }
+        // signedin <video>: the signed-in TV client's route alone (the app's last resort), timed.
+        Some("signedin") => {
+            let id = video_id(args.get(1).context("video id")?)?;
+            let t = token(&api)?;
+            let t0 = std::time::Instant::now();
+            match yt_core::streams::signed_in(&api, &id, &t.access_token)? {
+                Ok(r) => println!("OK in {} ms: {} formats, hls={} sabr={}", t0.elapsed().as_millis(), r.adaptive.len(), r.hls.is_some(), r.sabr.is_some()),
+                Err(reason) => println!("refused in {} ms: {reason}", t0.elapsed().as_millis()),
+            }
+            Ok(())
+        }
         Some("subs") => subs(&api),
         Some("streams") => {
             let id = video_id(args.get(1).context("missing video id")?)?;
