@@ -8,7 +8,7 @@ use super::common;
 use crate::host::{YtArg, YtFx, YtHost};
 use crate::play_queue::PlayQueue;
 use crate::player::Phase;
-use crate::settings::{OkAction, PlaybackMode, PlayerStyle};
+use crate::settings::{KeyPair, OkAction, PlaybackMode, PlayerStyle};
 use crate::ui;
 use plx_machine::machine::{
     Canon, Cx, Edge, Effects, EntryId, FocusKey, Fx, GroupId, Handled, InputEvent, InputKind, Key, LogicalState, Machine, NavOp, ScreenEvent,
@@ -52,6 +52,8 @@ pub struct PlayerScreen {
     ended_handled: bool,
     /// Show the storyboard preview until this time (ms, views.now_ms clock).
     preview_until: u32,
+    /// "Confirm seeking with OK": where OK will jump (ms).
+    seek_target: Option<u64>,
     /// Last Magic Remote pointer position (OSD button hover).
     pointer: Option<(f32, f32)>,
     /// Keyboard selection on the OSD buttons (see [`osd_button`] for the order).
@@ -92,6 +94,7 @@ impl PlayerScreen {
             hud: true,
             ended_handled: false,
             preview_until: 0,
+            seek_target: None,
             pointer: None,
             osd_sel: None,
             sugg_sel: None,
@@ -132,6 +135,7 @@ impl PlayerScreen {
 
     /// Previous / next video of the list this one was started from, in play order.
     fn step_queue(&mut self, dir: i32, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
+        self.drop_seek_target();
         let Some(q) = cx.views.store.play_queue.as_ref().filter(|q| q.contains(&self.video_id)) else {
             fx.push(Fx::App(YtFx::Toast("No other videos in this list".into())));
             return;
@@ -144,9 +148,57 @@ impl PlayerScreen {
 
     fn seek(&mut self, dir: i64, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
         let step = cx.views.store.settings.seek_step_secs.max(1) as i64 * 1000;
+        let st = cx.views.player;
+        if cx.views.store.settings.seek_confirm && !st.live && st.duration_ms > 0 {
+            // "Confirm seeking with OK": the target moves on the bar; OK jumps there.
+            let from = self.seek_target.unwrap_or(st.position_ms) as i64;
+            self.seek_target = Some((from + dir * step).clamp(0, st.duration_ms as i64) as u64);
+            self.preview_until = u32::MAX;
+            self.show_hud(cx, fx);
+            return;
+        }
         fx.push(Fx::App(YtFx::SeekBy(dir * step)));
         self.preview_until = cx.views.now_ms + 1500;
         self.show_hud(cx, fx);
+    }
+
+    /// The seek target waiting for OK, put down (BACK, the controls hidden).
+    fn drop_seek_target(&mut self) -> bool {
+        self.preview_until = 0;
+        self.seek_target.take().is_some()
+    }
+
+    /// CH+ / CH- or fast-forward / rewind, as the settings have them (`dir`: -1 back, 1 on).
+    fn key_pair(&mut self, what: KeyPair, dir: i32, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
+        match what {
+            KeyPair::Video => self.step_queue(dir, cx, fx),
+            KeyPair::Seek => self.seek(dir as i64, cx, fx),
+            KeyPair::Speed => {
+                fx.push(Fx::App(YtFx::SetSpeed(super::menu::step_speed(cx.views.player.rate, dir))));
+                self.show_hud(cx, fx);
+            }
+            KeyPair::Chapter => {
+                let st = cx.views.player;
+                let Some(w) = st.extras.watch.as_ref().filter(|w| !w.chapters.is_empty()) else {
+                    return self.seek(dir as i64, cx, fx);
+                };
+                let pos = st.position_ms;
+                let at = yt_core::watch::chapter_at(&w.chapters, pos).unwrap_or(0);
+                let to = if dir > 0 {
+                    w.chapters.get(at + 1).map(|c| c.start_ms)
+                } else if pos.saturating_sub(w.chapters[at].start_ms) > 3000 {
+                    // Back within a chapter: its start first, as players do.
+                    Some(w.chapters[at].start_ms)
+                } else {
+                    Some(w.chapters[at.saturating_sub(1)].start_ms)
+                };
+                if let Some(to) = to {
+                    fx.push(Fx::App(YtFx::SeekTo(to)));
+                    self.preview_until = cx.views.now_ms + 1500;
+                    self.show_hud(cx, fx);
+                }
+            }
+        }
     }
 }
 
@@ -596,7 +648,7 @@ impl Machine<YtHost> for PlayerScreen {
             }
             ScreenEvent::Timer(T_HIDE) => {
                 match cx.views.player.phase {
-                    Phase::Playing if self.sugg_sel.is_none() => {
+                    Phase::Playing if self.sugg_sel.is_none() && self.seek_target.is_none() => {
                         self.hud = false;
                         self.osd_sel = None;
                         self.pointer = None;
@@ -736,6 +788,24 @@ impl Machine<YtHost> for PlayerScreen {
                 }
                 // Keys take over from the pointer: its last hover no longer highlights a button.
                 self.pointer = None;
+                // "Confirm seeking with OK": OK jumps to the target, BACK puts it down.
+                if let Some(to) = self.seek_target.filter(|_| *edge == Edge::Down) {
+                    match key {
+                        Key::Ok => {
+                            self.drop_seek_target();
+                            fx.push(Fx::App(YtFx::SeekTo(to)));
+                            self.preview_until = cx.views.now_ms + 1500;
+                            self.show_hud(cx, fx);
+                            return Handled::Yes;
+                        }
+                        Key::Back => {
+                            self.drop_seek_target();
+                            fx.invalidate(plx_machine::present::Provenance::Input);
+                            return Handled::Yes;
+                        }
+                        _ => {}
+                    }
+                }
                 // OK let go on a suggestion: a short press plays it (a held one opened its menu).
                 if *key == Key::Ok && *edge != Edge::Down {
                     if let Some((s, opened)) = self.sugg_press {
@@ -918,6 +988,14 @@ impl Machine<YtHost> for PlayerScreen {
                         self.show_hud(cx, fx);
                         Handled::Yes
                     }
+                    (_, WCODE_RW) if cx.views.store.settings.ff_keys != KeyPair::Seek => {
+                        self.key_pair(cx.views.store.settings.ff_keys, -1, cx, fx);
+                        Handled::Yes
+                    }
+                    (_, WCODE_FF) if cx.views.store.settings.ff_keys != KeyPair::Seek => {
+                        self.key_pair(cx.views.store.settings.ff_keys, 1, cx, fx);
+                        Handled::Yes
+                    }
                     (Key::Left, _) | (_, WCODE_RW) => {
                         self.seek(-1, cx, fx);
                         Handled::Yes
@@ -933,11 +1011,11 @@ impl Machine<YtHost> for PlayerScreen {
                         Handled::Yes
                     }
                     (_, WCODE_CH_UP) => {
-                        self.step_queue(-1, cx, fx);
+                        self.key_pair(cx.views.store.settings.channel_keys, -1, cx, fx);
                         Handled::Yes
                     }
                     (_, WCODE_CH_DOWN) => {
-                        self.step_queue(1, cx, fx);
+                        self.key_pair(cx.views.store.settings.channel_keys, 1, cx, fx);
                         Handled::Yes
                     }
                     (Key::Up, _) | (Key::Down, _) if cx.views.store.play_queue.as_ref().is_some_and(|q| q.shorts) => {
@@ -1224,7 +1302,7 @@ impl Screen<YtHost> for PlayerScreen {
         }
         // Seek bar: one piece per chapter with a small clear gap between.
         let bar = Rect::new(96.0, BAR_Y, 1728.0, 8.0);
-        let frac = if st.duration_ms > 0 { (st.position_ms as f32 / st.duration_ms as f32).clamp(0.0, 1.0) } else { 0.0 };
+        let frac = if st.duration_ms > 0 { (self.seek_target.unwrap_or(st.position_ms) as f32 / st.duration_ms as f32).clamp(0.0, 1.0) } else { 0.0 };
         {
             let mut cuts: Vec<f32> = vec![0.0];
             if st.duration_ms > 0 {
@@ -1558,7 +1636,7 @@ impl PlayerScreen {
         let bh = if bar_focus { 8.0 } else { 5.0 };
         let bar = Rect::new(96.0, 836.0 + dy - bh / 2.0, 1728.0, bh);
         self.yt_bar = bar;
-        let frac = if st.duration_ms > 0 { (st.position_ms as f32 / st.duration_ms as f32).clamp(0.0, 1.0) } else { 0.0 };
+        let frac = if st.duration_ms > 0 { (self.seek_target.unwrap_or(st.position_ms) as f32 / st.duration_ms as f32).clamp(0.0, 1.0) } else { 0.0 };
         let mut cuts: Vec<f32> = vec![0.0];
         if st.duration_ms > 0 {
             if let Some(w) = w {

@@ -11,7 +11,7 @@
 //! opens the sub-page). Left and BACK in the results come back to "Search settings".
 
 use crate::host::{SettingsPage, YtArg, YtFx, YtHost};
-use crate::settings::{secs_label, Codec, ControlsTime, OkAction, PlaybackMode, PlayerStyle, RememberSpeed, SbAction, Settings, SPEEDS};
+use crate::settings::{secs_label, Codec, ControlsTime, KeyPair, OkAction, PlaybackMode, PlayerStyle, RememberSpeed, SbAction, Settings, SPEEDS};
 use crate::store::Section;
 use crate::ui::{self, VList};
 use plx_machine::machine::{
@@ -295,6 +295,10 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
                 |s, d| s.codec = cycle(&[Codec::Avc, Codec::Vp9, Codec::Av1], s.codec, d),
             ),
             Opt("HDR", |s| on_off(s.hdr), |s, _| s.hdr = !s.hdr),
+            Opt("Audio delay", |s| format!("{:+} ms", s.audio_delay_ms).replace("+0 ms", "0 ms"), |s, d| {
+                let steps: Vec<i32> = (-10..=10).map(|i| i * 50).collect();
+                s.audio_delay_ms = cycle(&steps, s.audio_delay_ms, d)
+            }),
             Opt("Playback engine", |s| if s.engine == "auto" { "4K / VP9 / AV1 (engine B)".into() } else { "System player".into() }, |s, _| {
                 s.engine = if s.engine == "auto" { "system".into() } else { "auto".into() }
             }),
@@ -306,6 +310,10 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
             }),
             Opt("Remember speed", |s| s.remember_speed.label().into(), |s, d| s.remember_speed = cycle(RememberSpeed::ALL, s.remember_speed, d)),
             Opt("OK button during playback", |s| s.ok_action.label().into(), |s, d| s.ok_action = cycle(OkAction::ALL, s.ok_action, d)),
+            Opt("CH+ / CH- buttons", |s| s.channel_keys.label().into(), |s, d| s.channel_keys = cycle(KeyPair::ALL, s.channel_keys, d)),
+            Opt("Fast-forward / rewind buttons", |s| s.ff_keys.label().into(), |s, d| s.ff_keys = cycle(KeyPair::ALL, s.ff_keys, d)),
+            Opt("Confirm seeking with OK", |s| on_off(s.seek_confirm), |s, _| s.seek_confirm = !s.seek_confirm),
+            Opt("Show the chapter's name", |s| on_off(s.chapter_notification), |s, _| s.chapter_notification = !s.chapter_notification),
             Opt("Hide controls after", |s| if s.hud_timeout_secs == 0 { "Never".into() } else { secs_label(s.hud_timeout_secs) }, |s, d| {
                 s.hud_timeout_secs = cycle(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], s.hud_timeout_secs, d)
             }),

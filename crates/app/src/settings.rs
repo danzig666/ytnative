@@ -123,6 +123,36 @@ impl OkAction {
     }
 }
 
+/// What a pair of remote keys does in the player (CH+ / CH-, fast-forward / rewind), as
+/// SmartTube lets them be set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum KeyPair {
+    /// Next / previous video.
+    Video,
+    /// Seek by the seek step.
+    Seek,
+    /// Faster / slower.
+    Speed,
+    /// Next / previous chapter.
+    Chapter,
+}
+
+impl KeyPair {
+    pub const ALL: &'static [KeyPair] = &[KeyPair::Video, KeyPair::Seek, KeyPair::Speed, KeyPair::Chapter];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            KeyPair::Video => "Previous / next video",
+            KeyPair::Seek => "Seek",
+            KeyPair::Speed => "Speed",
+            KeyPair::Chapter => "Previous / next chapter",
+        }
+    }
+}
+
+/// "Audio delay" in ms, for the playback engine's feeding thread (set from the settings each frame).
+pub static AUDIO_DELAY_MS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
 /// The time shown at the right of the seek bar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ControlsTime {
@@ -339,6 +369,17 @@ pub struct Settings {
     pub left_opens_sidebar: bool,
     pub controls_time: ControlsTime,
     pub ok_action: OkAction,
+    /// CH+ / CH- in the player.
+    pub channel_keys: KeyPair,
+    /// Fast-forward / rewind in the player.
+    pub ff_keys: KeyPair,
+    /// Audio later (plus) or earlier (minus) than the picture, ms: lip-sync with a soundbar or
+    /// Bluetooth audio. Engine B only (it plays every video it can while this is set).
+    pub audio_delay_ms: i32,
+    /// Seeking moves a target on the seek bar; OK jumps there, BACK cancels (off: at once).
+    pub seek_confirm: bool,
+    /// The new chapter's title, briefly, when playback enters it.
+    pub chapter_notification: bool,
     /// The look of the player's controls.
     pub player_style: PlayerStyle,
     /// Screen dimming in the player (SmartTube's "Screen off"): how dark, in percent (100 = black).
@@ -540,6 +581,11 @@ impl Default for Settings {
             left_opens_sidebar: true,
             controls_time: ControlsTime::Remaining,
             ok_action: OkAction::Controls,
+            channel_keys: KeyPair::Video,
+            ff_keys: KeyPair::Seek,
+            seek_confirm: false,
+            audio_delay_ms: 0,
+            chapter_notification: true,
             player_style: PlayerStyle::SmartTube,
             screen_off_dimming: 100,
             screen_off_timeout_secs: 0,

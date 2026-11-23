@@ -465,6 +465,8 @@ pub struct AppRig {
     /// The player's extras as fetched (the view's copy shows only the wanted markers), and the
     /// view's copy with what it was made from.
     raw_extras: Arc<crate::player::Extras>,
+    /// The playing video's chapter last seen (for "Show the chapter's name").
+    last_chapter: Option<(String, usize)>,
     shown_extras: Option<(Arc<crate::player::Extras>, (Vec<String>, bool, bool, u64), Arc<crate::player::Extras>)>,
     /// Start position for the next Play of this video (phone cast, resume).
     pub pending_start: Option<(String, u64)>,
@@ -566,6 +568,7 @@ impl AppRig {
             highlight_for: String::new(),
             paid_noticed: String::new(),
             raw_extras: Default::default(),
+            last_chapter: None,
             shown_extras: None,
             pending_start: None,
             pending_rate: None,
@@ -1058,6 +1061,8 @@ impl AppRig {
             self.applied_country = Some(self.store.settings.content_country.clone());
         }
         self.player.tick();
+        self.chapter_note();
+        crate::settings::AUDIO_DELAY_MS.store(self.store.settings.audio_delay_ms.clamp(-2000, 2000), std::sync::atomic::Ordering::Relaxed);
         // Ease the video window toward its target (comments: zoom out to the left), one placement
         // per frame while it moves.
         let dt = now_ms.wrapping_sub(self.video_ms).min(100) as f32;
@@ -1434,6 +1439,23 @@ impl AppRig {
                 SbEffect::Toast(m) => self.store.toast(m, now_ms),
                 SbEffect::Offer { to, label, until } => self.sb_offer = Some((to, label, until)),
             }
+        }
+    }
+
+    /// "Show the chapter's name": a toast with the chapter playback has just entered (not the one
+    /// a video starts in).
+    fn chapter_note(&mut self) {
+        let st = &self.player_view;
+        if !self.store.settings.chapter_notification || st.phase != Phase::Playing {
+            return;
+        }
+        let Some(w) = st.extras.watch.as_ref().filter(|w| w.chapters.len() > 1) else { return };
+        let Some(at) = yt_core::watch::chapter_at(&w.chapters, st.position_ms) else { return };
+        let now = (st.video_id.clone(), at);
+        let before = self.last_chapter.replace(now.clone());
+        if before.is_some_and(|(v, i)| v == now.0 && i != at) {
+            let title = w.chapters[at].title.clone();
+            self.store.toast(title, self.now_ms);
         }
     }
 

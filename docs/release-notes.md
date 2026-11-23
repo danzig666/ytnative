@@ -1,3 +1,13 @@
 - New: the interface in 39 more languages, the ones SmartTube has: Polish, Portuguese, Dutch, Turkish, Ukrainian, Czech, Slovak, Slovenian, Croatian, Serbian, Romanian, Bulgarian, Greek, Lithuanian, Latvian, Estonian, Finnish, Swedish, Norwegian, Danish, Catalan, Galician, Albanian, Azerbaijani, Armenian, Georgian, Arabic, Hebrew, Persian, Hindi, Telugu, Thai, Vietnamese, Indonesian, Malay, Japanese, Korean and Chinese (Simplified and Traditional); with "System" ytnative follows the TV's language, and YouTube is asked in it too, so sorting by date, hiding past streams and video dates work in every one of them
 - Changed: comments and search suggestions come in the interface language too (they were always in English)
 - New: voice search listens in ytnative's interface language: while ytnative is in front, the TV's voice recognition language (which LG ties to the menu language) is switched to it, and put back when you leave ytnative
+- New: Mark as watched / unwatched in the card menu, and "Mark all from <channel> as watched": the cards show a full progress bar and the "Hide watched" filters hide them
+- New: Shorts, My videos and Kids (YouTube Kids) sections; turn them on in Settings > Interface
+- New: hold OK on a sidebar section for its menu: Refresh, Rename, Move up / down, Hide from the sidebar
+- New: Share, in the card menu and the player's options: the video's, channel's or playlist's link as a QR code for your phone
+- New: Original video titles (Settings > Interface, off by default): titles as their uploader wrote them, not YouTube's translation
+- New: more content filters: Shorts in History, Trending and on channel pages; watched videos in Notifications and Watch later
+- New: what the CH+ / CH- and fast-forward / rewind buttons do in the player (previous / next video, seek, speed, chapter), in Settings > Playback
+- New: Confirm seeking with OK (Settings > Playback, off by default): seeking moves a marker on the seek bar, OK jumps there, BACK cancels
+- New: the chapter's name shows when playback enters a new chapter (Settings > Playback, "Show the chapter's name")
+- New: Audio delay (Settings > Playback) for lip-sync with a soundbar or Bluetooth audio; while it is set, the 4K / VP9 / AV1 engine plays every video it can

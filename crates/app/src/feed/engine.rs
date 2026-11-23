@@ -255,7 +255,8 @@ struct LaneFeed {
 }
 
 /// Feeds one lane up to `limit` (fed timeline). Returns the number of units fed, or an error.
-fn feed_lane(lane: &Lane, lf: &mut LaneFeed, es: i32, shift: i64, floor: i64, limit: i64, starved: bool) -> Result<usize, String> {
+/// `delay` (ns) is added to the lane's timestamps: the audio lane's "Audio delay" (plus: later).
+fn feed_lane(lane: &Lane, lf: &mut LaneFeed, es: i32, shift: i64, delay: i64, floor: i64, limit: i64, starved: bool) -> Result<usize, String> {
     let t0 = Instant::now();
     let mut n = 0;
     loop {
@@ -263,7 +264,7 @@ fn feed_lane(lane: &Lane, lf: &mut LaneFeed, es: i32, shift: i64, floor: i64, li
         if u.pts_ns < floor {
             continue; // audio before the video anchor
         }
-        let fed = u.pts_ns - shift;
+        let fed = u.pts_ns - shift + delay;
         if fed < 0 {
             continue;
         }
@@ -882,13 +883,14 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
             }
         }
         let vstarved = priming || est.is_some_and(|p| vf.fed_max.map_or(true, |m| m - p < 250_000_000));
-        let nv = match feed_lane(video, &mut vf, 1, shift, i64::MIN, vlimit, vstarved) {
+        let nv = match feed_lane(video, &mut vf, 1, shift, 0, i64::MIN, vlimit, vstarved) {
             Ok(n) => n,
             Err(e) => break Err(e),
         };
         let na = if has_audio {
             let astarved = priming || est.is_some_and(|p| af.fed_max.map_or(true, |m| m - p < 250_000_000));
-            match feed_lane(audio, &mut af, 2, shift, floor, vlimit + AUDIO_SLACK_NS, astarved) {
+            let delay = crate::settings::AUDIO_DELAY_MS.load(std::sync::atomic::Ordering::Relaxed) as i64 * 1_000_000;
+            match feed_lane(audio, &mut af, 2, shift, delay, floor, vlimit + AUDIO_SLACK_NS + delay.max(0), astarved) {
                 Ok(n) => n,
                 Err(e) => break Err(e),
             }

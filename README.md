@@ -83,9 +83,12 @@ Root is not required.
 Everything SmartTube users expect, rebuilt for webOS:
 
 **Browsing**
-- Home, Subscriptions, Channels, History, Library/playlists, Notifications, Music, Gaming, News,
-  Podcasts, Live, Movies, Sports, pinned playlists/channels, channel groups and search (on-screen
-  keyboard, suggestions, filters, search history). Each sidebar section can be shown or hidden.
+- Home, Subscriptions, Shorts, Channels, History, Library/playlists, My videos, Notifications,
+  Music, Gaming, News, Podcasts, Live, Movies, Sports, Kids (YouTube Kids), pinned
+  playlists/channels, channel groups and search (on-screen keyboard, suggestions, filters, search
+  history). Each sidebar section can be shown, hidden, moved and renamed (hold OK on it).
+- Mark as watched (a video, or a channel's loaded videos), Share as a QR code, original
+  (untranslated) titles.
 - Hidden sidebar that slides in from the leftmost tile or with BACK; a section opens with OK or a
   click, double BACK exits.
 - Notifications: the newest videos of the channels whose bell is set to All videos.
@@ -93,7 +96,8 @@ Everything SmartTube users expect, rebuilt for webOS:
   optional clock on the video lists.
 - Optional video previews: a muted preview plays in the card the focus rests on (Settings >
   Interface, off by default).
-- Content filters: hide Shorts, watched videos, upcoming streams, mixes; block channels.
+- Content filters: hide Shorts, watched videos, upcoming streams, mixes, per section; block
+  channels.
 - Multiple accounts and brand accounts, settings PIN, child mode.
 
 **Player**
@@ -120,6 +124,8 @@ Everything SmartTube users expect, rebuilt for webOS:
   live streams, each message with the time it was sent.
 - Sleep timer: a countdown set in the player's options that runs across the next videos, warns a
   minute before and pauses playback.
+- CH+ / CH- and fast-forward / rewind can be set to video, seek, speed or chapter; optional seek
+  confirmation with OK; the chapter's name when a new one starts; audio delay for lip-sync.
 - OSD, comments and subtitles are dimmed automatically over HDR video.
 
 **Settings**

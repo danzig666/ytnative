@@ -246,7 +246,7 @@ fn repeats(act: &Act) -> bool {
     !matches!(act, Act::AudioOnly | Act::VideoDetails | Act::Bell | Act::ShufflePlaylist | Act::Reshuffle)
 }
 
-fn step_speed(current: f32, dir: i32) -> f32 {
+pub(crate) fn step_speed(current: f32, dir: i32) -> f32 {
     let i = crate::settings::speed_index(current) as i32;
     SPEEDS[(i + dir).clamp(0, SPEEDS.len() as i32 - 1) as usize]
 }

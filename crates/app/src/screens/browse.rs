@@ -530,6 +530,8 @@ impl Focusable<YtHost> for BrowseScreen {
         let mut nav = self.nav.spec(nav_items(cx).len());
         nav.reachable = plx_ui::screen::AxisMask::HORIZONTAL;
         nav.edge = [plx_ui::screen::EdgeRule::Stop; 4];
+        // Holdable, as cards are: holding OK on a section opens its menu.
+        nav.elem = plx_ui::screen::ElemKind::Card;
         out.push(nav);
         if self.rows_mode(cx) {
             self.stack.view(&self.rows).groups(cx, out);
