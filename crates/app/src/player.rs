@@ -322,6 +322,7 @@ impl Player {
                 Ok(false) => crate::log(&format!("player: {video_id} was left while starting; dropped")),
                 Err(e) => {
                     crate::log(&format!("player: {e:#}"));
+                    crate::log(&format!("player: clients: {}", yt_core::streams::last_failure()));
                     if live() {
                         status.lock().unwrap().phase = Phase::Failed(format!("{e:#}"));
                     }

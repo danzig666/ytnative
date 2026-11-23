@@ -76,6 +76,15 @@ impl Default for Prefs {
     }
 }
 
+/// Why the last [`resolve`] that failed failed, client by client (the signed-in try included):
+/// for the app's log, which the error itself (YouTube's reason, shown to the viewer) leaves out.
+static LAST_FAILURE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// The details of the last failed [`resolve`] (empty when none failed yet).
+pub fn last_failure() -> String {
+    LAST_FAILURE.lock().unwrap().clone()
+}
+
 pub fn resolve(api: &Api, video_id: &str, bearer: Option<&str>) -> Result<Resolved> {
     let mut errors = Vec::new();
     // YouTube's own reasons for refusing (members only, private, removed...): when every client
@@ -108,6 +117,7 @@ pub fn resolve(api: &Api, video_id: &str, bearer: Option<&str>) -> Result<Resolv
     }
     // Signed in: the TV client takes the token, so it plays what the anonymous ring may not
     // (private videos, members only), once the URLs' challenges are solved.
+    let mut signed = "not tried (signed out)".to_string();
     if let Some(bearer) = bearer {
         match signed_in(api, video_id, bearer) {
             Ok(Ok(mut r)) => {
@@ -115,15 +125,18 @@ pub fn resolve(api: &Api, video_id: &str, bearer: Option<&str>) -> Result<Resolv
                 return Ok(r);
             }
             Ok(Err(reason)) => {
+                signed = format!("refused: {reason}");
                 errors.push(format!("tv_signed_in: {reason}"));
                 refusals.push(reason);
             }
             Err(e) => {
                 // Not a refusal of this video: the viewer is told what the ring said.
+                signed = format!("failed: {e:#}");
                 eprintln!("[streams] signed-in TV client for {video_id}: {e:#}");
             }
         }
     }
+    *LAST_FAILURE.lock().unwrap() = format!("{video_id}: {}; signed-in TV client {signed}", errors.join("; "));
     if let Some(reason) = same_reason(&refusals, errors.len()) {
         bail!("{reason}");
     }

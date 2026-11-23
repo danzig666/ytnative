@@ -1127,7 +1127,7 @@ impl Screen<YtHost> for PlayerScreen {
                 // video just says so.
                 ui::text(p, "Can't play this video", 960.0, 440.0, 40, ui::WHITE, ui::ALIGN_CENTER, true);
                 // YouTube's common refusals in the interface's language; anything else as it came.
-                let msg = refusal_text(&msg).map_or_else(|| crate::i18n::tr_parts(&msg), |t| crate::i18n::tr(t).to_string());
+                let msg = refusal_text(&msg, cx.views.store.signed_in).map_or_else(|| crate::i18n::tr_parts(&msg), |t| crate::i18n::tr(t).to_string());
                 for (i, line) in ui::wrap_lines(f.measure, &msg, 1300.0, 28, false, 9).iter().enumerate() {
                     ui::text_raw(p, line, 960.0, 510.0 + i as f32 * 42.0, 28, ui::DIM, ui::ALIGN_CENTER, false);
                 }
@@ -2332,11 +2332,14 @@ fn has_chapters(cx: &Cx<'_, YtHost>) -> bool {
 
 /// YouTube's reason for refusing a video (always English: requests are sent with hl=en) as one of
 /// this app's translated sentences, when it is a common one.
-fn refusal_text(reason: &str) -> Option<&'static str> {
+fn refusal_text(reason: &str, signed_in: bool) -> Option<&'static str> {
     let r = reason.to_ascii_lowercase();
     let has = |k: &str| r.contains(k);
     Some(if has("available to this channel's members") || has("members-only") {
         "Only this channel's members can watch it."
+    } else if has("not a bot") && signed_in {
+        // Signed in already: a bot check of the whole connection, which passes after a while.
+        "YouTube is checking this network for bots. Try again in a few minutes."
     } else if has("not a bot") {
         "YouTube asks to confirm you're not a bot: try again later, or sign in."
     } else if has("confirm your age") || has("age-restricted") || has("inappropriate for some users") {
@@ -2472,10 +2475,12 @@ mod refusal_tests {
 
     #[test]
     fn common_refusals_are_translated_sentences() {
-        assert_eq!(refusal_text("This video is available to this channel's members on level: X. Join this channel."), Some("Only this channel's members can watch it."));
-        assert_eq!(refusal_text("Sign in to confirm your age"), Some("YouTube asks to confirm your age: sign in with an adult account."));
-        assert_eq!(refusal_text("Video unavailable"), Some("This video is not available."));
-        assert_eq!(refusal_text("This video is private"), Some("This video is private."));
-        assert_eq!(refusal_text("no client could play abc: Profile(tv): ERROR boom"), None);
+        assert_eq!(refusal_text("This video is available to this channel's members on level: X. Join this channel.", false), Some("Only this channel's members can watch it."));
+        assert_eq!(refusal_text("Sign in to confirm your age", false), Some("YouTube asks to confirm your age: sign in with an adult account."));
+        assert_eq!(refusal_text("Video unavailable", false), Some("This video is not available."));
+        assert_eq!(refusal_text("This video is private", false), Some("This video is private."));
+        assert_eq!(refusal_text("no client could play abc: Profile(tv): ERROR boom", false), None);
+        assert_eq!(refusal_text("Sign in to confirm you're not a bot", true), Some("YouTube is checking this network for bots. Try again in a few minutes."));
+        assert_eq!(refusal_text("Sign in to confirm you're not a bot", false), Some("YouTube asks to confirm you're not a bot: try again later, or sign in."));
     }
 }
