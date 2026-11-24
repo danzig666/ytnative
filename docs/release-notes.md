@@ -1,0 +1,1 @@
+- Fixed: the selected video's title no longer moves a pixel to the left just after the card finishes growing

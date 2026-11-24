@@ -348,7 +348,15 @@ impl GridPop {
             // the card standing in the popped cell is the popped one (a refresh may have put another there)
             self.pop.card = focused;
         }
-        self.pop.spring.step(if self.pop.card.is_some() { style.focus_scale } else { 1.0 }, style.k_scale, dt);
+        let target = if self.pop.card.is_some() { style.focus_scale } else { 1.0 };
+        self.pop.spring.step(target, style.k_scale, dt);
+        // ytnative: put a pop the idle gate already counts as finished exactly on its target in
+        // that same frame. Left a hair short, the next present for anything else (the preview
+        // starting) drew the card a fraction of a pixel wider, and its caption, placed from the
+        // card's left edge, stepped a pixel to the left just after the card seemed to settle.
+        if self.pop.spring.pos != target && plx_machine::idle::settled(self.pop.spring.pos, target, self.pop.spring.vel) {
+            self.pop.spring.jump(target);
+        }
         // Each let-go ends by the landing rule a shelf's released tile ends by (`CardRow::update`):
         // within `LAND_REL` of rest AND no longer travelling, put exactly at rest.
         self.let_gos.retain_mut(|l| {
@@ -756,7 +764,7 @@ mod tests {
         assert!(new > 1.0 && new < style.focus_scale, "the new cell grows from rest: {new}");
         assert!(old > 1.0 && old < style.focus_scale, "the old cell lets go: {old}");
         for _ in 0..120 { pop.tick(Some(at(4)), &style, dt); }
-        assert!((pop.scale(4, true, &style) - style.focus_scale).abs() < 0.001);
+        assert_eq!(pop.scale(4, true, &style), style.focus_scale, "a settled pop stands exactly at full scale");
         assert_eq!(pop.scale(3, false, &style), 1.0);
         let (_, moving) = plx_machine::idle::scoped_motion(|| pop.tick(Some(at(4)), &style, dt));
         assert!(!moving, "a settled grid lets idle suppression sleep");

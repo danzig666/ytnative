@@ -409,6 +409,11 @@ impl CardRow {
             // key left every visited card at an `f` of 1e-6: the focus program, never the resting split.
             if focused != Some(i) {
                 sp.land(1.0, dt);
+            } else if sp.pos != target && plx_machine::idle::settled(sp.pos, target, sp.vel) {
+                // ytnative: the focused cell's pop lands on its target as soon as the idle gate
+                // counts it finished (as the scroll below does), so a later present does not grow
+                // the card that last fraction and step its caption a pixel left.
+                sp.jump(target);
             }
         }
         // the shared overflow spring pops only while focus is actually out past the array
