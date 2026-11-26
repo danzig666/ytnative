@@ -1,3 +1,4 @@
 - Changed: pinned channels, playlists and channel groups open in the sidebar as the sections do: rest the focus on one and its videos show beside it (OK still opens its own page, with Subscribe or Play all)
 - Changed: network problems are said plainly (no internet connection, a connection that timed out, a wrong date and time on the TV, YouTube not responding) instead of a technical error, and a page that failed for the network loads again on its own once the connection works
 - Removed: the Trending section: YouTube retired the page and it could only fail
+- Fixed: Subscriptions shows every new video newest first and keeps loading more as you scroll; YouTube's new "Most relevant" shelf, in its own order, is left out (#26)

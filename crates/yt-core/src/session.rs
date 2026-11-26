@@ -75,7 +75,11 @@ impl Session {
         if let Some(p) = params {
             body["params"] = json!(p);
         }
-        Ok(parse::page(&self.raw("browse", body)?))
+        let mut page = parse::page(&self.raw("browse", body)?);
+        if browse_id == feeds::SUBSCRIPTIONS {
+            drop_most_relevant(&mut page);
+        }
+        Ok(page)
     }
 
     pub fn home(&mut self) -> Result<Page> {
@@ -200,5 +204,27 @@ impl Session {
         // reason to panic.
         let v: Value = txt.get(start..end).and_then(|s| serde_json::from_str(s).ok()).unwrap_or(Value::Null);
         Ok(v[1].as_array().map(|a| a.iter().filter_map(|s| s[0].as_str().map(str::to_string)).collect()).unwrap_or_default())
+    }
+}
+
+/// Subscriptions newest first, as SmartTube shows them: the page's "Most relevant" shelf
+/// (2026-11, YouTube's pick in its own order, titled in the account's language) is left out. The
+/// newest videos come in untitled rows, the Shorts in a titled shelf of Shorts, both kept.
+fn drop_most_relevant(page: &mut Page) {
+    page.shelves.retain(|s| s.title.is_empty() || s.items.iter().all(|i| i.kind == crate::model::ItemKind::Short));
+}
+
+#[cfg(test)]
+mod subscriptions_tests {
+    use super::drop_most_relevant;
+    use crate::model::{Item, ItemKind, Page, Shelf};
+
+    #[test]
+    fn subscriptions_leave_out_most_relevant() {
+        let shelf = |title: &str, kind: ItemKind| Shelf { title: title.into(), items: vec![Item { kind, id: title.into(), ..Default::default() }], ..Default::default() };
+        let mut p = Page { shelves: vec![shelf("Legfontosabb", ItemKind::Video), shelf("", ItemKind::Video), shelf("Shorts", ItemKind::Short)], ..Default::default() };
+        drop_most_relevant(&mut p);
+        let left: Vec<&str> = p.shelves.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(left, ["", "Shorts"]);
     }
 }

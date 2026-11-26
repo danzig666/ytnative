@@ -66,6 +66,11 @@ fn collect(v: &Value, page: &mut Page, loose: &mut Shelf, depth: usize) {
                 if t["selected"].as_bool() == Some(true) {
                     if let Some(c) = t.get("content") {
                         collect(c, page, loose, depth + 1);
+                        // Its section list goes on (2026-11: Subscriptions, whose channels are
+                        // the tabs, keeps its next page here).
+                        if page.continuation.is_none() {
+                            page.continuation = continuation_token(&c["tvSurfaceContentRenderer"]["content"]["sectionListRenderer"]["continuations"]);
+                        }
                     }
                 }
                 return;
@@ -410,6 +415,24 @@ fn continuation_token(c: &Value) -> Option<String> {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn a_tabbed_page_goes_on_from_its_shown_tab() {
+        // Subscriptions (2026-11): the channels are tabs, "All" is shown and its list goes on.
+        let list = |token: &str| serde_json::json!({ "tvSurfaceContentRenderer": { "content": { "sectionListRenderer": {
+            "contents": [],
+            "continuations": [{ "nextContinuationData": { "continuation": token } }]
+        } } } });
+        let resp = serde_json::json!({ "contents": { "tvBrowseRenderer": { "content": { "tvSecondaryNavRenderer": { "sections": [{
+            "tvSecondaryNavSectionRenderer": { "tabs": [
+                { "tabRenderer": { "title": "All", "selected": true, "content": list("ALL") } },
+                { "tabRenderer": { "title": "A channel", "content": list("CHANNEL") } }
+            ] }
+        }] } } } } });
+        let p = page(&resp);
+        assert_eq!(p.tabs.len(), 2);
+        assert_eq!(p.continuation.as_deref(), Some("ALL"));
+    }
 
     fn fixture(name: &str) -> Option<Value> {
         let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/private").join(name);

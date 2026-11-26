@@ -59,6 +59,25 @@ fn run() -> Result<()> {
         Some("whoami") => whoami(&api),
         // page <home|subs|history|library|search:<q>|browse:<id>> [pages]: parsed page summary.
         Some("page") => page_cmd(args.get(1).map(String::as_str).unwrap_or("home"), args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1)),
+        // captions <video> [lang]: the tracks the player client gives, and each one fetched as is
+        // and translated into `lang` (what "Auto-translate when missing" asks for).
+        Some("captions") => {
+            let mut s = yt_core::session::Session::new()?;
+            let id = video_id(args.get(1).context("video id")?)?;
+            let lang = args.get(2).map(String::as_str).unwrap_or("pl");
+            let r = s.resolve(&id)?;
+            println!("{} via {:?}; {} translation languages", r.title, r.client, r.translations.len());
+            for t in &r.captions {
+                println!("  {} {:?} auto={} translatable={} dub={}", t.language, t.name, t.auto, t.translatable, t.dub);
+                for tr in [None, Some(lang)] {
+                    match s.captions(t, tr) {
+                        Ok(c) => println!("    {:?}: {} cues, first {:?}", tr, c.len(), c.iter().find(|c| !c.text.is_empty()).map(|c| truncate(&c.text, 50))),
+                        Err(e) => println!("    {:?}: {e:#}", tr),
+                    }
+                }
+            }
+            Ok(())
+        }
         Some("resolve") => {
             let mut s = yt_core::session::Session::new()?;
             let id = video_id(args.get(1).context("video id")?)?;
