@@ -60,6 +60,8 @@ pub enum YtArg {
     PlayerMenu,
     /// The list of playback speeds (the player's speed button, as in SmartTube).
     SpeedMenu,
+    /// The player's subtitles button: off, or one of the video's subtitle languages.
+    SubtitleMenu,
     /// The subscribe button of a subscribed channel: its notification bell (all, personalized,
     /// none) and Unsubscribe, as YouTube's button offers them.
     BellMenu,
@@ -109,6 +111,7 @@ impl ScreenArg for YtArg {
             YtArg::Pin(_) => 15,
             YtArg::Chapters => 16,
             YtArg::SpeedMenu => 17,
+            YtArg::SubtitleMenu => 38,
             YtArg::BellMenu => 34,
             YtArg::NameEntry(_) => 18,
             YtArg::SuggestionMenu(_) => 19,
@@ -360,6 +363,7 @@ impl Mounter<YtHost> for Mount {
             YtArg::SectionMenu(key) => Box::new(screens::menu::MenuScreen::section(entry, key, cx)),
             YtArg::PlayerMenu => Box::new(screens::menu::MenuScreen::player(entry, cx)),
             YtArg::SpeedMenu => Box::new(screens::menu::MenuScreen::speeds(entry, cx)),
+            YtArg::SubtitleMenu => Box::new(screens::menu::MenuScreen::subtitles(entry, cx)),
             YtArg::BellMenu => Box::new(screens::menu::MenuScreen::bell(entry, cx)),
             YtArg::UpdatePrompt => Box::new(screens::menu::MenuScreen::update(entry)),
             YtArg::Accounts => Box::new(screens::accounts::AccountsScreen::new(entry)),
@@ -1176,7 +1180,8 @@ impl AppRig {
         self.channel_subtitles();
         let subs = self.store.settings.subtitles;
         let language_changed = self.store.settings.subtitle_language != self.subtitle_language_was;
-        let wanted = (!self.subtitles_were && self.player_view.extras.cues.is_empty()) || (self.subtitles_were && language_changed);
+        // Another language loads also when it comes with switching on (the subtitle list).
+        let wanted = (!self.subtitles_were && self.player_view.extras.cues.is_empty()) || language_changed;
         // The caption tracks are known once the video is resolved (Loading on).
         let can_load = !self.player_view.video_id.is_empty() && !matches!(self.player_view.phase, Phase::Idle | Phase::Resolving | Phase::Failed(_));
         if subs && wanted && can_load {

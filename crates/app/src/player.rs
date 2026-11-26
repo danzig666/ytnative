@@ -927,6 +927,29 @@ pub(crate) fn load_captions(video_id: &str, session: &Mutex<Option<yt_core::sess
     }
 }
 
+/// The languages a video has subtitles in, for the player's subtitle list: (the value the
+/// subtitle language setting takes, the name of the track that [`pick_track`] loads for it), in
+/// YouTube's order, each language once. The setting's value is the track's language when the
+/// language list has it ("pt-BR"), else its base ("de-DE" -> "de").
+pub fn subtitle_languages(tracks: &[yt_core::streams::CaptionTrack]) -> Vec<(String, String)> {
+    let code = |l: &str| {
+        let known = |c: &str| crate::i18n::LANGUAGES.iter().find(|(k, _)| k.eq_ignore_ascii_case(c)).map(|(k, _)| k.to_string());
+        known(l).or_else(|| known(l.split(['-', '_']).next().unwrap_or(l))).unwrap_or_else(|| l.split(['-', '_']).next().unwrap_or(l).to_ascii_lowercase())
+    };
+    let mut out: Vec<(String, String)> = Vec::new();
+    for t in tracks {
+        let c = code(&t.language);
+        if out.iter().any(|(k, _)| *k == c) {
+            continue;
+        }
+        let mut same = tracks.iter().filter(|x| code(&x.language) == c);
+        let all: Vec<_> = same.by_ref().collect();
+        let best = all.iter().find(|x| !x.auto).or_else(|| all.iter().find(|x| !x.dub)).unwrap_or(&all[0]);
+        out.push((c, best.name.clone()));
+    }
+    out
+}
+
 /// Manual track in the wanted language, else auto-generated in it, else (if allowed) a
 /// translation of the best available track. A translation is never made from an auto-dub's
 /// transcript (it would translate the dub, not what was said).
@@ -974,5 +997,18 @@ mod pick_track_tests {
         let tracks = [track("de-DE", true, true), track("en", true, false)];
         let (t, tr) = pick_track(&tracks, "de", true).unwrap();
         assert_eq!((t.language.as_str(), tr), ("de-DE", None));
+    }
+
+    #[test]
+    fn the_subtitle_list_has_each_language_once_by_the_track_that_loads() {
+        let named = |language: &str, name: &str, auto: bool| CaptionTrack { name: name.into(), ..track(language, auto, false) };
+        let tracks = [named("en", "English (auto-generated)", true), named("en", "English", false), named("de-DE", "German", false), named("pt-BR", "Portuguese (Brazil)", false), named("xx-YY", "Other", true)];
+        let list = super::subtitle_languages(&tracks);
+        let got: Vec<(&str, &str)> = list.iter().map(|(c, n)| (c.as_str(), n.as_str())).collect();
+        assert_eq!(got, [("en", "English"), ("de", "German"), ("pt", "Portuguese (Brazil)"), ("xx", "Other")]);
+        // Each value loads the track it is named after.
+        for (code, name) in &list {
+            assert_eq!(&pick_track(&tracks, code, false).unwrap().0.name, name);
+        }
     }
 }

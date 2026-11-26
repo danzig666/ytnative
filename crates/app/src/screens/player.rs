@@ -560,6 +560,12 @@ impl PlayerScreen {
                 fx.push(Fx::App(YtFx::Act(crate::host::UserAction::Rate(st.video_id.clone(), r))));
             }
             OSD_LIKE | OSD_DISLIKE => {}
+            // The video's subtitle languages to pick from, as SmartTube's button opens; a video
+            // without subtitles (or not loaded yet) keeps the on / off switch.
+            OSD_CC if !st.captions.is_empty() => {
+                self.osd_sel = None;
+                fx.push(Fx::Nav(NavOp::Present(YtArg::SubtitleMenu)));
+            }
             OSD_CC => fx.push(Fx::App(YtFx::EditSettings(Box::new(|s| s.subtitles = !s.subtitles)))),
             OSD_CHAPTERS => {
                 if has_chapters(cx) {

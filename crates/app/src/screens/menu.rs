@@ -118,6 +118,8 @@ enum Act {
     Close,
     /// Play at this speed (the speed list).
     SetSpeed(f32),
+    /// The player's subtitles: in this language, or off.
+    SetSubtitles(Option<String>),
     /// The bell menu: this notification choice (`SUBSCRIPTION_NOTIFICATION_STATE_*`) and the
     /// name it is shown by.
     SetBell(String, &'static str),
@@ -171,6 +173,40 @@ fn quality_label(h: u32, fps: u32) -> String {
     } else {
         format!("{h}p")
     }
+}
+
+/// The player's subtitle choices: Off, then each language the playing video has subtitles in
+/// (named as its track), with the subtitle language each sets (`None`: off); and the current one.
+/// Translations are not offered: YouTube refuses most of them without a PO token (#26).
+pub(crate) fn subtitle_choices(cx: &Cx<'_, YtHost>) -> (Vec<(String, Option<String>)>, usize) {
+    let (st, s) = (cx.views.player, &cx.views.store.settings);
+    let langs = crate::player::subtitle_languages(&st.captions);
+    let mut v = vec![(tr("Off").to_string(), None)];
+    let shown = st.extras.caption_label.as_deref();
+    let base = |l: &str| l.split(['-', '_']).next().unwrap_or(l).to_ascii_lowercase();
+    // On: the track on screen, else the language asked for.
+    let cur = if !s.subtitles {
+        0
+    } else {
+        langs
+            .iter()
+            .position(|(_, n)| Some(n.as_str()) == shown)
+            .or_else(|| langs.iter().position(|(c, _)| base(c) == base(&s.subtitle_language)))
+            .map_or(0, |i| i + 1)
+    };
+    v.extend(langs.into_iter().map(|(c, n)| (n, Some(c))));
+    (v, cur)
+}
+
+/// Shows subtitles in `lang`, or none.
+fn set_subtitles(lang: Option<String>, fx: &mut Effects<'_, YtHost>) {
+    fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| match lang {
+        Some(l) => {
+            s.subtitles = true;
+            s.subtitle_language = l;
+        }
+        None => s.subtitles = false,
+    }))));
 }
 
 /// The maximum video heights the quality row offers.
@@ -654,6 +690,16 @@ impl MenuScreen {
         m
     }
 
+    /// The player's subtitles button: Off and the video's subtitle languages, the current one
+    /// ticked.
+    pub fn subtitles(entry: EntryId, cx: &Cx<'_, YtHost>) -> Self {
+        let (v, cur) = subtitle_choices(cx);
+        let acts = v.into_iter().enumerate().map(|(i, (label, lang))| (if i == cur { format!("{label}  \u{2713}") } else { label }, Act::SetSubtitles(lang))).collect();
+        let m = Self::make(entry, tr("Subtitles").to_string(), acts);
+        m.refocus.set(Some(cur));
+        m
+    }
+
     pub fn player(entry: EntryId, cx: &Cx<'_, YtHost>) -> Self {
         let st = cx.views.player;
         let mut acts = Vec::new();
@@ -807,7 +853,10 @@ impl MenuScreen {
                 Some(t) => format!("{}  \u{203A}", t.left_label(cx.views.now_ms)),
                 None => format!("{}  \u{203A}", crate::i18n::tr("Off")),
             },
-            Act::Subtitles => format!("{}  \u{203A}", crate::i18n::tr(if s.subtitles { "On" } else { "Off" })),
+            Act::Subtitles => match subtitle_choices(cx) {
+                (v, cur) if v.len() > 1 => format!("{}  \u{203A}", v[cur].0),
+                _ => format!("{}  \u{203A}", crate::i18n::tr(if s.subtitles { "On" } else { "Off" })),
+            },
             Act::AudioOnly => format!("{}  \u{203A}", crate::i18n::tr(if cx.views.player.audio_only { "On" } else { "Off" })),
             Act::SubSize => format!("{}  \u{203A}", s.subtitle_size),
             Act::SubColor => format!("{}  \u{203A}", crate::i18n::tr(&s.subtitle_color)),
@@ -850,6 +899,11 @@ impl MenuScreen {
                 let cur = st.audio_track.clone().or_else(|| st.audio_tracks.iter().find(|t| t.2).map(|t| t.0.clone()));
                 (st.audio_tracks.iter().map(|t| t.1.clone()).collect(), st.audio_tracks.iter().position(|t| Some(&t.0) == cur.as_ref()).unwrap_or(0))
             }
+            // The video's subtitle languages; a video without any keeps the on / off switch.
+            Act::Subtitles => match subtitle_choices(cx) {
+                (v, cur) if v.len() > 1 => (v.into_iter().map(|(l, _)| l).collect(), cur),
+                _ => return None,
+            },
             // The timer's lengths; the one running is shown as its length.
             Act::Sleep => (SLEEP_MINS.iter().map(|m| crate::settings::sleep_label(*m)).collect(), sleep_index(cx)),
             _ => return setting_choices(act, s),
@@ -1005,6 +1059,11 @@ impl MenuScreen {
                 fx.push(Fx::App(YtFx::ShuffleQueue(true)));
                 fx.push(Fx::App(YtFx::Toast(tr("Playlist shuffled in a new order").to_string())));
             }
+            Act::Subtitles if subtitle_choices(cx).0.len() > 1 => {
+                let (v, cur) = subtitle_choices(cx);
+                let k = (cur as i32 + dir).rem_euclid(v.len() as i32) as usize;
+                set_subtitles(v[k].1.clone(), fx);
+            }
             Act::Subtitles | Act::SubSize | Act::SubColor | Act::SubBold | Act::SubFont | Act::SubStyle | Act::RepeatMode | Act::VideoDetails => {
                 let act = act.clone();
                 fx.push(Fx::App(YtFx::EditSettings(Box::new(move |s| step_setting(&act, s, dir)))));
@@ -1152,6 +1211,10 @@ impl MenuScreen {
                 fx.push(Fx::App(YtFx::Act(UserAction::Subscribe { channel_id, subscribe: false })));
                 fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
             }
+            Act::SetSubtitles(lang) => {
+                set_subtitles(lang.clone(), fx);
+                fx.push(Fx::Nav(NavOp::Dismiss(self.list.entry)));
+            }
             Act::SetSpeed(r) => {
                 fx.push(Fx::App(YtFx::SetSpeed(*r)));
                 let label = if (*r - 1.0).abs() < 0.001 { crate::i18n::tr("Normal").to_string() } else { format!("{r}x") };
@@ -1248,7 +1311,7 @@ impl Machine<YtHost> for MenuScreen {
                     match self.choices(&act, cx) {
                         Some((v, cur)) => {
                             let anchor = self.list.place(*e, n, Some(i)).map(|p| p.rect).unwrap_or(self.list.rect);
-                            self.choice = Some(ui::ChoiceBox::new(self.list.entry, i, v, cur, anchor).raw(matches!(act, Act::AudioTrack | Act::Quality)));
+                            self.choice = Some(ui::ChoiceBox::new(self.list.entry, i, v, cur, anchor).raw(matches!(act, Act::AudioTrack | Act::Quality | Act::Subtitles)));
                             fx.invalidate(plx_machine::present::Provenance::Input);
                         }
                         None => self.run(&act, 1, cx, fx),
