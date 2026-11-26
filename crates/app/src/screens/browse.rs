@@ -156,6 +156,9 @@ pub struct BrowseScreen {
     stack: Stack<usize>,
     rows: Rows,
     section: Section,
+    /// A pinned channel / playlist or a channel group shown in place of the section (the sidebar
+    /// focus rested on it, as on a section): its feed and its title. OK on it opens its own page.
+    shown: Option<(FeedKey, String)>,
     /// Sidebar slide position (0 hidden, 1 shown) and the clock it was last stepped at.
     nav_t: f32,
     /// Last BACK on the sidebar (a second one soon after exits).
@@ -215,6 +218,7 @@ impl BrowseScreen {
             stack: Stack::new(entry).clipped(Rect::new(0.0, 0.0, 1920.0, 1080.0)),
             rows: Rows { key: FeedKey::Section(section) },
             section,
+            shown: None,
             nav_t: 0.0,
             back_at: 0,
             exit_armed: false,
@@ -230,7 +234,53 @@ impl BrowseScreen {
     }
 
     fn key(&self) -> FeedKey {
-        FeedKey::Section(self.section)
+        match &self.shown {
+            Some((k, _)) => k.clone(),
+            None => FeedKey::Section(self.section),
+        }
+    }
+
+    /// The sidebar row of what is on screen.
+    fn is_shown(&self, item: &NavItem) -> bool {
+        match (&self.shown, item) {
+            (None, NavItem::Section(s)) => *s == self.section,
+            (Some((k, _)), NavItem::Pinned(_, id, params)) => *k == FeedKey::browse(id, params.clone()),
+            (Some((k, _)), NavItem::Group(id, _)) => *k == FeedKey::Group(id.clone()),
+            _ => false,
+        }
+    }
+
+    /// A pinned item or a channel group as the sidebar shows it in place: its feed and title.
+    fn feed_of(item: &NavItem) -> Option<(FeedKey, String)> {
+        match item {
+            NavItem::Pinned(t, id, params) => Some((FeedKey::browse(id, params.clone()), t.clone())),
+            NavItem::Group(id, t) => Some((FeedKey::Group(id.clone()), t.clone())),
+            _ => None,
+        }
+    }
+
+    /// New grid and rows for what is now on screen.
+    fn relayout(&mut self) {
+        self.grid = Grid::new(self.entry, spec());
+        self.cols = ui::card_cols();
+        self.stack = Stack::new(self.entry).clipped(Rect::new(0.0, 0.0, 1920.0, 1080.0));
+        self.rows = Rows { key: self.key() };
+        // The card focus was on belongs to the page left behind.
+        self.content_last.set(0);
+    }
+
+    /// Shows a pinned item or a channel group in place of the section.
+    fn show_feed(&mut self, shown: (FeedKey, String), cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
+        if self.shown.as_ref().is_some_and(|(k, _)| *k == shown.0) {
+            return;
+        }
+        self.state = State(format!("{:?}", shown.0));
+        self.shown = Some(shown);
+        self.relayout();
+        if cx.views.store.feed(&self.key()).is_none() {
+            fx.push(Fx::App(YtFx::Load(self.key())));
+        }
+        fx.invalidate(plx_machine::present::Provenance::Input);
     }
 
     fn src<'a>(&self, cx: &Cx<'a, YtHost>) -> CardsSrc<'a> {
@@ -239,17 +289,13 @@ impl BrowseScreen {
     }
 
     fn switch(&mut self, section: Section, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
-        if section == self.section {
+        if section == self.section && self.shown.is_none() {
             return;
         }
         self.section = section;
+        self.shown = None;
         self.state = State(section.key().into());
-        self.grid = Grid::new(self.entry, spec());
-        self.cols = ui::card_cols();
-        self.stack = Stack::new(self.entry).clipped(Rect::new(0.0, 0.0, 1920.0, 1080.0));
-        self.rows = Rows { key: self.key() };
-        // The card focus was on belongs to the section left behind.
-        self.content_last.set(0);
+        self.relayout();
         if cx.views.store.feed(&self.key()).is_none() {
             fx.push(Fx::App(YtFx::Load(self.key())));
         }
@@ -260,6 +306,17 @@ impl BrowseScreen {
     /// turned off): Home takes its place, as at start, instead of a grid that stays empty
     /// under a sidebar that cannot select it again.
     fn leave_missing_section(&mut self, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
+        if self.shown.is_some() {
+            // An unpinned item or a deleted group: back to the section.
+            if !nav_items(cx).iter().any(|i| Self::feed_of(i).is_some() && self.is_shown(i)) {
+                self.shown = None;
+                self.state = State(self.section.key().into());
+                self.relayout();
+                fx.invalidate(plx_machine::present::Provenance::Lifecycle);
+            } else {
+                return;
+            }
+        }
         let store = &cx.views.store;
         let to = Section::boot(self.section.key(), &store.settings, store.signed_in);
         if to != self.section {
@@ -294,7 +351,7 @@ impl BrowseScreen {
     }
 
     fn nav_index_of_section(&self, items: &[NavItem]) -> usize {
-        items.iter().position(|i| *i == NavItem::Section(self.section)).unwrap_or(0)
+        items.iter().position(|i| self.is_shown(i)).unwrap_or(0)
     }
 
     /// Left past the leftmost tile: into the sidebar when "Left opens the sidebar" is on.
@@ -422,8 +479,14 @@ impl Machine<YtHost> for BrowseScreen {
             }
             ScreenEvent::Timer(T_NAV) => {
                 let on = cx.focus.current.filter(|k| k.entry == self.entry && k.elem >= NAV_BASE);
-                if let Some(NavItem::Section(s)) = on.and_then(|k| self.nav.index(k.elem, items.len())).map(|i| items[i].clone()) {
-                    self.switch(s, cx, fx);
+                match on.and_then(|k| self.nav.index(k.elem, items.len())).map(|i| items[i].clone()) {
+                    Some(NavItem::Section(s)) => self.switch(s, cx, fx),
+                    Some(item) => {
+                        if let Some(shown) = Self::feed_of(&item) {
+                            self.show_feed(shown, cx, fx);
+                        }
+                    }
+                    None => {}
                 }
                 return Handled::Yes;
             }
@@ -684,7 +747,11 @@ impl Screen<YtHost> for BrowseScreen {
         // Sidebar
         // Page title over a header band, after the content: scrolled rows go under it.
         ui::header_band(p, Rect::new(0.0, 0.0, 1920.0, 118.0));
-        ui::text(p, &self.section.name(&cx.views.store.settings), LEFT, 30.0, 44, ui::WHITE, ui::ALIGN_LEFT, true);
+        match &self.shown {
+            // A channel's or playlist's own name, as on its page.
+            Some((_, title)) => ui::text_raw(p, title, LEFT, 30.0, 44, ui::WHITE, ui::ALIGN_LEFT, true),
+            None => ui::text(p, &self.section.name(&cx.views.store.settings), LEFT, 30.0, 44, ui::WHITE, ui::ALIGN_LEFT, true),
+        };
         if cx.views.store.settings.clock_on_pages {
             common::clock_block(p, cx, 1824.0, 22.0);
         }
@@ -717,10 +784,10 @@ impl Screen<YtHost> for BrowseScreen {
             .map(|i| {
                 use ui::icon::Kind as K;
                 match i {
-                    NavItem::Section(s) => Row::new(s.name(&cx.views.store.settings)).active(*s == self.section).icon(section_icon(*s)),
+                    NavItem::Section(s) => Row::new(s.name(&cx.views.store.settings)).active(self.is_shown(i)).icon(section_icon(*s)),
                     NavItem::Search => Row::new("Search").icon(K::Search),
-                    NavItem::Pinned(t, ..) => Row::new(t.clone()).icon(K::Star).raw(),
-                    NavItem::Group(_, t) => Row::new(t.clone()).icon(K::Folder).raw(),
+                    NavItem::Pinned(t, ..) => Row::new(t.clone()).active(self.is_shown(i)).icon(K::Star).raw(),
+                    NavItem::Group(_, t) => Row::new(t.clone()).active(self.is_shown(i)).icon(K::Folder).raw(),
                     NavItem::Settings => Row::new("Settings").icon(K::Gear),
                     NavItem::Account => match (&cx.views.store.account, cx.views.store.signed_in) {
                         (Some(a), true) if !a.trim().is_empty() => Row::new(a.clone()).raw(),

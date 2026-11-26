@@ -1,1 +1,1 @@
-- Fixed: the selected video's title no longer moves a pixel to the left just after the card finishes growing
+- Changed: pinned channels, playlists and channel groups open in the sidebar as the sections do: rest the focus on one and its videos show beside it (OK still opens its own page, with Subscribe or Play all)
