@@ -136,9 +136,13 @@ pub fn empty_text(key: &FeedKey) -> (&'static str, &'static str) {
 ///
 /// `empty`: what a loaded page without cards says, and the line under it ([`empty_text`]).
 pub fn empty_state(p: Painter, m: &dyn plx_machine::machine::Measure, feed: Option<&Feed>, empty: (&str, &str), area: Rect, now_ms: u32) {
+    // Network trouble is said in plain words (and the page loads again on its own); any other
+    // failure keeps YouTube's (or our) reason in small type under the headline.
+    let net = feed.and_then(|f| f.error.as_deref()).and_then(crate::net::classify);
     let (msg, sub) = match feed {
         None => ("", ""),
         Some(f) if f.loading => ("", ""),
+        Some(_) if net.is_some() => net.map(|n| (n.title(), n.advice())).unwrap(),
         Some(f) if f.error.is_some() => ("Couldn't load this page", "Press OK on the section to retry."),
         Some(_) => empty,
     };
@@ -150,8 +154,16 @@ pub fn empty_state(p: Painter, m: &dyn plx_machine::machine::Measure, feed: Opti
     if !sub.is_empty() {
         ui::text(p, sub, area.x + area.w / 2.0, area.y + area.h / 2.0 + 10.0, 26, ui::FAINT, ui::ALIGN_CENTER, false);
     }
-    if let Some(e) = feed.and_then(|f| f.error.as_deref()) {
-        ui::text_cut(p, m, e, area.x + area.w / 2.0, area.y + area.h / 2.0 + 56.0, area.w - 160.0, 20, ui::FAINT, ui::ALIGN_CENTER, false);
+    match net {
+        Some(n) if n.retries() => {
+            ui::text(p, "The page loads again on its own once the connection works.", area.x + area.w / 2.0, area.y + area.h / 2.0 + 56.0, 24, ui::FAINT, ui::ALIGN_CENTER, false);
+        }
+        Some(_) => {}
+        None => {
+            if let Some(e) = feed.and_then(|f| f.error.as_deref()) {
+                ui::text_cut(p, m, e, area.x + area.w / 2.0, area.y + area.h / 2.0 + 56.0, area.w - 160.0, 20, ui::FAINT, ui::ALIGN_CENTER, false);
+            }
+        }
     }
 }
 
@@ -316,3 +328,4 @@ fn local_offset_secs() -> i64 {
         }
     }
 }
+

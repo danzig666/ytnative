@@ -24,6 +24,7 @@ mod relaunch;
 #[cfg(not(windows))]
 mod voice;
 mod lounge;
+mod net;
 #[cfg_attr(windows, allow(dead_code))] // applied by the TV player only
 mod loudness;
 mod next_up;
@@ -286,6 +287,8 @@ fn main() {
         relaunch::install();
         #[cfg(not(windows))]
         voice::start();
+        #[cfg(not(windows))]
+        net::start();
         #[cfg(not(windows))]
         voice::repair();
         #[cfg(not(windows))]

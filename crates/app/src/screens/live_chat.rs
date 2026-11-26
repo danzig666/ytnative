@@ -352,7 +352,11 @@ impl LiveChatScreen {
             } else if chat.loading {
                 "Loading\u{2026}"
             } else if let Some(e) = chat.error.as_deref() {
-                e
+                // Network trouble in plain words.
+                match crate::net::classify(e) {
+                    Some(n) => n.title(),
+                    None => e,
+                }
             } else {
                 "No messages yet"
             };

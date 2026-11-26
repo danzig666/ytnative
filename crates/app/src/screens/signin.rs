@@ -172,7 +172,17 @@ impl Screen<YtHost> for SignInScreen {
             }
             SignIn::Failed(e) => {
                 ui::text(p, "Sign-in didn't work.", 120.0, 330.0, 40, ui::WHITE, ui::ALIGN_LEFT, false);
-                ui::text_cut(p, f.measure, e, 120.0, 395.0, 1680.0, 28, ui::FAINT, ui::ALIGN_LEFT, false);
+                // Network trouble in plain words; anything else as it came.
+                match crate::net::classify(e) {
+                    Some(n) => {
+                        let line = format!("{}. {}", crate::i18n::tr(n.title()), crate::i18n::tr(n.advice()));
+                        ui::text_cut(p, f.measure, &line, 120.0, 395.0, 1680.0, 28, ui::FAINT, ui::ALIGN_LEFT, false);
+                    }
+
+                    None => {
+                        ui::text_cut(p, f.measure, e, 120.0, 395.0, 1680.0, 28, ui::FAINT, ui::ALIGN_LEFT, false);
+                    }
+                }
                 ui::text(p, "Press OK to try again.", 120.0, 460.0, 30, ui::DIM, ui::ALIGN_LEFT, false);
             }
         }

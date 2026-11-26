@@ -1126,8 +1126,12 @@ impl Screen<YtHost> for PlayerScreen {
                 // The failure: a headline, YouTube's (or our) reason under it in full; a members-only
                 // video just says so.
                 ui::text(p, "Can't play this video", 960.0, 440.0, 40, ui::WHITE, ui::ALIGN_CENTER, true);
-                // YouTube's common refusals in the interface's language; anything else as it came.
-                let msg = refusal_text(&msg, cx.views.store.signed_in).map_or_else(|| crate::i18n::tr_parts(&msg), |t| crate::i18n::tr(t).to_string());
+                // Network trouble and YouTube's common refusals in the interface's language;
+                // anything else as it came.
+                let msg = match crate::net::classify(&msg) {
+                    Some(n) => format!("{}. {}", crate::i18n::tr(n.title()), crate::i18n::tr(n.advice())),
+                    None => refusal_text(&msg, cx.views.store.signed_in).map_or_else(|| crate::i18n::tr_parts(&msg), |t| crate::i18n::tr(t).to_string()),
+                };
                 for (i, line) in ui::wrap_lines(f.measure, &msg, 1300.0, 28, false, 9).iter().enumerate() {
                     ui::text_raw(p, line, 960.0, 510.0 + i as f32 * 42.0, 28, ui::DIM, ui::ALIGN_CENTER, false);
                 }

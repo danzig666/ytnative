@@ -368,7 +368,9 @@ impl Screen<YtHost> for CommentsScreen {
             return;
         };
         if c.items.is_empty() {
-            let msg = c.error.clone().unwrap_or_else(|| crate::i18n::tr(if c.loading { "Loading\u{2026}" } else { "No comments" }).to_string());
+            // Network trouble in plain words.
+            let net = c.error.as_deref().and_then(crate::net::classify).map(|n| crate::i18n::tr(n.title()).to_string());
+            let msg = net.or_else(|| c.error.clone()).unwrap_or_else(|| crate::i18n::tr(if c.loading { "Loading\u{2026}" } else { "No comments" }).to_string());
             ui::text_cut(p, f.measure, &msg, PANEL.x + PANEL.w / 2.0, 500.0, PANEL.w - 80.0, 30, ui::DIM, ui::ALIGN_CENTER, false);
             return;
         }

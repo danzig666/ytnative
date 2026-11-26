@@ -804,7 +804,6 @@ fn link_icon(c: &Card) -> icon::Kind {
         "FEplaylist_aggregation" | "FEmy_youtube" | "FElibrary" => K::Library,
         "FEsubscriptions" => K::Subs,
         "FEchannels" => K::Users,
-        "FEtrending" => K::Flame,
         id if id.starts_with("FEmusic") || c.title.eq_ignore_ascii_case("music") => K::Music,
         id if id.starts_with("VL") => K::List,
         id if id.starts_with("UC") => K::User,

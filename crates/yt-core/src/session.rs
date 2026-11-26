@@ -25,7 +25,6 @@ pub mod feeds {
     pub const HISTORY: &str = "FEhistory";
     pub const LIBRARY: &str = "FEmy_youtube";
     pub const PLAYLISTS: &str = "FEplaylist_aggregation";
-    pub const TRENDING: &str = "FEtrending";
     pub const SHORTS: &str = "FEshorts";
 }
 

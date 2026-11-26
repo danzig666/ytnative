@@ -406,7 +406,6 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
             Opt("Hide Shorts in Subscriptions", |s| on_off(s.hide_shorts_subscriptions), |s, _| s.hide_shorts_subscriptions = !s.hide_shorts_subscriptions),
             Opt("Hide Shorts in Search", |s| on_off(s.hide_shorts_search), |s, _| s.hide_shorts_search = !s.hide_shorts_search),
             Opt("Hide Shorts in History", |s| on_off(s.hide_shorts_history), |s, _| s.hide_shorts_history = !s.hide_shorts_history),
-            Opt("Hide Shorts in Trending", |s| on_off(s.hide_shorts_trending), |s, _| s.hide_shorts_trending = !s.hide_shorts_trending),
             Opt("Hide Shorts on channel pages", |s| on_off(s.hide_shorts_channels), |s, _| s.hide_shorts_channels = !s.hide_shorts_channels),
             Opt("Hide watched videos on Home", |s| on_off(s.hide_watched_home), |s, _| s.hide_watched_home = !s.hide_watched_home),
             Opt("Hide watched videos in Subscriptions", |s| on_off(s.hide_watched_subscriptions), |s, _| {
@@ -513,7 +512,6 @@ fn items(page: SettingsPage, s: &Settings) -> Vec<Item> {
                 section_toggle!("Sidebar: Live", Section::Live),
                 section_toggle!("Sidebar: Movies", Section::Movies),
                 section_toggle!("Sidebar: Sports", Section::Sports),
-                section_toggle!("Sidebar: Trending", Section::Trending),
                 section_toggle!("Sidebar: Kids", Section::Kids),
                 section_toggle!("Sidebar: Notifications", Section::Notifications),
             ]);

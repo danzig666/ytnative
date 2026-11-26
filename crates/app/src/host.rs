@@ -285,6 +285,9 @@ pub enum YtFx {
     LiveChat(Option<(String, Option<String>)>),
 }
 
+/// How many pages that failed for the network are kept to load again.
+const NET_RETRY_PAGES: usize = 6;
+
 pub enum YtMsg {
     Loaded(FeedKey),
     Failed(FeedKey, String),
@@ -453,6 +456,9 @@ pub struct AppRig {
     signin_run: u32,
     /// Bumped whenever the feeds are cleared (see `Work::Page`).
     feeds_epoch: u64,
+    /// Pages that failed for the network and the screen that asked for each: loaded again when
+    /// due (`Feed::retry_due`: the connection came back, or a while went by). The newest few.
+    net_failed: Vec<(FeedKey, MachineId)>,
     next_req: u32,
     pub player: Player,
     sb: yt_core::ext::sponsorblock::SkipTracker,
@@ -561,6 +567,7 @@ impl AppRig {
             signin_cancel: Default::default(),
             signin_run: 0,
             feeds_epoch: 0,
+            net_failed: Vec::new(),
             next_req: 0,
             player: Player::new(),
             sb: Default::default(),
@@ -666,7 +673,7 @@ impl AppRig {
         let FeedKey::Local(id) = key else { return };
         match self.store.local.get(id).map(|l| l.to_page()) {
             Some(page) => self.store.apply(key, page, false),
-            None => self.store.fail(key, crate::i18n::tr("This playlist no longer exists").to_string()),
+            None => self.store.fail(key, crate::i18n::tr("This playlist no longer exists").to_string(), self.now_ms),
         }
     }
 
@@ -998,6 +1005,29 @@ impl AppRig {
         }
     }
 
+    /// Loads again the pages that failed for the network once they are due; a page that loaded
+    /// since, or failed for another reason, is let go.
+    fn retry_net_failed(&mut self, now_ms: u32) {
+        if self.net_failed.is_empty() {
+            return;
+        }
+        let failed = std::mem::take(&mut self.net_failed);
+        for (key, to) in failed {
+            let Some(due) = self.store.feed(&key).map(|f| f.retry_due(now_ms)) else { continue };
+            if due {
+                crate::log(&format!("feed {key:?}: loading again after a network failure"));
+                self.store.mark_loading(&key);
+                let epoch = self.feeds_epoch;
+                let k = key.clone();
+                self.spawn(to, "feed", move |s| load_page(s, epoch, &k, None));
+            }
+            // Kept while it is loading again or still failed for the network.
+            if self.store.feed(&key).is_some_and(|f| f.loading || f.error.as_deref().and_then(crate::net::classify).is_some()) {
+                self.net_failed.push((key, to));
+            }
+        }
+    }
+
     fn next_addr(&mut self, to: MachineId) -> Addr {
         self.next_req += 1;
         Addr { to, req: RequestId(self.next_req) }
@@ -1025,6 +1055,7 @@ impl AppRig {
     /// Main thread, once per frame: snapshot the player, move finished worker results into the
     /// store, and return the notifications for the screens that asked.
     pub fn drain(&mut self, now_ms: u32) -> Vec<(Addr, YtMsg)> {
+        self.retry_net_failed(now_ms);
         self.now_ms = now_ms;
         crate::ui::set_accent(&self.store.settings.accent);
         crate::ui::set_card_cols(self.store.settings.card_columns);
@@ -1229,7 +1260,7 @@ impl AppRig {
                     match failed {
                         Some(e) if self.store.local.lists.is_empty() || append => {
                             crate::log(&format!("feed {key:?} failed: {e}"));
-                            self.store.fail(&key, e.clone());
+                            self.store.fail(&key, e.clone(), now_ms);
                             out.push((addr, YtMsg::Failed(key, e)));
                             continue;
                         }
@@ -1250,7 +1281,19 @@ impl AppRig {
                 Work::Page { key, page, append, failed, .. } => {
                     if let Some(e) = failed {
                         crate::log(&format!("feed {key:?} failed: {e}"));
-                        self.store.fail(&key, e.clone());
+                        if crate::net::classify(&e).is_some_and(crate::net::Problem::retries) && !append {
+                            self.net_failed.retain(|(k, _)| *k != key);
+                            self.net_failed.push((key.clone(), addr.to));
+                            if self.net_failed.len() > NET_RETRY_PAGES {
+                                self.net_failed.remove(0);
+                            }
+                        }
+                        // A page that stays on screen (a refresh or the next page that failed):
+                        // the network trouble said in a line, not hidden.
+                        if let Some(p) = crate::net::classify(&e).filter(|_| !self.store.cards(&key).is_empty()) {
+                            self.store.toast(crate::i18n::tr(p.title()), now_ms);
+                        }
+                        self.store.fail(&key, e.clone(), now_ms);
                         out.push((addr, YtMsg::Failed(key, e)));
                     } else {
                         // The session may just have filled in the account's name (a placeholder
@@ -1807,7 +1850,8 @@ fn run_action(session: &Mutex<Option<yt_core::session::Session>>, a: &UserAction
             let dbg = format!("{a:?}");
             let kind = dbg.split(|c: char| !c.is_alphanumeric()).next().unwrap_or_default();
             crate::log(&format!("action {kind}: {e:#}"));
-            ("That didn't work, try again".into(), false)
+            let msg = crate::net::classify(&format!("{e:#}")).map_or("That didn't work, try again", crate::net::Problem::title);
+            (msg.into(), false)
         }
     }
 }

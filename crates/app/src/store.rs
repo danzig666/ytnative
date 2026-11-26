@@ -20,7 +20,6 @@ pub enum Section {
     Live,
     Movies,
     Sports,
-    Trending,
     /// The account's notifications inbox (signed in only; `yt_core::notifications`).
     Notifications,
     /// Shorts of the subscriptions and Home (`Session::shorts`).
@@ -47,7 +46,6 @@ impl Section {
         Section::Live,
         Section::Movies,
         Section::Sports,
-        Section::Trending,
         Section::Kids,
         Section::Notifications,
     ];
@@ -66,7 +64,6 @@ impl Section {
             Section::Live => "live",
             Section::Movies => "movies",
             Section::Sports => "sports",
-            Section::Trending => "trending",
             Section::Notifications => "notifications",
             Section::Shorts => "shorts",
             Section::MyVideos => "my_videos",
@@ -92,7 +89,6 @@ impl Section {
             Section::Live => "Live",
             Section::Movies => "Movies",
             Section::Sports => "Sports",
-            Section::Trending => "Trending",
             Section::Notifications => "Notifications",
             Section::Shorts => "Shorts",
             Section::MyVideos => "My videos",
@@ -144,7 +140,6 @@ impl Section {
             Section::Live => "FEtopics_live",
             Section::Movies => "FEtopics_movies",
             Section::Sports => "FEtopics_sports",
-            Section::Trending => "FEtrending",
             // Not a browse page: loaded from `notification/get_notification_menu` instead.
             Section::Notifications => "FEnotifications",
             // Not TV browse pages either: `Session::shorts`, `yt_core::kids::home`.
@@ -241,6 +236,10 @@ pub struct Feed {
     pub gen: u32,
     /// Rows of `cards`, in order. One untitled row = a plain grid.
     pub shelves: Vec<Row>,
+    /// When the last load failed (`now_ms`) and the connection's [`crate::net::online_gen`] then:
+    /// a page that failed for the network loads again by them.
+    pub failed_at: u32,
+    pub failed_gen: u32,
 }
 
 /// One row (shelf) of a feed: its title, its cards' range in `Feed::cards`, and the token for
@@ -257,6 +256,11 @@ impl Feed {
     /// Several titled rows: show as shelves (Home, topics) rather than one grid.
     pub fn has_rows(&self) -> bool {
         self.shelves.len() > 1 && self.shelves.iter().filter(|s| !s.title.is_empty()).count() >= 2
+    }
+
+    /// It failed for the network and is due to load again ([`crate::net::retry_due`]).
+    pub fn retry_due(&self, now_ms: u32) -> bool {
+        crate::net::retry_due(self.error.as_deref(), self.loading, self.failed_at, self.failed_gen, now_ms)
     }
 }
 
@@ -519,10 +523,12 @@ impl Store {
         }
     }
 
-    pub fn fail(&mut self, k: &FeedKey, e: String) {
+    pub fn fail(&mut self, k: &FeedKey, e: String, now_ms: u32) {
         let f = self.feeds.entry(k.clone()).or_default();
         f.loading = false;
         f.error = Some(e);
+        f.failed_at = now_ms;
+        f.failed_gen = crate::net::online_gen();
         f.gen += 1;
     }
 
@@ -687,7 +693,6 @@ impl<'a> Filter<'a> {
                 FeedKey::Section(Section::Home) => s.hide_shorts_home,
                 FeedKey::Section(Section::Subscriptions) => s.hide_shorts_subscriptions,
                 FeedKey::Section(Section::History) => s.hide_shorts_history,
-                FeedKey::Section(Section::Trending) => s.hide_shorts_trending,
                 FeedKey::Search { .. } => s.hide_shorts_search,
                 _ => channel && s.hide_shorts_channels,
             });

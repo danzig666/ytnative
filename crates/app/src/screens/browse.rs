@@ -119,7 +119,6 @@ fn section_icon(s: Section) -> ui::icon::Kind {
         Section::Live => K::Live,
         Section::Movies => K::Film,
         Section::Sports => K::Trophy,
-        Section::Trending => K::Flame,
         Section::Notifications => K::Bell,
         Section::Shorts => K::Play,
         Section::MyVideos => K::User,
@@ -277,7 +276,7 @@ impl BrowseScreen {
         self.state = State(format!("{:?}", shown.0));
         self.shown = Some(shown);
         self.relayout();
-        if cx.views.store.feed(&self.key()).is_none() {
+        if cx.views.store.feed(&self.key()).is_none_or(|f| f.error.is_some()) {
             fx.push(Fx::App(YtFx::Load(self.key())));
         }
         fx.invalidate(plx_machine::present::Provenance::Input);
@@ -296,7 +295,8 @@ impl BrowseScreen {
         self.shown = None;
         self.state = State(section.key().into());
         self.relayout();
-        if cx.views.store.feed(&self.key()).is_none() {
+        // Not loaded yet, or it failed (the network was down): load it now.
+        if cx.views.store.feed(&self.key()).is_none_or(|f| f.error.is_some()) {
             fx.push(Fx::App(YtFx::Load(self.key())));
         }
         fx.invalidate(plx_machine::present::Provenance::Input);

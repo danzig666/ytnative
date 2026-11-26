@@ -467,11 +467,10 @@ pub struct Settings {
     pub hide_shorts_subscriptions: bool,
     pub hide_shorts_search: bool,
     pub hide_shorts_history: bool,
-    pub hide_shorts_trending: bool,
     pub hide_shorts_channels: bool,
     pub hide_watched_notifications: bool,
     pub hide_watched_watch_later: bool,
-    /// Shorts hidden in every list (channel pages, history, trending too).
+    /// Shorts hidden in every list (channel pages and history too).
     pub hide_shorts_everywhere: bool,
     pub hide_watched_home: bool,
     pub hide_watched_subscriptions: bool,
@@ -644,7 +643,6 @@ impl Default for Settings {
             hide_shorts_subscriptions: false,
             hide_shorts_search: false,
             hide_shorts_history: false,
-            hide_shorts_trending: false,
             hide_shorts_channels: false,
             hide_watched_notifications: false,
             hide_watched_watch_later: false,
@@ -662,11 +660,10 @@ impl Default for Settings {
             pinned: Vec::new(),
             section_names: Vec::new(),
             original_titles: false,
-            // Trending is off by default: YouTube retired the page (browse answers HTTP 400).
             // Shorts, My videos and Kids are offered in the sidebar settings, off at first.
             sections: crate::store::Section::ALL
                 .iter()
-                .filter(|s| !matches!(s, crate::store::Section::Trending | crate::store::Section::Shorts | crate::store::Section::MyVideos | crate::store::Section::Kids))
+                .filter(|s| !matches!(s, crate::store::Section::Shorts | crate::store::Section::MyVideos | crate::store::Section::Kids))
                 .map(|s| s.key().to_string())
                 .collect(),
             boot_section: "home".into(),
@@ -747,6 +744,12 @@ impl Settings {
     /// Carries older single options over to the ones that replaced them.
     fn migrate(&mut self, v: &serde_json::Value) {
         let has = |k: &str| v.get(k).is_some();
+        // Sections YouTube took away (Trending: its browse id answers HTTP 400 to every client since
+        // 2025) leave the sidebar and the start choice.
+        self.sections.retain(|k| crate::store::Section::from_key(k).is_some());
+        if crate::store::Section::from_key(&self.boot_section).is_none() {
+            self.boot_section = "home".into();
+        }
         // Settings saved before the TV's capabilities were read: the playback choices in them may
         // be the viewer's own (1080p, H.264, the system player look the same as the old defaults),
         // so only a first start (no settings yet) is set from the TV.
