@@ -1064,6 +1064,21 @@ const SCRIPT_FONTS: [&str; LINKS - 6] = [
     "/usr/share/fonts/NotoSansArmenian-Regular.ttf",
 ];
 
+/// ytnative: the bundled Noto Sans faces (unmodified, unhinted static Regular cuts from
+/// `notofonts/notofonts.github.io`) for the first script links, in the same order as
+/// [`SCRIPT_FONTS`]: used only where the television has no face of its own.
+pub const BUNDLED_SCRIPT_FONTS: [&str; 9] = [
+    "appfont-devanagari.ttf",
+    "appfont-bengali.ttf",
+    "appfont-gujarati.ttf",
+    "appfont-gurmukhi.ttf",
+    "appfont-kannada.ttf",
+    "appfont-malayalam.ttf",
+    "appfont-oriya.ttf",
+    "appfont-tamil.ttf",
+    "appfont-telugu.ttf",
+];
+
 impl Link {
     /// Shaped by [`crate::rtl`] rather than drawn by SDL2_ttf. ytnative: the television's script
     /// faces too, when the shaping library loads (conjuncts, reordered vowel signs, stacked
@@ -1136,7 +1151,15 @@ fn link_file(link: Link) -> std::path::PathBuf {
         Link::Arabic => plx_base::paths::in_app_dir(ARABIC_FONT),
         Link::Hebrew => plx_base::paths::in_app_dir(HEBREW_FONT),
         Link::Sys => std::path::PathBuf::from(DROIDSANS_FALLBACK),
-        l => std::path::PathBuf::from(SCRIPT_FONTS[l as usize - 6]),
+        l => {
+            let tv = std::path::PathBuf::from(SCRIPT_FONTS[l as usize - 6]);
+            match BUNDLED_SCRIPT_FONTS.get(l as usize - 6) {
+                // ytnative: not every firmware ships the Indic faces (issue #27), so the bundled
+                // Noto cut stands in when the television's own file is missing.
+                Some(own) if !tv.exists() => plx_base::paths::in_app_dir(own),
+                _ => tv,
+            }
+        }
     }
 }
 
@@ -1294,11 +1317,17 @@ fn split_runs_with(s: &str, covers: impl Fn(Link, u32) -> bool) -> Option<Runs> 
         // A codepoint NO link covers resolves to Base, which draws its .notdef box. That is the
         // right answer: it is the honest tofu, it keeps the runs contiguous, and it is what the
         // renderer did before the chain existed.
-        let link = CHAIN
-            .iter()
-            .copied()
-            .find(|&l| covers(l, cp))
-            .unwrap_or(Link::Base);
+        //
+        // ytnative: a zero-width joiner or non-joiner stays in the run of the letter before it
+        // when that face has it (issue #27). Indic words carry them ("కోడ్‌ను"), and a first-match
+        // pick would hand them to an earlier script face: a run of nothing but a joiner, which
+        // SDL2_ttf refuses to draw, taking the whole line to boxes, and a shaper that never sees
+        // the joiner it needs to pick the right conjunct.
+        let prev = runs.at.get(..runs.n).and_then(|r| r.last()).map(|r| r.0);
+        let link = match prev {
+            Some(p) if matches!(cp, 0x200C | 0x200D) && p != Link::Base && covers(p, cp) => p,
+            _ => CHAIN.iter().copied().find(|&l| covers(l, cp)).unwrap_or(Link::Base),
+        };
         if link != Link::Base {
             mixed = true;
         }
@@ -4018,3 +4047,4 @@ mod price_model_tests {
         let _ = std::fs::remove_dir_all(&scratch);
     }
 }
+

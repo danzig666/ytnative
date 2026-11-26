@@ -291,6 +291,17 @@ Their runs are shaped by the bundled ASS renderer's UI text surface (HarfBuzz, F
 FreeType, section 1.2), so Arabic, Persian, Urdu and Hebrew titles draw joined and in reading
 order instead of as empty boxes.
 
+**Noto Sans Indic faces** (ytnative) — `appfont-devanagari.ttf`, `appfont-bengali.ttf`,
+`appfont-gujarati.ttf`, `appfont-gurmukhi.ttf`, `appfont-kannada.ttf`, `appfont-malayalam.ttf`,
+`appfont-oriya.ttf`, `appfont-tamil.ttf`, `appfont-telugu.ttf`
+Copyright 2022–2025 The Noto Project Authors, per the fonts' own name tables. The unhinted static
+Regular TTFs `fonts/NotoSans<Script>/unhinted/ttf/NotoSans<Script>-Regular.ttf` of
+`notofonts/notofonts.github.io` (fetched 2026-11-26), renamed and otherwise unmodified.
+Licence: **SIL Open Font License 1.1** (`OFL.txt`); no Reserved Font Name is declared. "Noto is a
+trademark of Google LLC."
+*Why they ship:* they stand in for the television's own Indic faces on firmware that has none, so
+Hindi, Bengali, Tamil, Telugu and the other Indic scripts draw as letters instead of boxes.
+
 ### 2.4 Rust code statically linked into `plxnative`
 
 The application core is Rust. The Rust standard library (the pinned stable toolchain's

@@ -1297,3 +1297,34 @@ mod dim_tests {
         assert_eq!(take_panel_key(), None);
     }
 }
+
+#[cfg(test)]
+mod bundled_script_font_tests {
+    /// The Indic faces that stand in where the television has none (issue #27) are in the package,
+    /// each covering its own script's letters, vowel signs and virama, and none of them Hebrew or
+    /// Arabic (those must reach the shaped right-to-left links only).
+    #[test]
+    fn each_bundled_indic_face_covers_its_own_script() {
+        let scripts = [
+            ("devanagari", 0x0915, 0x093F, 0x094D),
+            ("bengali", 0x0995, 0x09BF, 0x09CD),
+            ("gujarati", 0x0A95, 0x0ABF, 0x0ACD),
+            ("gurmukhi", 0x0A15, 0x0A3F, 0x0A4D),
+            ("kannada", 0x0C95, 0x0CBF, 0x0CCD),
+            ("malayalam", 0x0D15, 0x0D3F, 0x0D4D),
+            ("oriya", 0x0B15, 0x0B3F, 0x0B4D),
+            ("tamil", 0x0B95, 0x0BBF, 0x0BCD),
+            ("telugu", 0x0C15, 0x0C3F, 0x0C4D),
+        ];
+        let pkg = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/pkg"));
+        for (i, (script, ka, i_sign, virama)) in scripts.into_iter().enumerate() {
+            let name = plx_gfx::text::BUNDLED_SCRIPT_FONTS[i];
+            assert_eq!(name, format!("appfont-{script}.ttf"));
+            let c = plx_base::fontcov::of_file(&pkg.join(name)).unwrap();
+            for cp in [ka, i_sign, virama] {
+                assert!(c.contains(cp), "{script}: U+{cp:04X}");
+            }
+            assert!(!(0x0590..0x0700).any(|cp| c.contains(cp)), "{script} carries Hebrew or Arabic");
+        }
+    }
+}

@@ -3,3 +3,4 @@
 - Removed: the Trending section: YouTube retired the page and it could only fail
 - Fixed: Subscriptions shows every new video newest first and keeps loading more as you scroll; YouTube's new "Most relevant" shelf, in its own order, is left out (#26)
 - Added: the player's subtitles button opens a list of the video's subtitle languages to pick from (or Off), as in SmartTube; the Subtitles row of the player options picks from the same list. Machine translations are not offered: YouTube refuses most of them (#26)
+- Fixed: Hindi, Bengali, Tamil, Telugu and the other Indian scripts show as letters instead of boxes on TVs that have no fonts of their own for them: the app now brings its own (Noto Sans), and words with an invisible joiner no longer turn a whole line into boxes (#27)
