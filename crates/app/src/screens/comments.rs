@@ -299,7 +299,7 @@ impl Focusable<YtHost> for CommentsScreen {
     fn groups(&self, cx: &Cx<'_, YtHost>, out: &mut Vec<GroupSpec>) {
         // Always one row, even while loading, so focus is seated on entry and lands on the first
         // comment once they arrive.
-        out.push(self.list.spec(self.len(cx).max(1)));
+        out.push(self.list.spec_left_back(self.len(cx).max(1)));
     }
     fn group_of(&self, _key: &u32, _cx: &Cx<'_, YtHost>) -> Option<GroupId> {
         Some(G)

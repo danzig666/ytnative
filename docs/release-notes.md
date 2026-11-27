@@ -5,3 +5,4 @@
 - Added: the player's subtitles button opens a list of the video's subtitle languages to pick from (or Off), as in SmartTube; the Subtitles row of the player options picks from the same list. Machine translations are not offered: YouTube refuses most of them (#26)
 - Fixed: Hindi, Bengali, Tamil, Telugu and the other Indian scripts show as letters instead of boxes on TVs that have no fonts of their own for them: the app now brings its own (Noto Sans), and words with an invisible joiner no longer turn a whole line into boxes (#27)
 - Fixed: video titles written in "fancy" bold or italic letters (𝐓𝐨𝐜𝐚 𝐁𝐨𝐜𝐚) show as plain letters instead of boxes
+- Changed: Left closes a drop-down list in the settings and the player options, leaves a settings sub-page (Card menu, ...) and closes the comments and replies, as Back does and as in YouTube's own TV app (#28)

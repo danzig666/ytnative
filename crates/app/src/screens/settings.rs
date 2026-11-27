@@ -992,7 +992,8 @@ impl Machine<YtHost> for SettingsScreen {
                 }
                 Handled::Yes
             }
-            ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: Key::Left | Key::Right, .. }, .. }) if self.choice.is_some() => Handled::Yes,
+            // Right does nothing in a drop-down; Left leaves it (its group's edge rule, as BACK).
+            ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: Key::Right, .. }, .. }) if self.choice.is_some() => Handled::Yes,
             ScreenEvent::Uncover => {
                 let s = &cx.views.store.settings;
                 if let Some(q) = super::settings_search::take_query().filter(|_| self.root()) {
@@ -1029,13 +1030,15 @@ impl Machine<YtHost> for SettingsScreen {
 impl Focusable<YtHost> for SettingsScreen {
     fn groups(&self, cx: &Cx<'_, YtHost>, out: &mut Vec<GroupSpec>) {
         if let Some(c) = &self.choice {
-            out.push(c.list.spec(c.options.len()));
+            out.push(c.list.spec_left_back(c.options.len()));
             return;
         }
         if self.root() {
             out.push(self.left.spec(LEFT_N));
         }
-        out.push(self.list.spec(self.rows(cx).len()));
+        // A sub-page ("Card menu", ...): Left goes back to the page it was opened from.
+        let n = self.rows(cx).len();
+        out.push(if self.root() { self.list.spec(n) } else { self.list.spec_left_back(n) });
     }
     fn group_of(&self, key: &u32, _cx: &Cx<'_, YtHost>) -> Option<GroupId> {
         Some(if self.choice.as_ref().is_some_and(|c| c.owns(*key)) {

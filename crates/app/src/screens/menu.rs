@@ -1328,8 +1328,9 @@ impl Machine<YtHost> for MenuScreen {
                 }
                 Handled::Yes
             }
-            ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: Key::Left | Key::Right, .. }, .. }) if self.choice.is_some() => Handled::Yes,
-            ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: key @ (Key::Left | Key::Right), edge: edge @ (Edge::Down | Edge::Repeat), .. }, .. }) => {
+            // Right does nothing in a drop-down; Left leaves it (its group's edge rule, as BACK).
+            ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: Key::Right, .. }, .. }) if self.choice.is_some() => Handled::Yes,
+            ScreenEvent::Input(InputEvent { kind: InputKind::Key { key: key @ (Key::Left | Key::Right), edge: edge @ (Edge::Down | Edge::Repeat), .. }, .. }) if self.choice.is_none() => {
                 if let Some(i) = self.list.focused(cx, n) {
                     let act = self.acts[i].1.clone();
                     if self.value(&act, cx).is_some() && (*edge == Edge::Down || repeats(&act)) {
@@ -1347,7 +1348,7 @@ impl Machine<YtHost> for MenuScreen {
 impl Focusable<YtHost> for MenuScreen {
     fn groups(&self, _cx: &Cx<'_, YtHost>, out: &mut Vec<GroupSpec>) {
         if let Some(c) = &self.choice {
-            out.push(c.list.spec(c.options.len()));
+            out.push(c.list.spec_left_back(c.options.len()));
             return;
         }
         out.push(self.list.spec(self.acts.len()));

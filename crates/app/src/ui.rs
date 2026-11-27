@@ -940,6 +940,13 @@ impl VList {
             elem: ElemKind::Control,
         }
     }
+    /// [`spec`](Self::spec) for a list Left leaves the way BACK does (a drop-down, the comments,
+    /// a settings sub-page), as YouTube's own TV app does.
+    pub fn spec_left_back(&self, len: usize) -> GroupSpec {
+        let mut g = self.spec(len);
+        g.edge[2] = EdgeRule::Nav(plx_machine::machine::NavOpKind::Back);
+        g
+    }
     pub fn place(&self, e: u32, len: usize, focus: Option<usize>) -> Option<Placed> {
         let i = self.index(e, len)?;
         let r = self.row_rect(i, self.top_for(focus, len));
