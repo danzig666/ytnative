@@ -155,6 +155,38 @@ pub struct Status {
     /// not reported); the "Same volume for every video" option turns the pipeline down by it.
     #[cfg_attr(windows, allow(dead_code))] // the simulator has no pipeline to turn down
     pub loudness_db: Option<f32>,
+    /// A seek on its way: its target and when it was asked for (see [`Status::report_position`]).
+    pub seek_hold: Option<(u64, std::time::Instant)>,
+}
+
+/// How long a seek's target is shown at most while the player gets there.
+const SEEK_HOLD: std::time::Duration = std::time::Duration::from_secs(4);
+/// A report this far past a seek's target still counts as the seek landing (on a later keyframe).
+const SEEK_LANDING_MS: u64 = 2000;
+
+impl Status {
+    /// A seek to `to_ms` starts: the position (the knob on the seek bar) shows the target at once
+    /// and holds it while the player gets there.
+    pub fn begin_seek(&mut self, to_ms: u64) {
+        self.position_ms = to_ms;
+        self.seek_hold = Some((to_ms, std::time::Instant::now()));
+    }
+
+    /// A position the player reports. While a seek is on its way, reports from before it and
+    /// from the pipeline still getting there are passed over, so the knob does not jump back and
+    /// forth when the seek ends: the target stays until the playback reaches it (a seek landing
+    /// on an earlier keyframe catches up to it) or lands a little past it (a later keyframe); after
+    /// [`SEEK_HOLD`] any report counts.
+    pub fn report_position(&mut self, t: u64) {
+        if let Some((to, since)) = self.seek_hold {
+            let landed = t >= to && t < to + SEEK_LANDING_MS;
+            if !landed && since.elapsed() < SEEK_HOLD {
+                return;
+            }
+            self.seek_hold = None;
+        }
+        self.position_ms = t;
+    }
 }
 
 #[cfg(not(windows))]
@@ -489,7 +521,7 @@ impl Player {
             let mut s = self.status.lock().unwrap();
             let to = clamp(s.position_ms as i64 + delta_ms, s.duration_ms as i64);
             let before = s.position_ms as i64;
-            s.position_ms = to as u64; // show the target immediately; events correct it
+            s.begin_seek(to as u64); // shown at once; the player's reports take over once it is there
             (before, s.duration_ms as i64)
         };
         let to = clamp(pos + delta_ms, dur);
@@ -729,7 +761,7 @@ fn on_event(status: &Mutex<Status>, msg: &str) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(msg) else { return };
     let mut s = status.lock().unwrap();
     if let Some(t) = v["currentTime"]["currentTime"].as_u64() {
-        s.position_ms = t;
+        s.report_position(t);
     } else if v.get("playing").is_some() {
         s.phase = Phase::Playing;
     } else if v.get("paused").is_some() {
@@ -1010,5 +1042,38 @@ mod pick_track_tests {
         for (code, name) in &list {
             assert_eq!(&pick_track(&tracks, code, false).unwrap().0.name, name);
         }
+    }
+}
+
+#[cfg(test)]
+mod seek_hold_tests {
+    use super::Status;
+
+    #[test]
+    fn a_seek_target_stays_until_the_playback_gets_there() {
+        let mut s = Status { position_ms: 30_000, ..Default::default() };
+        s.begin_seek(40_000);
+        // A report from before the seek, and the pipeline landing on an earlier keyframe: the
+        // knob stays on the target.
+        s.report_position(30_400);
+        assert_eq!(s.position_ms, 40_000);
+        s.report_position(38_500);
+        assert_eq!(s.position_ms, 40_000);
+        // The playback reaches the target: from there the reports count again.
+        s.report_position(40_100);
+        assert_eq!(s.position_ms, 40_100);
+        s.report_position(41_000);
+        assert_eq!(s.position_ms, 41_000);
+    }
+
+    #[test]
+    fn a_seek_back_passes_over_reports_from_before_it() {
+        let mut s = Status { position_ms: 60_000, ..Default::default() };
+        s.begin_seek(50_000);
+        s.report_position(60_300); // before the seek
+        assert_eq!(s.position_ms, 50_000);
+        s.report_position(51_200); // landed on a later keyframe
+        assert_eq!(s.position_ms, 51_200);
+        assert!(s.seek_hold.is_none());
     }
 }

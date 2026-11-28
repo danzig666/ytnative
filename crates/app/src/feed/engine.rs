@@ -779,8 +779,9 @@ fn session(sh: &Arc<Shared>, plan: &Plan, ctl: &SourceCtl, video: &Lane, audio: 
                 st.live_edge_ms = (edge.load(Relaxed) / 1_000_000) as u64;
             }
             let ms = (content.max(0) / 1_000_000) as u64;
-            let mut changed = st.position_ms / 200 != ms / 200;
-            st.position_ms = ms;
+            let before = st.position_ms;
+            st.report_position(ms);
+            let mut changed = before / 200 != st.position_ms / 200;
             if st.phase == Phase::Loading && !user_paused {
                 st.phase = Phase::Playing;
                 changed = true;

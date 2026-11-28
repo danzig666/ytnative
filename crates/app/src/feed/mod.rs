@@ -371,7 +371,7 @@ impl FeedPlayer {
     }
 
     fn seek_raw(&mut self, to_ms: u64) {
-        self.status.lock().unwrap().position_ms = to_ms; // shown at once; events correct it
+        self.status.lock().unwrap().begin_seek(to_ms); // shown at once; the reports take over once it is there
         self.send(Cmd::Seek(to_ms));
     }
 
