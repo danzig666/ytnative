@@ -1375,7 +1375,7 @@ impl Screen<YtHost> for PlayerScreen {
         }
         // Seek bar: one piece per chapter with a small clear gap between. As SmartTube's: thicker
         // with a white knob at the playhead while it has the focus (no button selected: Left /
-        // Right seek), thin and without the knob otherwise (#30).
+        // Right seek), thin with a small white dot otherwise (#30).
         let bar_focus = self.osd_sel.is_none();
         let bh = if bar_focus { 12.0 } else { 8.0 };
         let bar = Rect::new(96.0, BAR_Y + 4.0 - bh / 2.0, 1728.0, bh);
@@ -1417,9 +1417,9 @@ impl Screen<YtHost> for PlayerScreen {
                 preview = Some((bar, frac));
             }
         }
-        if bar_focus {
-            ui::fill(p, Rect::new(bar.x + bar.w * frac - 12.0, bar.y + bar.h / 2.0 - 12.0, 24.0, 24.0), 12.0, ui::WHITE);
-        }
+        // The knob: 24 px with the focus, otherwise a dot as tall as the bar, as SmartTube draws it.
+        let kr = if bar_focus { 12.0 } else { bh / 2.0 };
+        ui::fill(p, Rect::new(bar.x + bar.w * frac - kr, bar.y + bar.h / 2.0 - kr, kr * 2.0, kr * 2.0), kr, ui::WHITE);
         // Right of the upper row: quality / codec / HDR, and the date and time.
         let mut quality = String::new();
         let h = if st.height > 0 { st.height } else { st.quality_hint };
