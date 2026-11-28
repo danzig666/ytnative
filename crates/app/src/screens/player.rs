@@ -81,6 +81,16 @@ pub struct PlayerScreen {
     /// YouTube style: where each control was drawn last frame (pointer hits), and the seek bar.
     yt_rects: Vec<(usize, Rect)>,
     yt_bar: Rect,
+    /// SmartTube style: the button each row had when the focus went from it to the seek bar
+    /// (upper, lower), where Up / Down from the bar go back to.
+    osd_mem: (usize, usize),
+    /// SmartTube style: seeking from the bar shows only the bar and the times (and the storyboard
+    /// frame), as SmartTube's compact mode does, until another key than the seek keys is pressed.
+    compact: bool,
+    /// SmartTube style: a seek key held down speeds up 1.5 times every second, as in SmartTube:
+    /// (direction, when the step last grew, the step in ms). `seek_repeat`: this key is a repeat.
+    seek_run: Option<(i64, u32, i64)>,
+    seek_repeat: bool,
     state: State,
 }
 
@@ -109,6 +119,10 @@ impl PlayerScreen {
             back_swallow_up: false,
             yt_rects: Vec::new(),
             yt_bar: Rect::new(0.0, 0.0, 0.0, 0.0),
+            osd_mem: (OSD_PLAY, OSD_ROW_B),
+            compact: false,
+            seek_run: None,
+            seek_repeat: false,
         }
     }
 
@@ -147,7 +161,11 @@ impl PlayerScreen {
     }
 
     fn seek(&mut self, dir: i64, cx: &Cx<'_, YtHost>, fx: &mut Effects<'_, YtHost>) {
-        let step = cx.views.store.settings.seek_step_secs.max(1) as i64 * 1000;
+        let mut step = cx.views.store.settings.seek_step_secs.max(1) as i64 * 1000;
+        if !yt_style(cx) {
+            step = self.held_step(dir, step, cx.views.now_ms);
+            self.compact = true;
+        }
         let st = cx.views.player;
         if cx.views.store.settings.seek_confirm && !st.live && st.duration_ms > 0 {
             // "Confirm seeking with OK": the target moves on the bar; OK jumps there.
@@ -160,6 +178,26 @@ impl PlayerScreen {
         fx.push(Fx::App(YtFx::SeekBy(dir * step)));
         self.preview_until = cx.views.now_ms + 1500;
         self.show_hud(cx, fx);
+    }
+
+    /// The step of this seek: `base` for a new press; while the key is held (repeats in the same
+    /// direction) it grows 1.5 times every second, as SmartTube's `calculateSeekIncrement` does.
+    fn held_step(&mut self, dir: i64, base: i64, now: u32) -> i64 {
+        match self.seek_run {
+            Some((d, since, s)) if self.seek_repeat && d == dir => {
+                if now.wrapping_sub(since) >= 1000 {
+                    let s = s * 3 / 2;
+                    self.seek_run = Some((dir, now, s));
+                    s
+                } else {
+                    s
+                }
+            }
+            _ => {
+                self.seek_run = Some((dir, now, base));
+                base
+            }
+        }
     }
 
     /// The seek target waiting for OK, put down (BACK, the controls hidden).
@@ -250,15 +288,6 @@ fn yt_order(cx: &Cx<'_, YtHost>) -> Vec<usize> {
         .into_iter()
         .filter(|&i| !(child && i == OSD_COMMENTS))
         .collect()
-}
-
-/// The button in the other row nearest to button `i` (Up / Down between the rows).
-fn osd_other_row(i: usize) -> usize {
-    if i < OSD_ROW_B {
-        (i + OSD_ROW_B).min(OSD_N - 1)
-    } else {
-        (i - OSD_ROW_B).min(OSD_ROW_B - 1)
-    }
 }
 
 /// The video's suggestions, flattened into one row (videos only).
@@ -727,6 +756,7 @@ impl Machine<YtHost> for PlayerScreen {
                     }
                 }
                 self.pointer = Some((*x, *y));
+                self.compact = false; // the pointer wants the buttons
                 self.show_hud(cx, fx); // up, and kept up while the pointer moves
                 Handled::Yes
             }
@@ -782,6 +812,13 @@ impl Machine<YtHost> for PlayerScreen {
                 self.ptr_quiet = true;
                 self.ptr_anchor = None;
                 self.last_key_ms = cx.views.now_ms;
+                self.seek_repeat = *edge == Edge::Repeat;
+                // The compact seek view lasts while seeking; another key (or the controls coming
+                // back) brings the whole controls back, as SmartTube's full mode.
+                let seek_key = matches!(key, Key::Left | Key::Right) || [WCODE_RW, WCODE_FF].contains(wcode);
+                if *edge != Edge::Up && (!seek_key || !self.hud) {
+                    self.compact = false;
+                }
                 // A full dim (or a timed one) is lifted by any key, which does nothing else; a
                 // partial dim at once stays until its button is pressed again.
                 if self.dimmed && *edge == Edge::Down {
@@ -908,14 +945,34 @@ impl Machine<YtHost> for PlayerScreen {
                     match key {
                         Key::Left => self.osd_sel = Some(sel.saturating_sub(1).max(row.start)),
                         Key::Right => self.osd_sel = Some((sel + 1).min(row.end - 1)),
-                        Key::Down if sel < OSD_ROW_B => self.osd_sel = Some(osd_other_row(sel)),
+                        // The seek bar lies between the two rows, as in SmartTube: Down from the
+                        // upper row and Up from the lower one go to it.
+                        Key::Down if sel < OSD_ROW_B => {
+                            self.osd_mem.0 = sel;
+                            self.osd_sel = None;
+                        }
                         Key::Down => {
                             // Below the lower row: the playlist, the suggestions.
                             self.enter_rows(cx);
                         }
                         Key::Ok => self.press_osd(sel, cx, fx),
-                        Key::Up if sel >= OSD_ROW_B => self.osd_sel = Some(osd_other_row(sel)),
-                        Key::Up | Key::Back => self.osd_sel = None,
+                        Key::Up if sel < OSD_ROW_B => {
+                            // Above the upper row: the controls hide (SmartTube's top edge).
+                            self.osd_mem.0 = sel;
+                            self.hud = false;
+                            self.osd_sel = None;
+                            fx.push(Fx::CancelTimer(T_HIDE));
+                            fx.invalidate(plx_machine::present::Provenance::Input);
+                            return Handled::Yes;
+                        }
+                        Key::Up | Key::Back => {
+                            if sel < OSD_ROW_B {
+                                self.osd_mem.0 = sel;
+                            } else {
+                                self.osd_mem.1 = sel;
+                            }
+                            self.osd_sel = None;
+                        }
                         _ => {}
                     }
                     self.show_hud(cx, fx);
@@ -1028,6 +1085,12 @@ impl Machine<YtHost> for PlayerScreen {
                         self.step_queue(if *key == Key::Up { -1 } else { 1 }, cx, fx);
                         Handled::Yes
                     }
+                    (Key::Up, _) if self.hud && !yt_style(cx) => {
+                        // SmartTube style, on the seek bar: up to the upper row of buttons.
+                        self.osd_sel = Some(self.osd_mem.0);
+                        self.show_hud(cx, fx);
+                        Handled::Yes
+                    }
                     (Key::Up, _) => {
                         // Up shows / hides the on-screen controls.
                         if self.hud {
@@ -1049,6 +1112,12 @@ impl Machine<YtHost> for PlayerScreen {
                             fx.push(Fx::App(YtFx::Toast(ui::fmt_time(to))));
                             self.preview_until = cx.views.now_ms + 1500;
                         }
+                        self.show_hud(cx, fx);
+                        Handled::Yes
+                    }
+                    (Key::Down, _) if self.hud && !yt_style(cx) => {
+                        // SmartTube style, on the seek bar: down to the lower row of buttons.
+                        self.osd_sel = Some(self.osd_mem.1);
                         self.show_hud(cx, fx);
                         Handled::Yes
                     }
@@ -1232,86 +1301,95 @@ impl Screen<YtHost> for PlayerScreen {
             self.draw_rows_full(p, f.measure, cx);
             return;
         }
+        // Seeking from the bar: only the bar, the times and the storyboard frame (SmartTube's
+        // compact mode); the title and the buttons come back with another key.
+        let compact = self.compact && self.osd_sel.is_none();
         // A gradient from the picture into the controls (SmartTube's player background).
         p.rect(Rect::new(0.0, 520.0, 1920.0, 260.0), 0.0, [0.0, 0.0, 0.0, 0.0], ui::dimmed([0.0, 0.0, 0.0, 0.82]), 0.0);
         ui::fill(p, Rect::new(0.0, 780.0, 1920.0, 300.0), 0.0, [0.0, 0.0, 0.0, 0.82]);
-        // The playlist being played, on a line of its own above the title.
-        if let Some(q) = playing_list(cx, &self.video_id) {
-            list_eyebrow(p, f.measure, &list_line(q, &self.video_id), 96.0, 592.0, 1728.0, 28);
-        }
-        // Title and the line under it: channel, views, age, likes, dislikes, subscribers.
-        ui::glide(p, f.measure, &st.title, 96.0, 640.0, 1728.0, 50, ui::WHITE, true, ui::GLIDE_PLAYER_TITLE);
-        let votes: Option<(String, Option<String>)> = match (&ex.votes, ex.watch.as_ref().and_then(|w| w.like_count_text.clone())) {
-            (Some(v), _) => Some((ui::full_count(v.likes), Some(ui::full_count(v.dislikes)))),
-            (None, Some(l)) => Some((l, None)),
-            _ => None,
-        };
-        let sep = "  \u{2022}  ";
-        let views = ex.watch.as_ref().and_then(|w| w.short_view_count_text.clone());
-        let age = ex.watch.as_ref().and_then(common::video_age);
-        let subs = ex.watch.as_ref().and_then(|w| w.subscriber_count_text.clone());
-        // The width the votes take (icons, counts and their separators).
-        let sep_w = ui::text_width(f.measure, crate::i18n::tr(sep), 28, false);
-        let votes_w = votes.as_ref().map_or(0.0, |(l, d)| {
-            sep_w + 34.0 + ui::text_width(f.measure, l, 28, false) + d.as_ref().map_or(0.0, |d| sep_w + 34.0 + ui::text_width(f.measure, d, 28, false))
-        });
-        // Too long for the line: the subscribers go first, then the age, then the views.
-        let (views, age, subs) = fit_byline(
-            |v: Option<&str>, a: Option<&str>, sb: Option<&str>| {
-                let mut t = author_line(st, sep);
-                for x in [v, a].into_iter().flatten() {
-                    t.push_str(sep);
-                    t.push_str(x);
-                }
-                let mut w = ui::text_width(f.measure, &t, 28, false) + votes_w;
-                if let Some(x) = sb {
-                    w += ui::text_width(f.measure, &format!("{sep}{x}"), 28, false);
-                }
-                w
-            },
-            1728.0,
-            views,
-            age,
-            subs,
-        );
-        let mut byline = author_line(st, sep);
-        for x in [&views, &age].into_iter().flatten() {
-            byline.push_str(sep);
-            byline.push_str(x);
-        }
-        let my = 712.0;
-        let mut bx = 96.0 + ui::text_cut(p, f.measure, &byline, 96.0, my, 1728.0 - votes_w, 28, ui::DIM, ui::ALIGN_LEFT, false);
-        if let Some((likes, dislikes)) = votes {
-            bx += ui::text(p, "  \u{2022}  ", bx, my, 28, ui::DIM, ui::ALIGN_LEFT, false);
-            ui::icon::draw(p, ui::icon::Kind::ThumbUp, Rect::new(bx, my + 3.0, 26.0, 26.0), ui::DIM, false);
-            bx += 34.0;
-            bx += ui::text_raw(p, &likes, bx, my, 28, ui::DIM, ui::ALIGN_LEFT, false);
-            if let Some(d) = dislikes {
-                bx += ui::text(p, "  \u{2022}  ", bx, my, 28, ui::DIM, ui::ALIGN_LEFT, false);
-                ui::icon::draw(p, ui::icon::Kind::ThumbDown, Rect::new(bx, my + 6.0, 26.0, 26.0), ui::DIM, false);
-                bx += 34.0;
-                bx += ui::text_raw(p, &d, bx, my, 28, ui::DIM, ui::ALIGN_LEFT, false);
+        if !compact {
+            // The playlist being played, on a line of its own above the title.
+            if let Some(q) = playing_list(cx, &self.video_id) {
+                list_eyebrow(p, f.measure, &list_line(q, &self.video_id), 96.0, 592.0, 1728.0, 28);
             }
-        }
-        if let Some(subs) = &subs {
-            bx += ui::text_raw(p, &format!("{sep}{subs}"), bx, my, 28, ui::DIM, ui::ALIGN_LEFT, false);
-        }
-        // The chapter being played, at the right end of that line, in the room the line leaves.
-        if let Some(w) = &ex.watch {
-            if let Some(i) = yt_core::watch::chapter_at(&w.chapters, st.position_ms) {
-                let room = 1824.0 - (bx + 48.0);
-                if room > 120.0 {
-                    let t = format!("\u{25B6} {}", w.chapters[i].title);
-                    if ui::text_width(f.measure, &t, 28, false) <= room {
-                        ui::text_raw(p, &t, 1824.0, my, 28, ui::WHITE, ui::ALIGN_RIGHT, false);
-                    } else {
-                        ui::glide(p, f.measure, &t, 1824.0 - room, my, room, 28, ui::WHITE, false, ui::GLIDE_PLAYER_CHAPTER);
+            // Title and the line under it: channel, views, age, likes, dislikes, subscribers.
+            ui::glide(p, f.measure, &st.title, 96.0, 640.0, 1728.0, 50, ui::WHITE, true, ui::GLIDE_PLAYER_TITLE);
+            let votes: Option<(String, Option<String>)> = match (&ex.votes, ex.watch.as_ref().and_then(|w| w.like_count_text.clone())) {
+                (Some(v), _) => Some((ui::full_count(v.likes), Some(ui::full_count(v.dislikes)))),
+                (None, Some(l)) => Some((l, None)),
+                _ => None,
+            };
+            let sep = "  \u{2022}  ";
+            let views = ex.watch.as_ref().and_then(|w| w.short_view_count_text.clone());
+            let age = ex.watch.as_ref().and_then(common::video_age);
+            let subs = ex.watch.as_ref().and_then(|w| w.subscriber_count_text.clone());
+            // The width the votes take (icons, counts and their separators).
+            let sep_w = ui::text_width(f.measure, crate::i18n::tr(sep), 28, false);
+            let votes_w = votes.as_ref().map_or(0.0, |(l, d)| {
+                sep_w + 34.0 + ui::text_width(f.measure, l, 28, false) + d.as_ref().map_or(0.0, |d| sep_w + 34.0 + ui::text_width(f.measure, d, 28, false))
+            });
+            // Too long for the line: the subscribers go first, then the age, then the views.
+            let (views, age, subs) = fit_byline(
+                |v: Option<&str>, a: Option<&str>, sb: Option<&str>| {
+                    let mut t = author_line(st, sep);
+                    for x in [v, a].into_iter().flatten() {
+                        t.push_str(sep);
+                        t.push_str(x);
+                    }
+                    let mut w = ui::text_width(f.measure, &t, 28, false) + votes_w;
+                    if let Some(x) = sb {
+                        w += ui::text_width(f.measure, &format!("{sep}{x}"), 28, false);
+                    }
+                    w
+                },
+                1728.0,
+                views,
+                age,
+                subs,
+            );
+            let mut byline = author_line(st, sep);
+            for x in [&views, &age].into_iter().flatten() {
+                byline.push_str(sep);
+                byline.push_str(x);
+            }
+            let my = 712.0;
+            let mut bx = 96.0 + ui::text_cut(p, f.measure, &byline, 96.0, my, 1728.0 - votes_w, 28, ui::DIM, ui::ALIGN_LEFT, false);
+            if let Some((likes, dislikes)) = votes {
+                bx += ui::text(p, "  \u{2022}  ", bx, my, 28, ui::DIM, ui::ALIGN_LEFT, false);
+                ui::icon::draw(p, ui::icon::Kind::ThumbUp, Rect::new(bx, my + 3.0, 26.0, 26.0), ui::DIM, false);
+                bx += 34.0;
+                bx += ui::text_raw(p, &likes, bx, my, 28, ui::DIM, ui::ALIGN_LEFT, false);
+                if let Some(d) = dislikes {
+                    bx += ui::text(p, "  \u{2022}  ", bx, my, 28, ui::DIM, ui::ALIGN_LEFT, false);
+                    ui::icon::draw(p, ui::icon::Kind::ThumbDown, Rect::new(bx, my + 6.0, 26.0, 26.0), ui::DIM, false);
+                    bx += 34.0;
+                    bx += ui::text_raw(p, &d, bx, my, 28, ui::DIM, ui::ALIGN_LEFT, false);
+                }
+            }
+            if let Some(subs) = &subs {
+                bx += ui::text_raw(p, &format!("{sep}{subs}"), bx, my, 28, ui::DIM, ui::ALIGN_LEFT, false);
+            }
+            // The chapter being played, at the right end of that line, in the room the line leaves.
+            if let Some(w) = &ex.watch {
+                if let Some(i) = yt_core::watch::chapter_at(&w.chapters, st.position_ms) {
+                    let room = 1824.0 - (bx + 48.0);
+                    if room > 120.0 {
+                        let t = format!("\u{25B6} {}", w.chapters[i].title);
+                        if ui::text_width(f.measure, &t, 28, false) <= room {
+                            ui::text_raw(p, &t, 1824.0, my, 28, ui::WHITE, ui::ALIGN_RIGHT, false);
+                        } else {
+                            ui::glide(p, f.measure, &t, 1824.0 - room, my, room, 28, ui::WHITE, false, ui::GLIDE_PLAYER_CHAPTER);
+                        }
                     }
                 }
             }
         }
-        // Seek bar: one piece per chapter with a small clear gap between.
-        let bar = Rect::new(96.0, BAR_Y, 1728.0, 8.0);
+        // Seek bar: one piece per chapter with a small clear gap between. As SmartTube's: thicker
+        // with a white knob at the playhead while it has the focus (no button selected: Left /
+        // Right seek), thin and without the knob otherwise (#30).
+        let bar_focus = self.osd_sel.is_none();
+        let bh = if bar_focus { 12.0 } else { 8.0 };
+        let bar = Rect::new(96.0, BAR_Y + 4.0 - bh / 2.0, 1728.0, bh);
         let frac = if st.duration_ms > 0 { (self.seek_target.unwrap_or(st.position_ms) as f32 / st.duration_ms as f32).clamp(0.0, 1.0) } else { 0.0 };
         {
             let mut cuts: Vec<f32> = vec![0.0];
@@ -1328,10 +1406,10 @@ impl Screen<YtHost> for PlayerScreen {
                 if x1 <= x0 {
                     continue;
                 }
-                ui::fill(p, Rect::new(x0, bar.y, x1 - x0, bar.h), 4.0, [1.0, 1.0, 1.0, 0.28]);
+                ui::fill(p, Rect::new(x0, bar.y, x1 - x0, bar.h), bar.h / 2.0, [1.0, 1.0, 1.0, 0.28]);
                 let f1 = x1.min(px);
                 if f1 > x0 {
-                    ui::fill(p, Rect::new(x0, bar.y, f1 - x0, bar.h), 4.0, ui::accent());
+                    ui::fill(p, Rect::new(x0, bar.y, f1 - x0, bar.h), bar.h / 2.0, ui::accent());
                 }
             }
         }
@@ -1350,7 +1428,9 @@ impl Screen<YtHost> for PlayerScreen {
                 preview = Some((bar, frac));
             }
         }
-        ui::fill(p, Rect::new(bar.x + bar.w * frac - 11.0, bar.y - 7.0, 22.0, 22.0), 11.0, ui::WHITE);
+        if bar_focus {
+            ui::fill(p, Rect::new(bar.x + bar.w * frac - 12.0, bar.y + bar.h / 2.0 - 12.0, 24.0, 24.0), 12.0, ui::WHITE);
+        }
         // Right of the upper row: quality / codec / HDR, and the date and time.
         let mut quality = String::new();
         let h = if st.height > 0 { st.height } else { st.quality_hint };
@@ -1366,12 +1446,16 @@ impl Screen<YtHost> for PlayerScreen {
         if st.phase == Phase::Ended {
             quality = format!("{}  {quality}", crate::i18n::tr("Ended"));
         }
-        ui::text_raw(p, &quality, 1824.0, ROW_A_Y + 2.0, 26, ui::DIM, ui::ALIGN_RIGHT, false);
+        if !compact {
+            ui::text_raw(p, &quality, 1824.0, ROW_A_Y + 2.0, 26, ui::DIM, ui::ALIGN_RIGHT, false);
+        }
         if s.show_clock {
             // The date where it always was, beside the controls; the time in the top right corner
             // like on the video pages. Both leave with the controls, so nothing stays still on the
             // panel. A soft shade keeps the time legible over a bright picture.
-            ui::text(p, &common::date_text(), 1824.0, ROW_A_Y + 34.0, 26, ui::DIM, ui::ALIGN_RIGHT, false);
+            if !compact {
+                ui::text(p, &common::date_text(), 1824.0, ROW_A_Y + 34.0, 26, ui::DIM, ui::ALIGN_RIGHT, false);
+            }
             let time = common::clock(&cx.views);
             let w = 25.0 * time.chars().count() as f32 + 60.0;
             ui::fill(p, Rect::new(1852.0 - w, 22.0, w, 76.0), 24.0, [0.0, 0.0, 0.0, 0.45]);
@@ -1392,103 +1476,105 @@ impl Screen<YtHost> for PlayerScreen {
             let pos = format!("{}  /  {}", ui::fmt_time(st.position_ms), ui::fmt_time(st.duration_ms));
             ui::text(p, &pos, 1824.0, ROW_B_Y + 34.0, 28, ui::WHITE, ui::ALIGN_RIGHT, false);
         }
-        // The two rows of round buttons.
-        let w = st.extras.watch.as_ref();
-        let rated = rating(cx);
-        let liked = matches!(rated, Some(yt_core::watch::LikeStatus::Like));
-        let disliked = matches!(rated, Some(yt_core::watch::LikeStatus::Dislike));
-        let subscribed = subscribed_now(cx);
-        let saved = in_playlist(cx);
-        use ui::icon::Kind;
-        let play = if matches!(st.phase, Phase::Paused | Phase::Ended) { Kind::Play } else { Kind::Pause };
-        let repeat_icon = match s.playback_mode {
-            PlaybackMode::RepeatOne => Kind::Repeat1,
-            PlaybackMode::ListOnce => Kind::ListEnd,
-            PlaybackMode::ListRepeat => Kind::Repeat,
-            PlaybackMode::Shuffle => Kind::Shuffle,
-            PlaybackMode::Reverse => Kind::ListReverse,
-            PlaybackMode::PauseEach => Kind::PauseEnd,
-            PlaybackMode::CloseEach => Kind::Leave,
-            PlaybackMode::PlayNext => Kind::Autoplay,
-        };
-        let kinds = [
-            play,
-            Kind::Prev,
-            Kind::Next,
-            repeat_icon,
-            Kind::Gauge,
-            Kind::ScreenOff,
-            Kind::List,
-            Kind::Chat,
-            Kind::Search,
-            Kind::Gear,
-            Kind::User,
-            Kind::ThumbUp,
-            Kind::ThumbDown,
-            Kind::Cc,
-            Kind::ListPlus,
-            Kind::Bell,
-            Kind::Info,
-            Kind::Shield,
-        ];
-        let chapters = has_chapters(cx);
-        for (i, k) in kinds.iter().enumerate() {
-            let b = osd_button(i);
-            let hot = self.pointer.is_some_and(|(x, y)| b.contains(x, y)) || self.osd_sel == Some(i);
-            let off = (i == OSD_CHAPTERS && !chapters) || (i == OSD_SEARCH && s.child_mode) || (i == OSD_COMMENTS && s.child_mode);
-            let on = match i {
-                OSD_CC => s.subtitles,
-                OSD_LIKE => liked,
-                OSD_DISLIKE => disliked,
-                OSD_SUBSCRIBE => subscribed,
-                OSD_SAVE => saved,
-                OSD_SB => s.sponsorblock,
-                OSD_SPEED => (st.rate - 1.0).abs() > 0.01 && st.rate > 0.0,
-                OSD_REPEAT => s.playback_mode != PlaybackMode::PlayNext,
-                OSD_DIM => self.dimmed || s.screen_off_armed,
-                _ => false,
+        if !compact {
+            // The two rows of round buttons.
+            let w = st.extras.watch.as_ref();
+            let rated = rating(cx);
+            let liked = matches!(rated, Some(yt_core::watch::LikeStatus::Like));
+            let disliked = matches!(rated, Some(yt_core::watch::LikeStatus::Dislike));
+            let subscribed = subscribed_now(cx);
+            let saved = in_playlist(cx);
+            use ui::icon::Kind;
+            let play = if matches!(st.phase, Phase::Paused | Phase::Ended) { Kind::Play } else { Kind::Pause };
+            let repeat_icon = match s.playback_mode {
+                PlaybackMode::RepeatOne => Kind::Repeat1,
+                PlaybackMode::ListOnce => Kind::ListEnd,
+                PlaybackMode::ListRepeat => Kind::Repeat,
+                PlaybackMode::Shuffle => Kind::Shuffle,
+                PlaybackMode::Reverse => Kind::ListReverse,
+                PlaybackMode::PauseEach => Kind::PauseEnd,
+                PlaybackMode::CloseEach => Kind::Leave,
+                PlaybackMode::PlayNext => Kind::Autoplay,
             };
-            if hot {
-                ui::fill(p, b, b.h / 2.0, [1.0, 1.0, 1.0, 0.92]);
-            }
-            let ink = match (hot, off, on) {
-                (true, _, _) => [0.05, 0.05, 0.07, 1.0],
-                (false, true, _) => [1.0, 1.0, 1.0, 0.3],
-                (false, false, true) => ui::accent(),
-                _ => ui::WHITE,
-            };
-            let sz = if i <= OSD_NEXT { 30.0 } else { 34.0 };
-            let ir = Rect::new(b.x + (b.w - sz) / 2.0, b.y + (b.h - sz) / 2.0, sz, sz);
-            // The channel button shows the channel's picture when there is one.
-            let avatar = (i == OSD_CHANNEL).then(|| w.and_then(|w| w.channel_avatar.clone())).flatten();
-            let drawn = avatar.is_some_and(|url| {
-                let (tex, _, _) = plx_ui::tex::resolve_wh_on(0, &url, 0, 0, false);
-                if tex != 0 {
-                    let a = Rect::new(b.x + 10.0, b.y + 10.0, b.w - 20.0, b.h - 20.0);
-                    p.tex_uv(tex, [0.0, 0.0, 1.0, 1.0], a, a.w / 2.0, ui::dimmed(ui::WHITE));
+            let kinds = [
+                play,
+                Kind::Prev,
+                Kind::Next,
+                repeat_icon,
+                Kind::Gauge,
+                Kind::ScreenOff,
+                Kind::List,
+                Kind::Chat,
+                Kind::Search,
+                Kind::Gear,
+                Kind::User,
+                Kind::ThumbUp,
+                Kind::ThumbDown,
+                Kind::Cc,
+                Kind::ListPlus,
+                Kind::Bell,
+                Kind::Info,
+                Kind::Shield,
+            ];
+            let chapters = has_chapters(cx);
+            for (i, k) in kinds.iter().enumerate() {
+                let b = osd_button(i);
+                let hot = self.pointer.is_some_and(|(x, y)| b.contains(x, y)) || self.osd_sel == Some(i);
+                let off = (i == OSD_CHAPTERS && !chapters) || (i == OSD_SEARCH && s.child_mode) || (i == OSD_COMMENTS && s.child_mode);
+                let on = match i {
+                    OSD_CC => s.subtitles,
+                    OSD_LIKE => liked,
+                    OSD_DISLIKE => disliked,
+                    OSD_SUBSCRIBE => subscribed,
+                    OSD_SAVE => saved,
+                    OSD_SB => s.sponsorblock,
+                    OSD_SPEED => (st.rate - 1.0).abs() > 0.01 && st.rate > 0.0,
+                    OSD_REPEAT => s.playback_mode != PlaybackMode::PlayNext,
+                    OSD_DIM => self.dimmed || s.screen_off_armed,
+                    _ => false,
+                };
+                if hot {
+                    ui::fill(p, b, b.h / 2.0, [1.0, 1.0, 1.0, 0.92]);
                 }
-                tex != 0
-            });
-            if !drawn {
-                let filled = i <= OSD_NEXT || (on && (i == OSD_LIKE || i == OSD_DISLIKE || i == OSD_SAVE));
-                ui::icon::draw(p, *k, ir, ink, filled);
+                let ink = match (hot, off, on) {
+                    (true, _, _) => [0.05, 0.05, 0.07, 1.0],
+                    (false, true, _) => [1.0, 1.0, 1.0, 0.3],
+                    (false, false, true) => ui::accent(),
+                    _ => ui::WHITE,
+                };
+                let sz = if i <= OSD_NEXT { 30.0 } else { 34.0 };
+                let ir = Rect::new(b.x + (b.w - sz) / 2.0, b.y + (b.h - sz) / 2.0, sz, sz);
+                // The channel button shows the channel's picture when there is one.
+                let avatar = (i == OSD_CHANNEL).then(|| w.and_then(|w| w.channel_avatar.clone())).flatten();
+                let drawn = avatar.is_some_and(|url| {
+                    let (tex, _, _) = plx_ui::tex::resolve_wh_on(0, &url, 0, 0, false);
+                    if tex != 0 {
+                        let a = Rect::new(b.x + 10.0, b.y + 10.0, b.w - 20.0, b.h - 20.0);
+                        p.tex_uv(tex, [0.0, 0.0, 1.0, 1.0], a, a.w / 2.0, ui::dimmed(ui::WHITE));
+                    }
+                    tex != 0
+                });
+                if !drawn {
+                    let filled = i <= OSD_NEXT || (on && (i == OSD_LIKE || i == OSD_DISLIKE || i == OSD_SAVE));
+                    ui::icon::draw(p, *k, ir, ink, filled);
+                }
+                // The focused button's name under it (a tooltip, as SmartTube shows).
+                let name = if i == OSD_COMMENTS && super::live_chat::available(cx).is_some() { crate::i18n::tr("Live chat").to_string() } else { osd_label(i, cx) };
+                let name = name.as_str();
+                if self.osd_sel == Some(i) && i >= OSD_ROW_B {
+                    ui::text(p, name, b.x + b.w / 2.0, b.y + b.h + 6.0, 22, ui::WHITE, ui::ALIGN_CENTER, false);
+                } else if self.osd_sel == Some(i) {
+                    ui::text(p, name, b.x + b.w / 2.0, b.y - 32.0, 22, ui::WHITE, ui::ALIGN_CENTER, false);
+                }
             }
-            // The focused button's name under it (a tooltip, as SmartTube shows).
-            let name = if i == OSD_COMMENTS && super::live_chat::available(cx).is_some() { crate::i18n::tr("Live chat").to_string() } else { osd_label(i, cx) };
-            let name = name.as_str();
-            if self.osd_sel == Some(i) && i >= OSD_ROW_B {
-                ui::text(p, name, b.x + b.w / 2.0, b.y + b.h + 6.0, 22, ui::WHITE, ui::ALIGN_CENTER, false);
-            } else if self.osd_sel == Some(i) {
-                ui::text(p, name, b.x + b.w / 2.0, b.y - 32.0, 22, ui::WHITE, ui::ALIGN_CENTER, false);
+            // There is more below: the suggestions.
+            if let Some(&first) = rows(cx, &self.video_id).first().filter(|_| self.osd_sel.is_some_and(|i| i >= OSD_ROW_B)) {
+                let below = match (first, playing_list(cx, &self.video_id)) {
+                    (RowKind::Playlist, Some(q)) => list_line(q, &self.video_id),
+                    _ => crate::i18n::tr("Suggestions").to_string(),
+                };
+                ui::text_raw(p, &format!("\u{25BC}  {below}"), 960.0, 1030.0, 24, ui::DIM, ui::ALIGN_CENTER, false);
             }
-        }
-        // There is more below: the suggestions.
-        if let Some(&first) = rows(cx, &self.video_id).first().filter(|_| self.osd_sel.is_some_and(|i| i >= OSD_ROW_B)) {
-            let below = match (first, playing_list(cx, &self.video_id)) {
-                (RowKind::Playlist, Some(q)) => list_line(q, &self.video_id),
-                _ => crate::i18n::tr("Suggestions").to_string(),
-            };
-            ui::text_raw(p, &format!("\u{25BC}  {below}"), 960.0, 1030.0, 24, ui::DIM, ui::ALIGN_CENTER, false);
         }
         if let Some((bar, frac)) = preview {
             storyboard_preview(p, st, bar, frac);
@@ -2492,5 +2578,30 @@ mod refusal_tests {
         assert_eq!(refusal_text("no client could play abc: Profile(tv): ERROR boom", false), None);
         assert_eq!(refusal_text("Sign in to confirm you're not a bot", true), Some("YouTube is checking this network for bots. Try again in a few minutes."));
         assert_eq!(refusal_text("Sign in to confirm you're not a bot", false), Some("YouTube asks to confirm you're not a bot: try again later, or sign in."));
+    }
+}
+
+#[cfg(test)]
+mod seek_tests {
+    use super::PlayerScreen;
+
+    #[test]
+    fn a_held_seek_speeds_up_every_second_as_smarttube() {
+        let mut p = PlayerScreen::new(plx_machine::machine::EntryId(1), "v".into(), None);
+        let base = 10_000;
+        // A press: the setting's step.
+        p.seek_repeat = false;
+        assert_eq!(p.held_step(1, base, 0), base);
+        // Repeats in the first second: the same step; after a second: 1.5 times, and again.
+        p.seek_repeat = true;
+        assert_eq!(p.held_step(1, base, 500), base);
+        assert_eq!(p.held_step(1, base, 1000), 15_000);
+        assert_eq!(p.held_step(1, base, 1500), 15_000);
+        assert_eq!(p.held_step(1, base, 2000), 22_500);
+        // A new press starts over; so does the other direction.
+        p.seek_repeat = false;
+        assert_eq!(p.held_step(1, base, 2100), base);
+        p.seek_repeat = true;
+        assert_eq!(p.held_step(-1, base, 3200), base);
     }
 }
