@@ -81,9 +81,10 @@ pub struct PlayerScreen {
     /// YouTube style: where each control was drawn last frame (pointer hits), and the seek bar.
     yt_rects: Vec<(usize, Rect)>,
     yt_bar: Rect,
-    /// SmartTube style: the button each row had when the focus went from it to the seek bar
-    /// (upper, lower), where Up / Down from the bar go back to.
-    osd_mem: (usize, usize),
+    /// SmartTube style: the lower row's button the focus last went up from to the seek bar, where
+    /// Down from the bar goes back to. Up on the bar hides the controls, as it always did (Up
+    /// shows them, Up again hides them).
+    osd_mem: usize,
     /// SmartTube style: seeking from the bar shows only the bar and the times (and the storyboard
     /// frame), as SmartTube's compact mode does, until another key than the seek keys is pressed.
     compact: bool,
@@ -119,7 +120,7 @@ impl PlayerScreen {
             back_swallow_up: false,
             yt_rects: Vec::new(),
             yt_bar: Rect::new(0.0, 0.0, 0.0, 0.0),
-            osd_mem: (OSD_PLAY, OSD_ROW_B),
+            osd_mem: OSD_ROW_B,
             compact: false,
             seek_run: None,
             seek_repeat: false,
@@ -947,10 +948,7 @@ impl Machine<YtHost> for PlayerScreen {
                         Key::Right => self.osd_sel = Some((sel + 1).min(row.end - 1)),
                         // The seek bar lies between the two rows, as in SmartTube: Down from the
                         // upper row and Up from the lower one go to it.
-                        Key::Down if sel < OSD_ROW_B => {
-                            self.osd_mem.0 = sel;
-                            self.osd_sel = None;
-                        }
+                        Key::Down if sel < OSD_ROW_B => self.osd_sel = None,
                         Key::Down => {
                             // Below the lower row: the playlist, the suggestions.
                             self.enter_rows(cx);
@@ -958,7 +956,6 @@ impl Machine<YtHost> for PlayerScreen {
                         Key::Ok => self.press_osd(sel, cx, fx),
                         Key::Up if sel < OSD_ROW_B => {
                             // Above the upper row: the controls hide (SmartTube's top edge).
-                            self.osd_mem.0 = sel;
                             self.hud = false;
                             self.osd_sel = None;
                             fx.push(Fx::CancelTimer(T_HIDE));
@@ -966,10 +963,8 @@ impl Machine<YtHost> for PlayerScreen {
                             return Handled::Yes;
                         }
                         Key::Up | Key::Back => {
-                            if sel < OSD_ROW_B {
-                                self.osd_mem.0 = sel;
-                            } else {
-                                self.osd_mem.1 = sel;
+                            if sel >= OSD_ROW_B {
+                                self.osd_mem = sel;
                             }
                             self.osd_sel = None;
                         }
@@ -1085,12 +1080,6 @@ impl Machine<YtHost> for PlayerScreen {
                         self.step_queue(if *key == Key::Up { -1 } else { 1 }, cx, fx);
                         Handled::Yes
                     }
-                    (Key::Up, _) if self.hud && !yt_style(cx) => {
-                        // SmartTube style, on the seek bar: up to the upper row of buttons.
-                        self.osd_sel = Some(self.osd_mem.0);
-                        self.show_hud(cx, fx);
-                        Handled::Yes
-                    }
                     (Key::Up, _) => {
                         // Up shows / hides the on-screen controls.
                         if self.hud {
@@ -1117,7 +1106,7 @@ impl Machine<YtHost> for PlayerScreen {
                     }
                     (Key::Down, _) if self.hud && !yt_style(cx) => {
                         // SmartTube style, on the seek bar: down to the lower row of buttons.
-                        self.osd_sel = Some(self.osd_mem.1);
+                        self.osd_sel = Some(self.osd_mem);
                         self.show_hud(cx, fx);
                         Handled::Yes
                     }
